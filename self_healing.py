@@ -65,7 +65,8 @@ def main():
         success, logs = run_mumei()
 
         if success:
-            print(f"✅ Success! Blade is flawless (Attempt {attempt}).")
+            print(f"✅ Success! Blade is flawless (Attempt {attempt + 1}).")
+
             return
 
         print(f"⚠️  Attempt {attempt + 1}: Flaw detected. Consulting AI...")

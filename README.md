@@ -24,7 +24,7 @@ Mumeiは以下の5つの工程（鍛造プロセス）を経て、実行バイ�
 
 * **LLVM 15:** ネイティブコード生成用
 * **Z3 Solver:** 論理検証用
-* **Python 3.x:** ビジュアライザーおよび自己修復スクリプト用
+* **Python 3.x:** ビジュアライザー、修復スクリプト、MCPサーバー用
 
 ```bash
 # macOS
@@ -34,13 +34,13 @@ brew install llvm@15 z3
 sudo apt install llvm-15-dev libz3-dev
 
 # Python dependencies
-pip install streamlit pandas python-dotenv openai
+pip install streamlit pandas python-dotenv openai mcp-server-fastmcp
 
 ```
 
 ### 2. 環境変数の設定
 
-自己修復機能を利用する場合、ルートディレクトリに `.env` ファイルを作成してください。
+ルートディレクトリに `.env` ファイルを作成してください。 **※ `.env` ファイルは Git の追跡から除外してください。**
 
 ```text
 OPENAI_API_KEY=your_api_key_here
@@ -49,9 +49,43 @@ OPENAI_API_KEY=your_api_key_here
 
 ---
 
+## 🤖 MCP Server (AI Agent Integration)
+
+Mumeiは **Model Context Protocol (MCP)** に対応しています。これを導入することで、Claude などの AI エージェントが自ら「Mumei 職人」としてコードの鍛造と修正を行うようになります。
+
+### 1. Claude Desktop への登録
+
+`claude_desktop_config.json` に以下の設定を追記します。
+
+* **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+* **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
+
+```json
+{
+  "mcpServers": {
+    "mumei": {
+      "command": "python",
+      "args": ["/絶対パス/to/mumei/mcp_server.py"],
+      "env": {
+        "OPENAI_API_KEY": "your_api_key_here"
+      }
+    }
+  }
+}
+
+```
+
+### 2. 提供されるツール (Tools)
+
+* **`forge_blade`**: Mumeiコードを書き出し、検証・コンパイル・Rust変換を一括実行。
+* **`inspect_flaws`**: 検証失敗時の反例（レポート）を取得。
+* **`self_heal_loop`**: 検証をパスするまでAIが自律的にコードを修正。
+
+---
+
 ## 📖 使い方 (Usage)
 
-### 1. 鍛造 (コンパイル・検証・変換)
+### 1. 手動での鍛造
 
 ```bash
 # 検証、LLVM IR生成、Rustコード変換を一度に行います
@@ -86,6 +120,7 @@ Mumeiは単に「エラー」を返すだけでなく、**なぜその論理が�
 * `src/transpiler.rs`: 検証済み `atom` を Rust ソースコードへ変換。
 * `src/codegen.rs`: LLVM IR 生成。
 * `self_healing.py`: AIによる自律的な論理修正スクリプト。
+* `mcp_server.py`: AIエージェント接続用 MCP サーバー。
 * `visualizer/app.py`: Streamlitベースの検証結果ダッシュボード。
 
 ---
@@ -93,6 +128,8 @@ Mumeiは単に「エラー」を返すだけでなく、**なぜその論理が�
 ## 🗺️ ロードマップ (Roadmap)
 
 * [x] **Mumei Visualizer:** 検証プロセスの可視化。
-* [x] **Mumei Transpiler:** 検証済みコードを Rust へ変換（ドキュメント・アサーション付与）。
-* [x] **Self-Healing Loop:** AIによる自律的な論理修正機能（OpenAI API / dotenv 連携）。
-* [ ] **Mumei MCP Server:** AIエージェントが Mumei を思考の道具として直接操作できるインターフェース。
+* [x] **Mumei Transpiler:** 検証済みコードを Rust へ変換。
+* [x] **Self-Healing Loop:** AIによる自律的な論理修正機能。
+* [x] **Mumei MCP Server:** AIエージェント用インターフェースの実装。
+
+---

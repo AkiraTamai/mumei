@@ -1,0 +1,13 @@
+# 環境変数ファイル
+.env
+.env.*
+!.env.example
+
+# Rust ビルド成果物
+/target
+Cargo.lock
+
+# Mumei 生成物
+visualizer/report.json
+*.ll
+*.rs

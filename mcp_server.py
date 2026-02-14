@@ -73,6 +73,7 @@ def self_heal_loop() -> str:
     """
     root_dir = Path(__file__).parent.absolute()
     result = subprocess.run(
+    result = subprocess.run(
         ["python", "self_healing.py"],
         cwd=root_dir,
         capture_output=True,

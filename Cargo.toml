@@ -1,0 +1,11 @@
+[package]
+name = "mumei"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pest = "2.7"
+pest_derive = "2.7"
+z3 = "0.12"
+inkwell = { version = "0.2", features = ["llvm15-0"] }
+clap = { version = "4.4", features = ["derive"] }

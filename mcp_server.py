@@ -53,7 +53,10 @@ def self_heal_loop() -> str:
         ["python", "self_healing.py"],
         capture_output=True, text=True
     )
-    return result.stdout
+    if result.returncode == 0:
+        return result.stdout
+    else:
+        return f"❌ 自律修正失敗:\n{result.stderr}\n{result.stdout}"
 
 if __name__ == "__main__":
     mcp.run()

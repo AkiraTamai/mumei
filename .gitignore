@@ -10,4 +10,4 @@ Cargo.lock
 # Mumei 生成物
 visualizer/report.json
 *.ll
-*.rs
+/*.rs

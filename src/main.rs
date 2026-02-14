@@ -27,8 +27,13 @@ fn main() {
     let atom = parser::parse(&source);
     println!("  ✨ [1/4] Polishing Syntax: Atom '{}' identified.", atom.name);
 
+    // 出力先ファイルの親ディレクトリを取得（一時ディレクトリ対応）
+    let output_path = Path::new(&cli.output);
+    let output_dir = output_path.parent().unwrap_or(Path::new("."));
+
     // 2. Verification (The Ritual of Truth)
-    match verification::verify(&atom) {
+    // 第二引数に output_dir を渡す
+    match verification::verify(&atom, output_dir) {
         Ok(_) => println!("  ⚖️  [2/4] Verification: Passed. The logic is flawless."),
         Err(e) => {
             eprintln!("  ❌ [2/4] Verification: Failed! Flaw detected in logic: {}", e);

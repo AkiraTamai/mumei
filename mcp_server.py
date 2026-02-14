@@ -15,21 +15,18 @@ mcp = FastMCP("Mumei-Forge")
 @mcp.tool()
 def forge_blade(source_code: str, output_name: str = "katana") -> str:
     """
-    Mumei言語のコードを一時ディレクトリで検証・コンパイルし、各言語のソースを出力します。
-    並行実行しても他のリクエストと干渉しません。
+    Mumeiコードを検証し、Rust/Go/TSコードを生成します。
+    検証レポートを含め、すべての一時ファイルは隔離されており並行実行しても安全です。
     """
-    # プロジェクトのルートディレクトリ（このファイルがある場所）を特定
     root_dir = Path(__file__).parent.absolute()
 
-    # 1. スレッドセーフな一時ディレクトリを作成
+    # 1. リクエストごとに完全隔離された一時ディレクトリを作成
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_path = Path(tmpdir)
         source_path = tmp_path / "input.mm"
-
-        # 思考内容を一時ファイルに書き出し
         source_path.write_text(source_code, encoding="utf-8")
 
-        # 2. コンパイラ実行 (cwdをプロジェクトルートに固定し、出力先を一時フォルダに指定)
+        # 2. コンパイラ実行 (出力先を一時ディレクトリに指定)
         output_base = tmp_path / output_name
 
         result = subprocess.run(
@@ -39,37 +36,35 @@ def forge_blade(source_code: str, output_name: str = "katana") -> str:
             text=True
         )
 
-        if result.returncode == 0:
-            # 成功時：生成された成果物（.rs, .go, .tsなど）の内容を集約して返す
-            response_parts = [f"✅ 鍛造成功: '{output_name}'"]
+        response_parts = []
 
-            # 生成される可能性のある拡張子を走査
+        # --- 🔍 隔離されたレポートの読み込み (並行安全の核心) ---
+        # verification.rs が --output で指定したディレクトリに report.json を出す前提
+        report_file = tmp_path / "report.json"
+        if report_file.exists():
+            report_data = report_file.read_text(encoding="utf-8")
+            response_parts.append(f"### 🔍 検証レポート (Verification Report)\n```json\n{report_data}\n```")
+
+        if result.returncode == 0:
+            response_parts.insert(0, f"✅ 鍛造成功: '{output_name}'")
+            # 成果物の収集
             for ext in [".rs", ".go", ".ts", ".ll"]:
                 gen_file = tmp_path / f"{output_name}{ext}"
                 if gen_file.exists():
                     content = gen_file.read_text(encoding="utf-8")
-                    response_parts.append(f"\n### {output_name}{ext}\n```\n{content}\n```")
+                    response_parts.append(f"\n### 生成コード: {output_name}{ext}\n```rust\n{content}\n```")
 
             return "\n".join(response_parts)
         else:
-            # 失敗時：エラー出力（Z3の反例など）を返す
-            return f"❌ 鍛造失敗 (論理欠陥検出):\n{result.stderr}"
+            # 失敗時：論理欠陥の証拠（レポート）とエラーログをセットで返す
+            response_parts.insert(0, f"❌ 鍛造失敗: 論理的な欠陥が証明されました。")
+            if result.stderr:
+                response_parts.append(f"\n### エラー詳細\n{result.stderr}")
 
-@mcp.tool()
-def inspect_flaws() -> str:
-    """
-    最新の検証レポートを読み取り、論理の反例（バグの原因）を返します。
-    """
-    report_path = Path(__file__).parent / "visualizer" / "report.json"
-    if not report_path.exists():
-        return "検証レポートが見つかりません。先に forge_blade を実行してください。"
+            return "\n".join(response_parts)
 
-    try:
-        with open(report_path, "r", encoding="utf-8") as f:
-            report = json.load(f)
-        return json.dumps(report, indent=2, ensure_ascii=False)
-    except Exception as e:
-        return f"レポート読み込みエラー: {str(e)}"
+# ※ inspect_flaws は並行環境で競合を引き起こすため廃止
+# AIは forge_blade のレスポンスに含まれるレポートを直接利用します。
 
 @mcp.tool()
 def self_heal_loop() -> str:

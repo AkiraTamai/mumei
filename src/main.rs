@@ -49,7 +49,10 @@ fn main() {
     println!("  🦀 [4/4] Sharpening: Exporting verified Rust source...");
     match transpiler::transpile_to_rust(&atom, Path::new(&cli.output)) {
         Ok(_) => println!("  ✅ Done. Created '{}.rs'", cli.output),
-        Err(e) => eprintln!("  ❌ Transpiling failed: {}", e),
+        Err(e) => {
+            eprintln!("  ❌ Transpiling failed: {}", e);
+            std::process::exit(1);
+        }
     }
 
     println!("🎉 Blade forged and sharpened successfully.");

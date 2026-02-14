@@ -52,7 +52,7 @@ def get_fix_from_ai(source_code, error_log, report_data):
                   {"role": "user", "content": prompt}]
     )
 
-    content = response.choices[0].message.content
+    content = response.choices[0].message.content or ""
     # コードブロック部分のみ抽出
     if "```rust" in content:
         return content.split("```rust")[1].split("```")[0].strip()

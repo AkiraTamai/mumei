@@ -81,7 +81,8 @@ def self_heal_loop() -> str:
         ["python", "self_healing.py"],
         cwd=root_dir,
         capture_output=True,
-        text=True
+        text=True,
+        timeout=300
     )
     if result.returncode == 0:
         return f"✅ 自律修正完了:\n{result.stdout}"

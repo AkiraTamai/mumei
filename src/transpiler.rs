@@ -15,7 +15,11 @@ pub fn transpile_to_rust(atom: &Atom, output_path: &Path) -> Result<(), String> 
 
     // 2. 関数シグネチャの生成
     // 現状は i32 型を想定。引数リストをRust形式に変換
-    let params = atom.params.join(": i32, ") + ": i32";
+    let params = if atom.params.is_empty() {
+        String::new()
+    } else {
+        atom.params.join(": i32, ") + ": i32"
+    };
     rust_code.push_str(&format!("pub fn {}({}) -> i32 {{\n", atom.name, params));
 
     // 3. 事前条件のランタイムチェック (Option: 安全性の二重化)

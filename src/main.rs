@@ -1,6 +1,7 @@
 mod parser;
 mod verification;
 mod codegen;
+mod transpiler; // ★追加: トランスパイラモジュールの宣言
 
 use clap::Parser;
 use std::fs;
@@ -24,22 +25,32 @@ fn main() {
 
     // 1. Parsing
     let atom = parser::parse(&source);
-    println!("  ✨ [1/3] Polishing Syntax: Atom '{}' identified.", atom.name);
+    println!("  ✨ [1/4] Polishing Syntax: Atom '{}' identified.", atom.name);
 
     // 2. Verification (The Ritual of Truth)
     match verification::verify(&atom) {
-        Ok(_) => println!("  ⚖️  [2/3] Verification: Passed. The logic is flawless."),
+        Ok(_) => println!("  ⚖️  [2/4] Verification: Passed. The logic is flawless."),
         Err(e) => {
-            eprintln!("  ❌ [2/3] Verification: Failed! Flaw detected in logic: {}", e);
+            eprintln!("  ❌ [2/4] Verification: Failed! Flaw detected in logic: {}", e);
             std::process::exit(1);
         }
     }
 
-    // 3. Codegen (The Tempering)
+    // 3. Codegen (The Tempering - LLVM IR)
     match codegen::compile(&atom, Path::new(&cli.output)) {
-        Ok(_) => println!("  ⚙️  [3/3] Tempering: Done. Created '{}.ll'", cli.output),
-        Err(e) => eprintln!("  ❌ [3/3] Tempering: Failed! {}", e),
+        Ok(_) => println!("  ⚙️  [3/4] Tempering: Done. Created '{}.ll'", cli.output),
+        Err(e) => {
+            eprintln!("  ❌ [3/4] Tempering: Failed! {}", e);
+            std::process::exit(1);
+        }
     }
 
-    println!("🎉 Blade forged successfully.");
+    // 4. Transpile (The Sharpening - Rust Source) ★追加
+    println!("  🦀 [4/4] Sharpening: Exporting verified Rust source...");
+    match transpiler::transpile_to_rust(&atom, Path::new(&cli.output)) {
+        Ok(_) => println!("  ✅ Done. Created '{}.rs'", cli.output),
+        Err(e) => eprintln!("  ❌ Transpiling failed: {}", e),
+    }
+
+    println!("🎉 Blade forged and sharpened successfully.");
 }

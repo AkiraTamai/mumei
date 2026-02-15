@@ -2,42 +2,42 @@
 
 **Mathematical Proof-Driven Programming Language for AI Agents.**
 
-「無銘（Mumei）」は、作者の個性を排し、数学的な「正しさ」のみを追求するAIネイティブなプログラミング言語です。AIがコードを生成する際、実行前にその論理的欠陥を数学的に証明・排除し、不純物のない「真実のコード」のみをマシンコード（LLVM）および検証済みソースコード（Rust/Go/TS）へと昇華させます。
+**Mumei (無銘)** is an AI-native programming language designed to eliminate the developer's personality and pursue only mathematical "truth." When an AI generates code, Mumei mathematically proves and eliminates logical flaws before execution, refining the "pure code" into machine code (LLVM) and verified source code (Rust/Go/TypeScript).
 
 ---
 
 ## ⚖️ Comparison with Formal Methods
 
-Mumeiは、LeanやCoqのような重厚な定理証明支援系と、現代的なアプリケーション開発の架け橋となるべく設計されています。
+Mumei is designed to bridge the gap between heavyweight formal proof assistants like Lean or Coq and modern application development.
 
-| 特徴 | Lean 4 / Coq | Mumei |
-| :--- | :--- | :--- |
-| 検証の主体 | 人間（数学的知識が必要） | SMTソルバ（AIによる自動検証） |
-| 学習コスト | 非常に高い | 低（一般的なプログラミングに近い） |
-| 主な出力 | 独自のランタイム / C | Rust, Go, TypeScript, LLVM |
-| AIエージェント | 補助的な利用 | 開発の主体（自律修正ループ） |
-
----
-
-## 🛠️ 設計思想 (Design Philosophy)
-
-Mumeiは以下の5つの工程（鍛造プロセス）を経て、実行バイナリ、検証済みソース、および検証レポートを生成します。
-
-1. **Polishing (Parser):** `atom` と呼ばれる極小の関数単位でコードを解析します。`if-else` 分岐、`let` による変数束縛、ブロック構文 `{}` をサポート。
-2. **The Ritual of Truth (Verification):** Z3 SMT Solverを用い、事前条件 (`requires`) が実装 (`body`) の安全性を数学的に担保しているか検証します。
-3. **Visual Inspection (Visualizer):** 検証で発見された「論理の亀裂（反例）」をリアルタイムで視覚化します。
-4. **Tempering (Codegen):** 検証をパスしたコードを LLVM IR へと変換し、高速な実行能力を与えます。
-5. **Sharpening (Transpiler):** 検証済みロジックを、ドキュメントとアサーション付きの高品質な **Rust/Go/TypeScript** コードとして出力します。
+| Feature | Lean 4 / Coq | Mumei |
+| --- | --- | --- |
+| **Verification Lead** | Human (Requires math expertise) | SMT Solver (Automated AI verification) |
+| **Learning Curve** | Extremely Steep | Moderate (Close to standard coding) |
+| **Primary Output** | Custom Runtime / C | Rust, Go, TypeScript, LLVM |
+| **AI Agent Role** | Auxiliary / Experimental | Primary Driver (Self-healing loops) |
 
 ---
 
-## 🚀 セットアップ (Installation)
+## 🛠️ Design Philosophy
 
-### 1. 依存ライブラリの導入
+Mumei generates executable binaries, verified source code, and verification reports through five distinct stages (The Forging Process):
 
-* **LLVM 15:** ネイティブコード生成用
-* **Z3 Solver:** 論理検証用
-* **Python 3.x:** ビジュアライザー、修復スクリプト、MCPサーバー用
+1. **Polishing (Parser):** Analyzes code in minimal functional units called `atoms`. Supports `if-else` branching, `let` variable bindings, and block syntax `{}`.
+2. **The Ritual of Truth (Verification):** Utilizes the Z3 SMT Solver to mathematically guarantee that the implementation (`body`) satisfies the safety requirements (`requires`).
+3. **Visual Inspection (Visualizer):** Real-time visualization of "logical fractures" (counter-examples) discovered during verification.
+4. **Tempering (Codegen):** Converts verified code into LLVM IR, granting high-performance execution capabilities.
+5. **Sharpening (Transpiler):** Exports verified logic as high-quality **Rust, Go, and TypeScript** source code complete with documentation and assertions.
+
+---
+
+## 🚀 Installation
+
+### 1. Install Dependencies
+
+* **LLVM 15:** For native code generation.
+* **Z3 Solver:** For formal logic verification.
+* **Python 3.x:** For the visualizer, healing scripts, and MCP server.
 
 ```bash
 # macOS
@@ -51,9 +51,9 @@ pip install streamlit pandas python-dotenv openai mcp-server-fastmcp
 
 ```
 
-### 2. 環境変数の設定
+### 2. Configure Environment Variables
 
-ルートディレクトリに `.env` ファイルを作成してください。
+Create a `.env` file in the root directory.
 
 ```text
 OPENAI_API_KEY=your_api_key_here
@@ -64,46 +64,45 @@ OPENAI_API_KEY=your_api_key_here
 
 ## 🤖 MCP Server (AI Agent Integration)
 
-Mumeiは **Model Context Protocol (MCP)** に対応しており、AIエージェントが自律的に「正しいコード」を鍛造するための道具として機能します。
+Mumei supports the **Model Context Protocol (MCP)**, functioning as a tool for AI agents to autonomously forge "correct code."
 
-### 提供されるツール (Tools)
+### Available Tools
 
-* **`forge_blade`**: Mumeiコードを検証・コンパイル・マルチ言語変換（Rust/Go/TS）し、検証レポートを一括返却します。
-* **`self_heal_loop`**: 検証失敗時にAIが自律的に修正を行うループを実行します。
-
----
-
-## 📂 プロジェクト構造
-
-* `src/parser.rs`: AST定義、`if-else` / `let` / `block` の構文解析。
-* `src/verification.rs`: Z3による形式検証。条件分岐を考慮した `Ite` 論理の構築。
-* `src/transpiler.rs`: 多言語変換エンジン（Rust, Go, TypeScript）。
-* `src/codegen.rs`: LLVM IR 生成。
-* `src/main.rs`: 鍛造司令塔。一括出力パイプラインの制御。
+* **`forge_blade`**: Verifies, compiles, and transpiles Mumei code into multiple languages (Rust/Go/TS), returning the verification report in a single pass.
+* **`self_heal_loop`**: Triggers an autonomous loop where the AI fixes code until it passes verification.
 
 ---
 
-## 🗺️ ロードマップ (Roadmap)
+## 📂 Project Structure
 
-* [x] **Multi-Language Support:** Rust, Go, TypeScript へのトランスパイル。
-* [x] **Control Flow:** `if-else` 分岐および `let` 変数束縛のサポート。
-* [x] **Stateless MCP Server:** 並行安全な一時ディレクトリ方式の実装。
-* [ ] **Loop Support:** `for` / `while` 構文および **ループ不変量 (Loop Invariant)** による形式検証。
-* [ ] **Standard Library:** 配列操作、数学関数、文字列処理の検証済みセットの拡充。
-* [ ] **Type System 2.0**: 符号なし整数 (u64)、浮動小数点数 (f64) のネイティブ検証サポート。
-* [ ] **Refinement Types**: 型定義自体に制約を持たせる「篩型」の導入
-* [ ] **VS Code Extension:** エディタ上でのリアルタイム検証エラー表示（Language Server Protocol対応）。
-* [ ] **etc**: ・・・
+* `src/parser.rs`: AST definition, syntax parsing for `if-else`, `let`, and `blocks`.
+* `src/verification.rs`: Formal verification via Z3. Implements `Ite` (If-Then-Else) logic for branching.
+* `src/transpiler.rs`: Multi-language export engine (Rust, Go, TypeScript).
+* `src/codegen.rs`: LLVM IR generation.
+* `src/main.rs`: The Forging Commander. Orchestrates the output pipeline.
 
 ---
 
-## 📖 ワークフローの手順（具体例）
+## 🗺️ Roadmap
 
-Mumei は、以下の 4 ステップで「仕様」を「多言語の実装」へ変換します。
+* [x] **Multi-Language Support:** Transpilation to Rust, Go, and TypeScript.
+* [x] **Control Flow:** Support for `if-else` branching and `let` variable bindings.
+* [x] **Stateless MCP Server:** Implementation of thread-safe temporary directory isolation.
+* [ ] **Loop Support:** Support for `for` / `while` syntax and **Loop Invariant** formal verification.
+* [ ] **Standard Library:** Expanded sets for array manipulation, math functions, and string processing.
+* [ ] **Type System 2.0:** Native verification support for unsigned integers (u64) and floating-point (f64).
+* [ ] **Refinement Types:** Introduction of types with intrinsic constraints (e.g., `where value > 0`).
+* [ ] **VS Code Extension:** Real-time verification error feedback (LSP support).
 
-### 1. Atom の定義 (`sword_test.mm`)
+---
 
-数学的な制約を含むコードを記述します。ここでは「分母 `b` が `0` のときは安全に `0` を返し、それ以外は除算する」というロジックを書きます。
+## 📖 Workflow Tutorial (Example)
+
+Mumei transforms "specifications" into "multi-language implementations" in four steps:
+
+### 1. Define an Atom (`sword_test.mm`)
+
+Write code including mathematical constraints. In this example, we define logic that safely returns `0` if the divisor `b` is `0`, otherwise performs division.
 
 ```mumei
 atom safe_divide(a, b)
@@ -122,23 +121,23 @@ body: {
 
 ```
 
-### 2. 検証とコンパイルの実行
+### 2. Run Verification and Compilation
 
 ```bash
 cargo run -- sword_test.mm --output katana
 
 ```
 
-### 3. プロセスの内部動作
+### 3. Internal Process Mechanics
 
-1. **Polishing:** `if-else` や `let res = ...` が AST（抽象構文木）に変換されます。
-2. **Verification:** Z3 が「`b` が `0` の可能性があるか？」を確認します。この例では `if b == 0` でガードされているため、**除算パスに `b=0` が入り込まないことが数学的に証明**され、検証をパスします。
-3. **Tempering:** 高速な実行用の中間コード `katana.ll` が生成されます。
-4. **Sharpening:** 検証済みロジックが 3 言語で書き出されます。
+1. **Polishing:** The `if-else` and `let` blocks are converted into an Abstract Syntax Tree (AST).
+2. **Verification:** Z3 checks if there is any case where `b` could be `0`. Since the division is guarded by the `if b == 0` check, **it is mathematically proven that the division path never encounters b=0**, and verification passes.
+3. **Tempering:** High-speed intermediate code `katana.ll` is generated.
+4. **Sharpening:** The verified logic is exported as source files for three target languages.
 
-### 4. 生成物の確認
+### 4. Verify Artifacts
 
-検証をパスすると、以下のファイルが自動生成されます。
+Upon successful verification, the following files are automatically generated:
 
 * **`katana.rs` (Rust):** `pub fn safe_divide(a: i64, b: i64) -> i64 { ... }`
 * **`katana.go` (Go):** `func safe_divide(a int64, b int64) int64 { ... }`

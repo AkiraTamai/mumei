@@ -42,7 +42,15 @@ fn format_expr_go(expr: &Expr) -> String {
             )
         },
         Expr::Let { var, value, body: _ } => {
-            format!("{} := {}", var, format_expr_go(value))
+            match value.as_ref() {
+                Expr::IfThenElse { cond, then_branch, else_branch } => {
+                    format!(
+                        "var {} int64\n    if {} {{\n        {} = {}\n    }} else {{\n        {} = {}\n    }}",
+                        var, format_expr_go(cond), var, format_expr_go(then_branch), var, format_expr_go(else_branch)
+                    )
+                },
+                _ => format!("{} := {}", var, format_expr_go(value))
+            }
         },
         Expr::Assign { var, value } => {
             format!("{} = {}", var, format_expr_go(value))

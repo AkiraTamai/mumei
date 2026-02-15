@@ -1,5 +1,5 @@
 use inkwell::context::Context;
-use inkwell::values::{IntValue, FunctionValue};
+use inkwell::values::{IntValue, FunctionValue, PhiValue};
 use inkwell::builder::Builder;
 use inkwell::module::Module;
 use inkwell::IntPredicate;
@@ -128,9 +128,21 @@ fn compile_expr<'a>(
             let body_block = context.append_basic_block(*function, "loop.body");
             let after_block = context.append_basic_block(*function, "loop.after");
 
+            let pre_loop_vars = variables.clone();
+            let entry_end_block = builder.get_insert_block().unwrap();
+
             builder.build_unconditional_branch(header_block).map_err(|e| e.to_string())?;
 
             builder.position_at_end(header_block);
+            let mut phi_nodes: Vec<(String, PhiValue<'a>)> = Vec::new();
+            for (name, pre_val) in &pre_loop_vars {
+                let phi = builder.build_phi(context.i64_type(), &format!("phi_{}", name))
+                    .map_err(|e| e.to_string())?;
+                phi.add_incoming(&[(pre_val, entry_end_block)]);
+                phi_nodes.push((name.clone(), phi));
+                variables.insert(name.clone(), phi.as_basic_value().into_int_value());
+            }
+
             let cond_val = compile_expr(context, builder, module, function, cond, variables)?;
             let cond_bool = builder.build_int_compare(
                 IntPredicate::NE,
@@ -143,9 +155,20 @@ fn compile_expr<'a>(
 
             builder.position_at_end(body_block);
             compile_expr(context, builder, module, function, body, variables)?;
+            let body_end_block = builder.get_insert_block().unwrap();
+
+            for (name, phi) in &phi_nodes {
+                if let Some(body_val) = variables.get(name) {
+                    phi.add_incoming(&[(body_val, body_end_block)]);
+                }
+            }
+
             builder.build_unconditional_branch(header_block).map_err(|e| e.to_string())?;
 
             builder.position_at_end(after_block);
+            for (name, phi) in &phi_nodes {
+                variables.insert(name.clone(), phi.as_basic_value().into_int_value());
+            }
             Ok(context.i64_type().const_int(0, false))
         },
 

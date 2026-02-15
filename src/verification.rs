@@ -47,7 +47,24 @@ pub fn verify(atom: &Atom, output_dir: &Path) -> Result<(), String> {
     }
 
     let body_ast = parse_expression(&atom.body_expr);
-    let _body_result = expr_to_z3(&ctx, &arr, &body_ast, &mut env, Some(&solver))?;
+    let body_result = expr_to_z3(&ctx, &arr, &body_ast, &mut env, Some(&solver))?;
+
+    if atom.ensures.trim() != "true" {
+        env.insert("result".to_string(), body_result);
+        let ens_ast = parse_expression(&atom.ensures);
+        let ens_z3 = expr_to_z3(&ctx, &arr, &ens_ast, &mut env, None)?;
+        if let Some(ens_bool) = ens_z3.as_bool() {
+            solver.push();
+            solver.assert(&ens_bool.not());
+            if solver.check() == SatResult::Sat {
+                solver.pop(1);
+                save_visualizer_report(output_dir, "failed", &atom.name, "N/A", "N/A", "Postcondition (ensures) violated.");
+                return Err("Verification Error: Postcondition (ensures) is not satisfied.".into());
+            }
+            solver.pop(1);
+        }
+        env.remove("result");
+    }
 
     if solver.check() == SatResult::Unsat {
         save_visualizer_report(output_dir, "failed", &atom.name, "N/A", "N/A", "Logic contradiction in constraints.");
@@ -119,16 +136,37 @@ fn expr_to_z3<'a>(
                 solver.assert(&inv_z3);
                 solver.assert(&cond_z3);
 
-                let _body_res = expr_to_z3(ctx, arr, body, env, Some(solver))?;
+                let env_before_body = env.clone();
+                match body.as_ref() {
+                    Expr::Block(stmts) => {
+                        for stmt in stmts {
+                            match stmt {
+                                Expr::Let { var, value, .. } => {
+                                    let val = expr_to_z3(ctx, arr, value, env, Some(solver))?;
+                                    env.insert(var.clone(), val);
+                                },
+                                _ => {
+                                    expr_to_z3(ctx, arr, stmt, env, Some(solver))?;
+                                }
+                            }
+                        }
+                    },
+                    _ => {
+                        expr_to_z3(ctx, arr, body, env, Some(solver))?;
+                    }
+                }
+
                 let inv_after = expr_to_z3(ctx, arr, invariant, env, None)?
                     .as_bool().ok_or("Invariant must be boolean")?;
 
                 solver.assert(&inv_after.not());
                 if solver.check() == SatResult::Sat {
                     solver.pop(1);
+                    *env = env_before_body;
                     return Err("Verification Error: Loop invariant is not preserved by the body.".into());
                 }
                 solver.pop(1);
+                *env = env_before_body;
             }
 
             let final_inv = expr_to_z3(ctx, arr, invariant, env, None)?

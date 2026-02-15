@@ -42,7 +42,7 @@ fn format_expr_rust(expr: &Expr) -> String {
             )
         },
         Expr::Let { var, value, body: _ } => {
-            format!("let {} = {};", var, format_expr_rust(value))
+            format!("let mut {} = {};", var, format_expr_rust(value))
         },
         Expr::Assign { var, value } => {
             format!("{} = {};", var, format_expr_rust(value))

@@ -90,7 +90,10 @@ Mumeiは **Model Context Protocol (MCP)** に対応しており、AIエージェ
 * [x] **Stateless MCP Server:** 並行安全な一時ディレクトリ方式の実装。
 * [ ] **Loop Support:** `for` / `while` 構文および **ループ不変量 (Loop Invariant)** による形式検証。
 * [ ] **Standard Library:** 配列操作、数学関数、文字列処理の検証済みセットの拡充。
+* [ ] **Type System 2.0**: 符号なし整数 (u64)、浮動小数点数 (f64) のネイティブ検証サポート。
+* [ ] **Refinement Types**: 型定義自体に制約を持たせる「篩型」の導入
 * [ ] **VS Code Extension:** エディタ上でのリアルタイム検証エラー表示（Language Server Protocol対応）。
+* [ ] **etc**: ・・・
 
 ---
 

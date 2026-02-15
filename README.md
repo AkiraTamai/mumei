@@ -139,4 +139,20 @@ body: {
 2. **Verification:** Z3 checks the invariant at three stages: "Before entering loop," "During each iteration," and "After loop exit" to ensure `ensures` is always satisfied.
 3. **Sharpening:** The mathematically proven logic is exported to `dist/katana.rs` and other target files.
 
+- sample
+```
+./build_and_run.sh
+・・・
+✨ Build Success!
+🚀 Running Mumei on sword_test.mm...
+🗡️  Mumei: Forging the blade...
+✨ [1/4] Polishing Syntax: Atom 'sword_sum' identified.
+⚖️  [2/4] Verification: Passed. The logic is flawless.
+⚙️  [3/4] Tempering: Done. Created 'katana.ll'
+🌍 [4/4] Sharpening: Exporting verified Rust, Go, and TypeScript sources...
+✅ Done. Created 'katana.rs', 'katana.go', 'katana.ts'
+🎉 Blade forged and sharpened successfully.
+✨ Process complete.
+```
+
 ---

@@ -2,49 +2,46 @@
 
 **Mathematical Proof-Driven Programming Language for AI Agents.**
 
-**Mumei (無銘)** is an AI-native programming language designed to eliminate the developer's personality and pursue only mathematical "truth." When an AI generates code, Mumei mathematically proves and eliminates logical flaws before execution, refining the "pure code" into machine code (LLVM) and verified source code (Rust/Go/TypeScript).
+**Mumei (無銘)** is an AI-native programming language designed to eliminate developer bias and pursue only mathematical "Truth." When an AI generates code, Mumei mathematically proves and eliminates logical flaws before execution, refining the "Pure Code" into machine code (LLVM) and verified source code (Rust/Go/TypeScript).
 
 ---
 
 ## ⚖️ Comparison with Formal Methods
 
-Mumei is designed to bridge the gap between heavyweight formal proof assistants like Lean or Coq and modern application development.
+Mumei is designed to bridge the gap between heavyweight formal proof assistants like Lean 4 or Coq and modern application development.
 
 | Feature | Lean 4 / Coq | Mumei |
 | --- | --- | --- |
 | **Verification Lead** | Human (Requires math expertise) | SMT Solver (Automated AI verification) |
 | **Learning Curve** | Extremely Steep | Moderate (Close to standard coding) |
-| **Primary Output** | Custom Runtime / C | Rust, Go, TypeScript, LLVM |
+| **Primary Output** | Custom Runtime / C | **Rust, Go, TypeScript, LLVM 18** |
+| **Loop Verification** | Manual Inductive Proofs | **Automated Loop Invariant Verification** |
 | **AI Agent Role** | Auxiliary / Experimental | Primary Driver (Self-healing loops) |
 
 ---
 
-## 🛠️ Design Philosophy
+## 🛠️ Design Philosophy (The Forging Process)
 
-Mumei generates executable binaries, verified source code, and verification reports through five distinct stages (The Forging Process):
+Mumei generates executable binaries and verified source code through five distinct stages:
 
-1. **Polishing (Parser):** Analyzes code in minimal functional units called `atoms`. Supports `if-else` branching, `let` variable bindings, and block syntax `{}`.
-2. **The Ritual of Truth (Verification):** Utilizes the Z3 SMT Solver to mathematically guarantee that the implementation (`body`) satisfies the safety requirements (`requires`).
-3. **Visual Inspection (Visualizer):** Real-time visualization of "logical fractures" (counter-examples) discovered during verification.
-4. **Tempering (Codegen):** Converts verified code into LLVM IR, granting high-performance execution capabilities.
-5. **Sharpening (Transpiler):** Exports verified logic as high-quality **Rust, Go, and TypeScript** source code complete with documentation and assertions.
+1. **Polishing (Parser):** Analyzes code in minimal functional units called `atoms`. Supports `if-else` branching, `let` bindings, and **`while` loops**.
+2. **The Ritual of Truth (Verification):** Utilizes the **Z3 SMT Solver**. For loops, it mathematically guarantees that the "Loop Invariant" is maintained throughout execution.
+3. **Visual Inspection (Visualizer):** Real-time visualization of "Logical Fractures" (counter-examples) discovered during verification.
+4. **Tempering (Codegen):** Converts verified code into **LLVM IR (v18)**, granting native-level high-performance execution.
+5. **Sharpening (Transpiler):** Exports verified logic as high-quality **Rust, Go, and TypeScript** source code.
 
 ---
 
 ## 🚀 Installation
 
-### 1. Install Dependencies
+### 1. Install Dependencies (Optimized for macOS Sonoma/Sequoia)
 
-* **LLVM 15:** For native code generation.
-* **Z3 Solver:** For formal logic verification.
-* **Python 3.x:** For the visualizer, healing scripts, and MCP server.
+Mumei uses **LLVM 18**, optimized for the latest macOS environments.
 
 ```bash
-# macOS
-brew install llvm@15 z3
-
-# Ubuntu
-sudo apt install llvm-15-dev libz3-dev
+# macOS (Sonoma/Sequoia Support)
+xcode-select --install  # Essential: Command Line Tools
+brew install llvm@18 z3
 
 # Python dependencies
 pip install streamlit pandas python-dotenv openai mcp-server-fastmcp
@@ -60,26 +57,26 @@ OPENAI_API_KEY=your_api_key_here
 
 ```
 
+*Note: The build process requires specific path exports (e.g., `LLVM_SYS_170_PREFIX`). Refer to `build_and_run.sh` for details.*
+
 ---
 
 ## 🤖 MCP Server (AI Agent Integration)
 
-Mumei supports the **Model Context Protocol (MCP)**, functioning as a tool for AI agents to autonomously forge "correct code."
+Mumei supports the **Model Context Protocol (MCP)**, functioning as a specialized tool for AI agents (Claude, Cursor, etc.) to autonomously forge "Correct Code."
 
-### Available Tools
-
-* **`forge_blade`**: Verifies, compiles, and transpiles Mumei code into multiple languages (Rust/Go/TS), returning the verification report in a single pass.
-* **`self_heal_loop`**: Triggers an autonomous loop where the AI fixes code until it passes verification.
+* **`forge_blade`**: Verifies and transpiles Mumei code into Rust/Go/TS in a single pass.
+* **`self_heal_loop`**: An autonomous loop where the AI iteratively fixes code until it passes formal verification.
 
 ---
 
 ## 📂 Project Structure
 
-* `src/parser.rs`: AST definition, syntax parsing for `if-else`, `let`, and `blocks`.
-* `src/verification.rs`: Formal verification via Z3. Implements `Ite` (If-Then-Else) logic for branching.
-* `src/transpiler.rs`: Multi-language export engine (Rust, Go, TypeScript).
-* `src/codegen.rs`: LLVM IR generation.
-* `src/main.rs`: The Forging Commander. Orchestrates the output pipeline.
+* `src/parser.rs`: AST definition. Parsing logic for `if-else`, `let`, and **`while` loops**.
+* `src/verification.rs`: Formal verification via Z3. Implements automated Loop Invariant checking.
+* **`src/transpiler/`**: Structured multi-language export engine (Modularized).
+* `src/codegen.rs`: LLVM IR (v18) generation engine.
+* `src/main.rs`: The Forging Commander (Orchestrator).
 
 ---
 
@@ -87,78 +84,59 @@ Mumei supports the **Model Context Protocol (MCP)**, functioning as a tool for A
 
 * [x] **Multi-Language Support:** Transpilation to Rust, Go, and TypeScript.
 * [x] **Control Flow:** Support for `if-else` branching and `let` variable bindings.
-* [x] **Stateless MCP Server:** Implementation of thread-safe temporary directory isolation.
-* [ ] **Loop Support:** Support for `for` / `while` syntax and **Loop Invariant** formal verification.
-* [ ] **Standard Library:** Expanded sets for array manipulation, math functions, and string processing.
-* [ ] **Type System 2.0:** Native verification support for unsigned integers (u64) and floating-point (f64).
+* [x] **Loop Support:** **Formal verification of `while` loops and Loop Invariants.**
+* [x] **LLVM 18 Integration:** Support for the latest LLVM toolchain.
+* [x] **Mumei Visualizer:** Visualization of the formal verification process and counter-examples.
+* [x] **Mumei Transpiler:** Exporting verified logic into high-quality Rust source code.
+* [x] **Self-Healing Loop:** Autonomous logic correction using AI feedback loops.
+* [x] **Mumei MCP Server:** Implementation of the Model Context Protocol for AI Agent integration.
+* [ ] **Standard Library:** Expanded sets for array manipulation, math, and string processing.
+* [ ] **Type System 2.0:** Native verification for unsigned integers (u64) and floating-point (f64).
 * [ ] **Refinement Types:** Introduction of types with intrinsic constraints (e.g., `where value > 0`).
-* [ ] **VS Code Extension:** Real-time verification error feedback (LSP support).
-* [ ] **Etc** ・・・
+* [ ] **VS Code Extension:** Real-time verification feedback via LSP.
+* [ ] **etc** ・・・
 
 ---
 
-## 📖 Workflow Tutorial (Example)
+## 📖 Workflow Example: Verifying Loops (`sword_test.mm`)
 
-Mumei transforms "specifications" into "multi-language implementations" in four steps:
+Mumei mathematically proves the correctness of even complex loops.
 
-### 1. Define an Atom (`sword_test.mm`)
+### 1. Define an Atom
 
-Write code including mathematical constraints. In this example, we define logic that safely returns `0` if the divisor `b` is `0`, otherwise performs division.
+Calculate the sum from `0` to `n`. We define the invariant that the variable `s` must always be greater than or equal to `0`.
 
 ```mumei
-atom safe_divide(a, b)
+atom sword_sum(n)
 requires:
-    true;
+    n >= 0;
 ensures:
-    (b == 0 => result == 0) && (b != 0 => result == a / b);
+    result >= 0;
 body: {
-    let res = if b == 0 {
-        0
-    } else {
-        a / b
+    let s = 0;
+    let i = 0;
+    while i < n 
+    invariant: s >= 0 && i <= n
+    {
+        s = s + i;
+        i = i + 1;
     };
-    res
+    s
 };
 
 ```
 
-### 2. Run Verification and Compilation
+### 2. Run the Forge
 
 ```bash
-cargo run -- sword_test.mm --output katana
-
-```
-
-### 3. Internal Process Mechanics
-
-1. **Polishing:** The `if-else` and `let` blocks are converted into an Abstract Syntax Tree (AST).
-2. **Verification:** Z3 checks if there is any case where `b` could be `0`. Since the division is guarded by the `if b == 0` check, **it is mathematically proven that the division path never encounters b=0**, and verification passes.
-3. **Tempering:** High-speed intermediate code `katana.ll` is generated.
-4. **Sharpening:** The verified logic is exported as source files for three target languages.
-
-### 4. Verify Artifacts
-
-Upon successful verification, the following files are automatically generated:
-
-* **`katana.rs` (Rust):** `pub fn safe_divide(a: i64, b: i64) -> i64 { ... }`
-* **`katana.go` (Go):** `func safe_divide(a int64, b int64) int64 { ... }`
-* **`katana.ts` (TypeScript):** `function safe_divide(a: any, b: any): any { ... }`
-
-- sample
-```
 ./build_and_run.sh
-・・・
-✨ Build Success!
-🚀 Running Mumei on sword_test.mm...
-🗡️  Mumei: Forging the blade...
-✨ [1/4] Polishing Syntax: Atom 'sword_sum' identified.
-⚖️  [2/4] Verification: Passed. The logic is flawless.
-⚙️  [3/4] Tempering: Done. Created 'katana.ll'
-🌍 [4/4] Sharpening: Exporting verified Rust, Go, and TypeScript sources...
-✅ Done. Created 'katana.rs', 'katana.go', 'katana.ts'
-🎉 Blade forged and sharpened successfully.
-✨ Process complete.
+
 ```
 
+### 3. Execution Results
+
+1. **Polishing:** Converts the `while` block and `invariant` clause into an AST.
+2. **Verification:** Z3 checks the invariant at three stages: "Before entering loop," "During each iteration," and "After loop exit" to ensure `ensures` is always satisfied.
+3. **Sharpening:** The mathematically proven logic is exported to `dist/katana.rs` and other target files.
 
 ---

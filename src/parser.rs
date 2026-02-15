@@ -26,6 +26,12 @@ pub enum Expr {
         body: Box<Expr>,
     },
     Block(Vec<Expr>),
+    // 新設: ループ構文 (条件, 不変量, ボディ)
+    While {
+        cond: Box<Expr>,
+        invariant: Box<Expr>,
+        body: Box<Expr>,
+    },
 }
 
 // --- 2. 量子化子と Atom の定義 ---
@@ -155,7 +161,6 @@ fn parse_statement(tokens: &[String], pos: &mut usize) -> Expr {
     }
 }
 
-// 優先順位: => (Implies) は最も低い
 fn parse_implies(tokens: &[String], pos: &mut usize) -> Expr {
     let mut node = parse_logical_or(tokens, pos);
     while *pos < tokens.len() && tokens[*pos] == "=>" {
@@ -176,7 +181,6 @@ fn parse_logical_or(tokens: &[String], pos: &mut usize) -> Expr {
     node
 }
 
-// 追加: && (Logical And)
 fn parse_logical_and(tokens: &[String], pos: &mut usize) -> Expr {
     let mut node = parse_comparison(tokens, pos);
     while *pos < tokens.len() && tokens[*pos] == "&&" {
@@ -229,6 +233,25 @@ fn parse_mul_div(tokens: &[String], pos: &mut usize) -> Expr {
 fn parse_primary(tokens: &[String], pos: &mut usize) -> Expr {
     if *pos >= tokens.len() { return Expr::Number(0); }
     let token = &tokens[*pos];
+
+    // --- ループ構文の追加 ---
+    if token == "while" {
+        *pos += 1; // while
+        let cond = parse_implies(tokens, pos);
+
+        if *pos < tokens.len() && tokens[*pos] == "invariant" {
+            *pos += 1; // invariant
+            let inv = parse_implies(tokens, pos);
+            let body = parse_block_or_expr(tokens, pos);
+            return Expr::While {
+                cond: Box::new(cond),
+                invariant: Box::new(inv),
+                body: Box::new(body),
+            };
+        }
+        panic!("Mumei loops require an 'invariant' for formal verification.");
+    }
+    // ----------------------
 
     if token == "if" {
         *pos += 1; // if

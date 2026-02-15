@@ -1,52 +1,133 @@
 use inkwell::context::Context;
-use inkwell::values::BasicValueEnum;
-use crate::parser::Atom;
+use inkwell::values::{BasicValue, BasicValueEnum, IntValue, FunctionValue};
+use inkwell::builder::Builder;
+use inkwell::module::Module;
+use inkwell::IntPredicate;
+use crate::parser::{Atom, Expr, Op, parse_expression};
+use std::collections::HashMap;
 use std::path::Path;
 
-/// MumeiのアトムをLLVM IRに変換し、ファイルに出力する
 pub fn compile(atom: &Atom, output_path: &Path) -> Result<(), String> {
-    // LLVMのコンテキスト、モジュール、ビルダーを作成
     let context = Context::create();
     let module = context.create_module(&atom.name);
     let builder = context.create_builder();
 
-    // 1. 関数の型定義 (現状は i32 型の引数2つ、戻り値1つと仮定)
-    let i32_type = context.i32_type();
-    let fn_type = i32_type.fn_type(&[i32_type.into(), i32_type.into()], false);
+    // Mumeiの型システム: 全て i64 (64bit integer)
+    let i64_type = context.i64_type();
 
-    // 2. 関数本体をモジュールに追加
+    // 1. 関数の型定義 (引数は atom.params の数だけ i64)
+    let param_types = vec![i64_type.into(); atom.params.len()];
+    let fn_type = i64_type.fn_type(&param_types, false);
     let function = module.add_function(&atom.name, fn_type, None);
 
-    // 3. 基本ブロック（関数の開始地点）を作成
-    let entry = context.append_basic_block(function, "entry");
-    builder.position_at_end(entry);
+    // 2. エントリブロックの作成
+    let entry_block = context.append_basic_block(function, "entry");
+    builder.position_at_end(entry_block);
 
-    // 4. 引数の取得
-    let a = function.get_nth_param(0).ok_or("Param 'a' not found")?.into_int_value();
-    let b = function.get_nth_param(1).ok_or("Param 'b' not found")?.into_int_value();
+    // 3. シンボルテーブルの構築（変数名をLLVMのIntValueにマッピング）
+    let mut variables = HashMap::new();
+    for (i, param_name) in atom.params.iter().enumerate() {
+        let val = function.get_nth_param(i as u32).unwrap().into_int_value();
+        variables.insert(param_name.clone(), val);
+    }
 
-    // 5. ボディ（実装）の命令生成
-    // ※ 簡易実装のため、body_expr内の演算子を見てLLVM命令を発行
-    let res = if atom.body_expr.contains("+") {
-        builder.build_int_add(a, b, "tmp_add")
-    } else if atom.body_expr.contains("-") {
-        builder.build_int_sub(a, b, "tmp_sub")
-    } else if atom.body_expr.contains("*") {
-        builder.build_int_mul(a, b, "tmp_mul")
-    } else if atom.body_expr.contains("/") {
-        // 検証を通過しているため、ここではゼロ除算の心配はない
-        builder.build_int_signed_div(a, b, "tmp_div")
-    } else {
-        // デフォルトは加算
-        builder.build_int_add(a, b, "tmp_def")
-    };
+    // 4. ASTの解析と再帰的なコード生成
+    let body_ast = parse_expression(&atom.body_expr);
+    let result_val = compile_expr(&context, &builder, &module, &function, &body_ast, &mut variables)?;
 
-    // 6. 戻り値の設定
-    builder.build_return(Some(&res));
+    // 5. 戻り値の設定
+    builder.build_return(Some(&result_val));
 
-    // 7. LLVM IR (.ll) ファイルとして書き出し
+    // 6. LLVM IR (.ll) ファイルとして書き出し
     let path_with_ext = output_path.with_extension("ll");
     module.print_to_file(&path_with_ext).map_err(|e| e.to_string())?;
 
     Ok(())
+}
+
+/// AST ノードを LLVM 命令に変換する再帰関数
+fn compile_expr<'a>(
+    context: &'a Context,
+    builder: &Builder<'a>,
+    module: &Module<'a>,
+    function: &FunctionValue<'a>,
+    expr: &Expr,
+    variables: &mut HashMap<String, IntValue<'a>>,
+) -> Result<IntValue<'a>, String> {
+    match expr {
+        Expr::Number(n) => Ok(context.i64_type().const_int(*n as u64, true)),
+
+        Expr::Variable(name) => variables.get(name)
+            .cloned()
+            .ok_or_else(|| format!("Undefined variable: {}", name)),
+
+        Expr::BinaryOp(left, op, right) => {
+            let lhs = compile_expr(context, builder, module, function, left, variables)?;
+            let rhs = compile_expr(context, builder, module, function, right, variables)?;
+
+            match op {
+                Op::Add => Ok(builder.build_int_add(lhs, rhs, "add_tmp")),
+                Op::Sub => Ok(builder.build_int_sub(lhs, rhs, "sub_tmp")),
+                Op::Mul => Ok(builder.build_int_mul(lhs, rhs, "mul_tmp")),
+                Op::Div => Ok(builder.build_int_signed_div(lhs, rhs, "div_tmp")),
+                // 比較演算 (i1型をi64型にゼロ拡張)
+                Op::Eq => {
+                    let cmp = builder.build_int_compare(IntPredicate::EQ, lhs, rhs, "eq_tmp");
+                    Ok(builder.build_int_z_extend(cmp, context.i64_type(), "bool_tmp"))
+                },
+                Op::Lt => {
+                    let cmp = builder.build_int_compare(IntPredicate::SLT, lhs, rhs, "lt_tmp");
+                    Ok(builder.build_int_z_extend(cmp, context.i64_type(), "bool_tmp"))
+                },
+                _ => Err(format!("LLVM Codegen: Unsupported operator {:?}", op)),
+            }
+        },
+
+        Expr::While { cond, invariant: _, body } => {
+            // ループ用の基本ブロックを作成
+            let header_block = context.append_basic_block(*function, "loop.header");
+            let body_block = context.append_basic_block(*function, "loop.body");
+            let after_block = context.append_basic_block(*function, "loop.after");
+
+            // Headerへジャンプ
+            builder.build_unconditional_branch(header_block);
+
+            // --- Header: 条件判定 ---
+            builder.position_at_end(header_block);
+            let cond_val = compile_expr(context, builder, module, function, cond, variables)?;
+            let i1_type = context.bool_type();
+            let cond_bool = builder.build_int_compare(
+                IntPredicate::NE,
+                cond_val,
+                context.i64_type().const_int(0, false),
+                "loop_cond"
+            );
+            builder.build_conditional_branch(cond_bool, body_block, after_block);
+
+            // --- Body: 実行 ---
+            builder.position_at_end(body_block);
+            compile_expr(context, builder, module, function, body, variables)?;
+            builder.build_unconditional_branch(header_block); // Headerに戻る
+
+            // --- After: 継続 ---
+            builder.position_at_end(after_block);
+            Ok(context.i64_type().const_int(0, false)) // ループ自体は暫定で0を返す
+        },
+
+        Expr::Block(stmts) => {
+            let mut last_val = context.i64_type().const_int(0, false);
+            for stmt in stmts {
+                last_val = compile_expr(context, builder, module, function, stmt, variables)?;
+            }
+            Ok(last_val)
+        },
+
+        Expr::Let { var, value, body: _ } => {
+            let val = compile_expr(context, builder, module, function, value, variables)?;
+            variables.insert(var.clone(), val);
+            Ok(val)
+        },
+
+        _ => Err("LLVM Codegen: Unimplemented expression type".to_string()),
+    }
 }

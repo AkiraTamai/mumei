@@ -74,7 +74,7 @@ fn expr_to_z3<'a>(
 
             let t = if let Some(solver) = solver_opt {
                 solver.push();
-                solver.assert(&c); // "then" ブランチは条件 c が真の時のみ
+                solver.assert(&c);
                 let res = expr_to_z3(ctx, arr, then_branch, env, solver_opt);
                 solver.pop(1);
                 res
@@ -84,7 +84,7 @@ fn expr_to_z3<'a>(
 
             let e = if let Some(solver) = solver_opt {
                 solver.push();
-                solver.assert(&c.not()); // "else" ブランチは条件 c が偽の時のみ
+                solver.assert(&c.not());
                 let res = expr_to_z3(ctx, arr, else_branch, env, solver_opt);
                 solver.pop(1);
                 res
@@ -94,11 +94,42 @@ fn expr_to_z3<'a>(
 
             c.ite(&t, &e)
         },
+        Expr::While { cond, invariant, body } => {
+            if let Some(solver) = solver_opt {
+                // --- 1. 初期条件 (Initiation): ループ突入前 Invariant が成立するか ---
+                let inv_z3 = expr_to_z3(ctx, arr, invariant, env, None).as_bool().expect("Invariant must be boolean");
+                solver.push();
+                solver.assert(&inv_z3.not()); // 「不変量が偽である」と仮定して矛盾を探す
+                if solver.check() == SatResult::Sat {
+                    panic!("Verification Error: Loop invariant does not hold initially.");
+                }
+                solver.pop(1);
+
+                // --- 2. 維持条件 (Preservation): Body 実行後も Invariant が成立するか ---
+                solver.push();
+                let cond_z3 = expr_to_z3(ctx, arr, cond, env, None).as_bool().expect("Loop condition must be boolean");
+                solver.assert(&inv_z3); // 不変量が成立しており
+                solver.assert(&cond_z3); // ループ継続条件も満たしていると仮定
+
+                let _body_res = expr_to_z3(ctx, arr, body, env, Some(solver));
+                let inv_after = expr_to_z3(ctx, arr, invariant, env, None).as_bool().unwrap();
+
+                solver.assert(&inv_after.not()); // その状態で不変量が壊れるケースがあるか？
+                if solver.check() == SatResult::Sat {
+                    panic!("Verification Error: Loop invariant is not preserved by the body.");
+                }
+                solver.pop(1);
+            }
+
+            // ループ終了後は、数学的に「不変量が成立」かつ「条件が偽」の状態となる
+            let final_inv = expr_to_z3(ctx, arr, invariant, env, None).as_bool().unwrap();
+            let final_cond_not = expr_to_z3(ctx, arr, cond, env, None).as_bool().unwrap().not();
+            Bool::and(ctx, &[&final_inv, &final_cond_not]).into()
+        },
         Expr::Let { var, value, body } => {
             let val = expr_to_z3(ctx, arr, value, env, solver_opt);
             let old_val = env.insert(var.clone(), val);
             let res = expr_to_z3(ctx, arr, body, env, solver_opt);
-            // スコープを抜ける際に環境を戻す（簡易的なスタック管理）
             if let Some(prev) = old_val { env.insert(var.clone(), prev); }
             else { env.remove(var); }
             res
@@ -119,7 +150,6 @@ fn expr_to_z3<'a>(
                     let denominator = r.as_int().unwrap();
                     if let Some(solver) = solver_opt {
                         solver.push();
-                        // その時点のパス条件（ifの分岐など）において分母が0になり得るか？
                         solver.assert(&denominator._eq(&Int::from_i64(ctx, 0)));
                         if solver.check() == SatResult::Sat {
                             panic!("Verification Error: Potential division by zero detected.");

@@ -132,4 +132,3 @@ fn save_visualizer_report(output_dir: &Path, status: &str, name: &str, a: &str, 
     let report_path = output_dir.join("report.json");
     fs::write(report_path, report.to_string()).expect("Failed to write report");
 }
-}

@@ -143,4 +143,21 @@ Upon successful verification, the following files are automatically generated:
 * **`katana.go` (Go):** `func safe_divide(a int64, b int64) int64 { ... }`
 * **`katana.ts` (TypeScript):** `function safe_divide(a: any, b: any): any { ... }`
 
+- sample
+```
+./build_and_run.sh
+・・・
+✨ Build Success!
+🚀 Running Mumei on sword_test.mm...
+🗡️  Mumei: Forging the blade...
+✨ [1/4] Polishing Syntax: Atom 'sword_sum' identified.
+⚖️  [2/4] Verification: Passed. The logic is flawless.
+⚙️  [3/4] Tempering: Done. Created 'katana.ll'
+🌍 [4/4] Sharpening: Exporting verified Rust, Go, and TypeScript sources...
+✅ Done. Created 'katana.rs', 'katana.go', 'katana.ts'
+🎉 Blade forged and sharpened successfully.
+✨ Process complete.
+```
+
+
 ---

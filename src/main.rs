@@ -50,10 +50,10 @@ fn main() {
         }
     }
 
-    // 4. Transpile (The Sharpening - Rust Source) ★追加
-    println!("  🦀 [4/4] Sharpening: Exporting verified Rust source...");
-    match transpiler::transpile_to_rust(&atom, Path::new(&cli.output)) {
-        Ok(_) => println!("  ✅ Done. Created '{}.rs'", cli.output),
+    // 4. Transpile
+    println!("  🌍 [4/4] Sharpening: Exporting verified Rust, Go, and TypeScript sources...");
+    match transpiler::transpile_to_all(&atom, output_path) {
+        Ok(_) => println!("  ✅ Done. Created '{}.rs', '{}.go', '{}.ts'", cli.output, cli.output, cli.output),
         Err(e) => {
             eprintln!("  ❌ Transpiling failed: {}", e);
             std::process::exit(1);

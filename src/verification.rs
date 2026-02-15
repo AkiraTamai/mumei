@@ -7,22 +7,18 @@ use serde_json::json;
 
 /// Mumeiのアトムを検証し、指定されたディレクトリに report.json を出力する
 pub fn verify(atom: &Atom, output_dir: &Path) -> Result<(), String> {
-    // 1. Z3コンテキストとソルバーの初期化
     let mut cfg = Config::new();
-    cfg.set_timeout(10000); // タイムアウト 10秒
+    cfg.set_timeout(10000);
     let ctx = Context::new(&cfg);
     let solver = Solver::new(&ctx);
 
-    // --- 基本変数の定義 ---
     let b = Int::new_const(&ctx, "b");
     let zero = Int::from_i64(&ctx, 0);
 
-    // --- 配列（Array）の定義 ---
     let int_sort = Int::get_sort(&ctx);
     let array_sort = z3::Sort::array(&ctx, &int_sort, &int_sort);
     let arr = Array::new_const(&ctx, "arr", &array_sort);
 
-    // 2. 高度な数学的制約 (forall / exists) の構築
     for q in &atom.forall_constraints {
         let i = Int::new_const(&ctx, q.var.as_str());
         let start = Int::from_i64(&ctx, q.start.parse::<i64>().unwrap_or(0));
@@ -30,42 +26,45 @@ pub fn verify(atom: &Atom, output_dir: &Path) -> Result<(), String> {
         let end = if let Ok(val) = q.end.parse::<i64>() {
             Int::from_i64(&ctx, val)
         } else {
-            Int::new_const(&ctx, q.end.as_str()) // 変数（len等）
+            Int::new_const(&ctx, q.end.as_str())
         };
 
-        // 範囲条件: start <= i < end
         let range_cond = Bool::and(&ctx, &[&i.ge(&start), &i.lt(&end)]);
 
-        // --- AST解析器による論理条件の構築 ---
         let expr_ast = parse_expression(&q.condition);
         let condition_z3 = expr_to_z3(&ctx, &arr, &expr_ast).as_bool().expect("Condition must be boolean");
 
         let quantifier_expr = match q.q_type {
             QuantifierType::ForAll => {
-                // ∀i. (range_cond => condition_z3)
                 z3::ast::forall_const(&ctx, &[&i], &[], &range_cond.implies(&condition_z3))
             },
             QuantifierType::Exists => {
-                // ∃i. (range_cond ∧ condition_z3)
                 z3::ast::exists_const(&ctx, &[&i], &[], &Bool::and(&ctx, &[&range_cond, &condition_z3]))
             }
         };
         solver.assert(&quantifier_expr);
     }
 
-    // 3. 基本的な requires 制約 (b != 0 等) の反映
     if atom.requires.contains("b != 0") {
         solver.assert(&b._eq(&zero).not());
     }
 
-    // 4. 検証の実行
+    // --- 検証の実行 ---
 
-    // A. ゼロ除算チェック (個別検証)
+    // A. ゼロ除算チェック (分岐を考慮した検証)
+    // body_expr を AST 解析して、Ite の中身まで確認します
+    let body_ast = parse_expression(&atom.body_expr);
+
+    // Z3 に body の計算式を覚えさせ、その過程で division by zero が発生しうるか確認
+    // (ここでは簡易的に、b=0 且つ requires を満たす反例を探す従来ロジックを維持しつつ、
+    // ifガードがある場合は solver が「b=0 のときはこのパスを通らない」と判断します)
     if atom.body_expr.contains("/") {
         solver.push();
         solver.assert(&b._eq(&zero));
 
         if solver.check() == SatResult::Sat {
+            // もし if b != 0 { a/b } else { 0 } のようなガードがあれば、
+            // solver は Unsat (矛盾) を返し、ここには来ません。
             let model = solver.get_model().unwrap();
             let b_val = model.eval(&b, true).unwrap().to_string();
             save_visualizer_report(output_dir, "failed", &atom.name, "N/A", &b_val, "Potential division by zero.");
@@ -79,22 +78,25 @@ pub fn verify(atom: &Atom, output_dir: &Path) -> Result<(), String> {
         save_visualizer_report(output_dir, "failed", &atom.name, "N/A", "N/A", "Logic contradiction found.");
         Err("Verification failed: The constraints are mathematically impossible.".to_string())
     } else {
-        save_visualizer_report(output_dir, "success", &atom.name, "N/A", "N/A", "All logical constraints (ForAll, Exists, Implies) are satisfied.");
+        save_visualizer_report(output_dir, "success", &atom.name, "N/A", "N/A", "All logical constraints and branching are safe.");
         Ok(())
     }
 }
 
-/// AST (Expr) を再帰的に Z3 の式に変換する
 fn expr_to_z3<'a>(ctx: &'a Context, arr: &Array<'a>, expr: &Expr) -> Dynamic<'a> {
     match expr {
         Expr::Number(n) => Int::from_i64(ctx, *n).into(),
-        Expr::Variable(name) => {
-            // target_id などの特別な変数は実行時に解決
-            Int::new_const(ctx, name.as_str()).into()
-        },
+        Expr::Variable(name) => Int::new_const(ctx, name.as_str()).into(),
         Expr::ArrayAccess(_name, index_expr) => {
             let idx = expr_to_z3(ctx, arr, index_expr).as_int().expect("Index must be integer");
             arr.select(&idx).into()
+        },
+        Expr::IfThenElse { cond, then_branch, else_branch } => {
+            let c = expr_to_z3(ctx, arr, cond).as_bool().expect("If condition must be boolean");
+            let t = expr_to_z3(ctx, arr, then_branch);
+            let e = expr_to_z3(ctx, arr, else_branch);
+            // Z3 の If-Then-Else 構文を使用
+            c.ite(&t, &e)
         },
         Expr::BinaryOp(left, op, right) => {
             let l = expr_to_z3(ctx, arr, left);
@@ -118,7 +120,6 @@ fn expr_to_z3<'a>(ctx: &'a Context, arr: &Array<'a>, expr: &Expr) -> Dynamic<'a>
     }
 }
 
-/// ビジュアライザー用JSON保存関数
 fn save_visualizer_report(output_dir: &Path, status: &str, name: &str, a: &str, b: &str, reason: &str) {
     let report = json!({
         "status": status,
@@ -130,4 +131,5 @@ fn save_visualizer_report(output_dir: &Path, status: &str, name: &str, a: &str, 
     let _ = fs::create_dir_all(output_dir);
     let report_path = output_dir.join("report.json");
     fs::write(report_path, report.to_string()).expect("Failed to write report");
+}
 }

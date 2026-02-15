@@ -15,6 +15,12 @@ pub enum Expr {
     Variable(String),
     ArrayAccess(String, Box<Expr>),
     BinaryOp(Box<Expr>, Op, Box<Expr>),
+    // 新設：条件分岐構文
+    IfThenElse {
+        cond: Box<Expr>,
+        then_branch: Box<Expr>,
+        else_branch: Box<Expr>,
+    },
 }
 
 // --- 2. 量子化子と Atom の定義 ---
@@ -105,7 +111,8 @@ pub fn parse(source: &str) -> Atom {
 // --- 4. 再帰下降式解析エンジン (Expression Parser) ---
 
 pub fn tokenize(input: &str) -> Vec<String> {
-    let re = Regex::new(r"(\d+|[a-zA-Z_]\w*|==|!=|>=|<=|=>|&&|\|\||[+\-*/><()\[\]])").unwrap();
+    // if, else, {, } を含むように正規表現を拡張
+    let re = Regex::new(r"(\d+|[a-zA-Z_]\w*|==|!=|>=|<=|=>|&&|\|\||[+\-*/><()\[\]{}])").unwrap();
     re.find_iter(input).map(|m| m.as_str().to_string()).collect()
 }
 
@@ -171,6 +178,31 @@ fn parse_mul_div(tokens: &[String], pos: &mut usize) -> Expr {
 fn parse_primary(tokens: &[String], pos: &mut usize) -> Expr {
     if *pos >= tokens.len() { return Expr::Number(0); }
     let token = &tokens[*pos];
+
+    // IF構文の解析
+    if token == "if" {
+        *pos += 1; // if
+        let cond = parse_implies(tokens, pos);
+
+        if *pos < tokens.len() && tokens[*pos] == "{" { *pos += 1; }
+        let then_branch = parse_implies(tokens, pos);
+        if *pos < tokens.len() && tokens[*pos] == "}" { *pos += 1; }
+
+        if *pos < tokens.len() && tokens[*pos] == "else" {
+            *pos += 1; // else
+            if *pos < tokens.len() && tokens[*pos] == "{" { *pos += 1; }
+            let else_branch = parse_implies(tokens, pos);
+            if *pos < tokens.len() && tokens[*pos] == "}" { *pos += 1; }
+
+            return Expr::IfThenElse {
+                cond: Box::new(cond),
+                then_branch: Box::new(then_branch),
+                else_branch: Box::new(else_branch),
+            };
+        }
+        panic!("Mumei requires an 'else' branch for every 'if' for mathematical totalness.");
+    }
+
     *pos += 1;
 
     if token == "(" {
@@ -180,7 +212,7 @@ fn parse_primary(tokens: &[String], pos: &mut usize) -> Expr {
     } else if let Ok(n) = token.parse::<i64>() {
         Expr::Number(n)
     } else if *pos < tokens.len() && tokens[*pos] == "[" {
-        // 配列アクセス: arr[index]
+        // 配列アクセス
         *pos += 1; // [
         let index = parse_implies(tokens, pos);
         if *pos < tokens.len() && tokens[*pos] == "]" { *pos += 1; }

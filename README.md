@@ -93,6 +93,7 @@ Mumei supports the **Model Context Protocol (MCP)**, functioning as a tool for A
 * [ ] **Type System 2.0:** Native verification support for unsigned integers (u64) and floating-point (f64).
 * [ ] **Refinement Types:** Introduction of types with intrinsic constraints (e.g., `where value > 0`).
 * [ ] **VS Code Extension:** Real-time verification error feedback (LSP support).
+* [ ] **Etc** ・・・
 
 ---
 

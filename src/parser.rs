@@ -62,7 +62,6 @@ pub fn parse(source: &str) -> Atom {
     let req_re = Regex::new(r"requires:\s*([^;]+);").unwrap();
     let ens_re = Regex::new(r"ensures:\s*([^;]+);").unwrap();
 
-    // 量子化子の正規表現
     let forall_re = Regex::new(r"forall\(\s*(\w+)\s*,\s*([^,]+)\s*,\s*([^,]+)\s*,\s*([^)]+)\)").unwrap();
     let exists_re = Regex::new(r"exists\(\s*(\w+)\s*,\s*([^,]+)\s*,\s*([^,]+)\s*,\s*([^)]+)\)").unwrap();
 
@@ -73,8 +72,6 @@ pub fn parse(source: &str) -> Atom {
     let requires_raw = req_re.captures(source).map_or("true".to_string(), |c| c[1].trim().to_string());
     let ensures = ens_re.captures(source).map_or("true".to_string(), |c| c[1].trim().to_string());
 
-    // --- body 抽出ロジックの修正点 ---
-    // 非貪欲正規表現 (*?) はネストした波括弧で失敗するため、カウンタ方式を採用
     let body_marker = "body:";
     let body_start_pos = source.find(body_marker).expect("Failed to find body:") + body_marker.len();
     let body_snippet = source[body_start_pos..].trim();
@@ -91,10 +88,8 @@ pub fn parse(source: &str) -> Atom {
             }
         }
     } else {
-        // 単一行（中括弧なし）の場合はセミコロンまでを抽出
         body_raw = body_snippet.split(';').next().unwrap_or("").to_string();
     }
-    // -------------------------------
 
     let mut forall_constraints = Vec::new();
     for cap in forall_re.captures_iter(&requires_raw) {
@@ -160,12 +155,34 @@ fn parse_statement(tokens: &[String], pos: &mut usize) -> Expr {
     }
 }
 
+// 優先順位: => (Implies) は最も低い
 fn parse_implies(tokens: &[String], pos: &mut usize) -> Expr {
-    let mut node = parse_comparison(tokens, pos);
+    let mut node = parse_logical_or(tokens, pos);
     while *pos < tokens.len() && tokens[*pos] == "=>" {
         *pos += 1;
-        let right = parse_comparison(tokens, pos);
+        let right = parse_logical_or(tokens, pos);
         node = Expr::BinaryOp(Box::new(node), Op::Implies, Box::new(right));
+    }
+    node
+}
+
+fn parse_logical_or(tokens: &[String], pos: &mut usize) -> Expr {
+    let mut node = parse_logical_and(tokens, pos);
+    while *pos < tokens.len() && tokens[*pos] == "||" {
+        *pos += 1;
+        let right = parse_logical_and(tokens, pos);
+        node = Expr::BinaryOp(Box::new(node), Op::Or, Box::new(right));
+    }
+    node
+}
+
+// 追加: && (Logical And)
+fn parse_logical_and(tokens: &[String], pos: &mut usize) -> Expr {
+    let mut node = parse_comparison(tokens, pos);
+    while *pos < tokens.len() && tokens[*pos] == "&&" {
+        *pos += 1;
+        let right = parse_comparison(tokens, pos);
+        node = Expr::BinaryOp(Box::new(node), Op::And, Box::new(right));
     }
     node
 }

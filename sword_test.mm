@@ -1,5 +1,16 @@
-atom divide_ritual(a, b) {
-    requires: b != 0;
-    ensures: result * b == a;
-    body: a / b;
-}
+atom sword_sum(n)
+requires:
+    n >= 0;
+ensures:
+    result >= 0;
+body: {
+    let s = 0;
+    let i = 0;
+    while i < n
+    invariant: s >= 0 && i <= n
+    {
+        s = s + i;
+        i = i + 1;
+    };
+    s
+};

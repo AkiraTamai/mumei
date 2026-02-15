@@ -41,8 +41,6 @@ pub fn verify(atom: &Atom, output_dir: &Path) -> Result<(), String> {
 
     // 2. Body の解析と安全性検証
     let body_ast = parse_expression(&atom.body_expr);
-
-    // 修正：expr_to_z3 に solver を渡し、式の中で除算が見つかるたびに安全性をチェックする
     let _body_result = expr_to_z3(&ctx, &arr, &body_ast, &mut env, Some(&solver));
 
     // 3. 最終的な論理矛盾チェック
@@ -60,7 +58,7 @@ fn expr_to_z3<'a>(
     arr: &Array<'a>,
     expr: &Expr,
     env: &mut HashMap<String, Dynamic<'a>>,
-    solver_opt: Option<&Solver<'a>> // 安全性チェック用
+    solver_opt: Option<&Solver<'a>>
 ) -> Dynamic<'a> {
     match expr {
         Expr::Number(n) => Int::from_i64(ctx, *n).into(),
@@ -74,15 +72,36 @@ fn expr_to_z3<'a>(
         Expr::IfThenElse { cond, then_branch, else_branch } => {
             let c = expr_to_z3(ctx, arr, cond, env, solver_opt).as_bool().expect("If condition must be boolean");
 
-            // ifのパスごとに環境を分離して検証（簡略化のため現状はDynamicでのITE）
-            let t = expr_to_z3(ctx, arr, then_branch, env, solver_opt);
-            let e = expr_to_z3(ctx, arr, else_branch, env, solver_opt);
+            let t = if let Some(solver) = solver_opt {
+                solver.push();
+                solver.assert(&c); // "then" ブランチは条件 c が真の時のみ
+                let res = expr_to_z3(ctx, arr, then_branch, env, solver_opt);
+                solver.pop(1);
+                res
+            } else {
+                expr_to_z3(ctx, arr, then_branch, env, solver_opt)
+            };
+
+            let e = if let Some(solver) = solver_opt {
+                solver.push();
+                solver.assert(&c.not()); // "else" ブランチは条件 c が偽の時のみ
+                let res = expr_to_z3(ctx, arr, else_branch, env, solver_opt);
+                solver.pop(1);
+                res
+            } else {
+                expr_to_z3(ctx, arr, else_branch, env, solver_opt)
+            };
+
             c.ite(&t, &e)
         },
         Expr::Let { var, value, body } => {
             let val = expr_to_z3(ctx, arr, value, env, solver_opt);
-            env.insert(var.clone(), val);
-            expr_to_z3(ctx, arr, body, env, solver_opt)
+            let old_val = env.insert(var.clone(), val);
+            let res = expr_to_z3(ctx, arr, body, env, solver_opt);
+            // スコープを抜ける際に環境を戻す（簡易的なスタック管理）
+            if let Some(prev) = old_val { env.insert(var.clone(), prev); }
+            else { env.remove(var); }
+            res
         },
         Expr::Block(stmts) => {
             let mut last_val = Int::from_i64(ctx, 0).into();
@@ -98,15 +117,11 @@ fn expr_to_z3<'a>(
             match op {
                 Op::Div => {
                     let denominator = r.as_int().unwrap();
-                    // 修正：除算が見つかったら、その時点のパス条件で分母が0になり得るか検証
                     if let Some(solver) = solver_opt {
                         solver.push();
+                        // その時点のパス条件（ifの分岐など）において分母が0になり得るか？
                         solver.assert(&denominator._eq(&Int::from_i64(ctx, 0)));
                         if solver.check() == SatResult::Sat {
-                            // 0になり得る反例が見つかった
-                            let _model = solver.get_model();
-                            // 実際はここでプロセスを中断するかエラーフラグを立てる必要がある
-                            // Mumeiでは即座にエラーとして報告
                             panic!("Verification Error: Potential division by zero detected.");
                         }
                         solver.pop(1);

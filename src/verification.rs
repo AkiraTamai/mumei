@@ -8,17 +8,15 @@ use std::collections::HashMap;
 
 pub fn verify(atom: &Atom, output_dir: &Path) -> Result<(), String> {
     let mut cfg = Config::new();
-    cfg.set_timeout(10000);
+    cfg.set_timeout_msec(10000);
     let ctx = Context::new(&cfg);
     let solver = Solver::new(&ctx);
 
-    let int_sort = Int::get_sort(&ctx);
-    let array_sort = z3::Sort::array(&ctx, &int_sort, &int_sort);
-    let arr = Array::new_const(&ctx, "arr", &array_sort);
+    let int_sort = z3::Sort::int(&ctx);
+    let arr = Array::new_const(&ctx, "arr", &int_sort, &int_sort);
 
     let mut env: HashMap<String, Dynamic> = HashMap::new();
 
-    // 1. 事前条件 (Requires / ForAll) のアサート
     for q in &atom.forall_constraints {
         let i = Int::new_const(&ctx, q.var.as_str());
         let start = Int::from_i64(&ctx, q.start.parse::<i64>().unwrap_or(0));
@@ -30,7 +28,8 @@ pub fn verify(atom: &Atom, output_dir: &Path) -> Result<(), String> {
 
         let range_cond = Bool::and(&ctx, &[&i.ge(&start), &i.lt(&end)]);
         let expr_ast = parse_expression(&q.condition);
-        let condition_z3 = expr_to_z3(&ctx, &arr, &expr_ast, &mut env, None).as_bool().expect("Condition must be boolean");
+        let condition_z3 = expr_to_z3(&ctx, &arr, &expr_ast, &mut env, None)?
+            .as_bool().ok_or("Condition must be boolean")?;
 
         let quantifier_expr = match q.q_type {
             QuantifierType::ForAll => z3::ast::forall_const(&ctx, &[&i], &[], &range_cond.implies(&condition_z3)),
@@ -39,11 +38,17 @@ pub fn verify(atom: &Atom, output_dir: &Path) -> Result<(), String> {
         solver.assert(&quantifier_expr);
     }
 
-    // 2. Body の解析と安全性検証
-    let body_ast = parse_expression(&atom.body_expr);
-    let _body_result = expr_to_z3(&ctx, &arr, &body_ast, &mut env, Some(&solver));
+    if atom.requires.trim() != "true" {
+        let req_ast = parse_expression(&atom.requires);
+        let req_z3 = expr_to_z3(&ctx, &arr, &req_ast, &mut env, None)?;
+        if let Some(req_bool) = req_z3.as_bool() {
+            solver.assert(&req_bool);
+        }
+    }
 
-    // 3. 最終的な論理矛盾チェック
+    let body_ast = parse_expression(&atom.body_expr);
+    let _body_result = expr_to_z3(&ctx, &arr, &body_ast, &mut env, Some(&solver))?;
+
     if solver.check() == SatResult::Unsat {
         save_visualizer_report(output_dir, "failed", &atom.name, "N/A", "N/A", "Logic contradiction in constraints.");
         return Err("Verification failed: Contradiction found.".into());
@@ -59,117 +64,141 @@ fn expr_to_z3<'a>(
     expr: &Expr,
     env: &mut HashMap<String, Dynamic<'a>>,
     solver_opt: Option<&Solver<'a>>
-) -> Dynamic<'a> {
+) -> Result<Dynamic<'a>, String> {
     match expr {
-        Expr::Number(n) => Int::from_i64(ctx, *n).into(),
+        Expr::Number(n) => Ok(Int::from_i64(ctx, *n).into()),
         Expr::Variable(name) => {
-            env.get(name).cloned().unwrap_or_else(|| Int::new_const(ctx, name.as_str()).into())
+            Ok(env.get(name).cloned().unwrap_or_else(|| Int::new_const(ctx, name.as_str()).into()))
         },
         Expr::ArrayAccess(_name, index_expr) => {
-            let idx = expr_to_z3(ctx, arr, index_expr, env, solver_opt).as_int().expect("Index must be integer");
-            arr.select(&idx).into()
+            let idx = expr_to_z3(ctx, arr, index_expr, env, solver_opt)?
+                .as_int().ok_or("Index must be integer")?;
+            Ok(arr.select(&idx).into())
         },
         Expr::IfThenElse { cond, then_branch, else_branch } => {
-            let c = expr_to_z3(ctx, arr, cond, env, solver_opt).as_bool().expect("If condition must be boolean");
+            let c = expr_to_z3(ctx, arr, cond, env, solver_opt)?
+                .as_bool().ok_or("If condition must be boolean")?;
 
             let t = if let Some(solver) = solver_opt {
                 solver.push();
                 solver.assert(&c);
-                let res = expr_to_z3(ctx, arr, then_branch, env, solver_opt);
+                let res = expr_to_z3(ctx, arr, then_branch, env, solver_opt)?;
                 solver.pop(1);
                 res
             } else {
-                expr_to_z3(ctx, arr, then_branch, env, solver_opt)
+                expr_to_z3(ctx, arr, then_branch, env, solver_opt)?
             };
 
             let e = if let Some(solver) = solver_opt {
                 solver.push();
                 solver.assert(&c.not());
-                let res = expr_to_z3(ctx, arr, else_branch, env, solver_opt);
+                let res = expr_to_z3(ctx, arr, else_branch, env, solver_opt)?;
                 solver.pop(1);
                 res
             } else {
-                expr_to_z3(ctx, arr, else_branch, env, solver_opt)
+                expr_to_z3(ctx, arr, else_branch, env, solver_opt)?
             };
 
-            c.ite(&t, &e)
+            Ok(c.ite(&t, &e))
         },
         Expr::While { cond, invariant, body } => {
             if let Some(solver) = solver_opt {
-                // --- 1. 初期条件 (Initiation): ループ突入前 Invariant が成立するか ---
-                let inv_z3 = expr_to_z3(ctx, arr, invariant, env, None).as_bool().expect("Invariant must be boolean");
+                let inv_z3 = expr_to_z3(ctx, arr, invariant, env, None)?
+                    .as_bool().ok_or("Invariant must be boolean")?;
                 solver.push();
-                solver.assert(&inv_z3.not()); // 「不変量が偽である」と仮定して矛盾を探す
+                solver.assert(&inv_z3.not());
                 if solver.check() == SatResult::Sat {
-                    panic!("Verification Error: Loop invariant does not hold initially.");
+                    solver.pop(1);
+                    return Err("Verification Error: Loop invariant does not hold initially.".into());
                 }
                 solver.pop(1);
 
-                // --- 2. 維持条件 (Preservation): Body 実行後も Invariant が成立するか ---
                 solver.push();
-                let cond_z3 = expr_to_z3(ctx, arr, cond, env, None).as_bool().expect("Loop condition must be boolean");
-                solver.assert(&inv_z3); // 不変量が成立しており
-                solver.assert(&cond_z3); // ループ継続条件も満たしていると仮定
+                let cond_z3 = expr_to_z3(ctx, arr, cond, env, None)?
+                    .as_bool().ok_or("Loop condition must be boolean")?;
+                solver.assert(&inv_z3);
+                solver.assert(&cond_z3);
 
-                let _body_res = expr_to_z3(ctx, arr, body, env, Some(solver));
-                let inv_after = expr_to_z3(ctx, arr, invariant, env, None).as_bool().unwrap();
+                let _body_res = expr_to_z3(ctx, arr, body, env, Some(solver))?;
+                let inv_after = expr_to_z3(ctx, arr, invariant, env, None)?
+                    .as_bool().ok_or("Invariant must be boolean")?;
 
-                solver.assert(&inv_after.not()); // その状態で不変量が壊れるケースがあるか？
+                solver.assert(&inv_after.not());
                 if solver.check() == SatResult::Sat {
-                    panic!("Verification Error: Loop invariant is not preserved by the body.");
+                    solver.pop(1);
+                    return Err("Verification Error: Loop invariant is not preserved by the body.".into());
                 }
                 solver.pop(1);
             }
 
-            // ループ終了後は、数学的に「不変量が成立」かつ「条件が偽」の状態となる
-            let final_inv = expr_to_z3(ctx, arr, invariant, env, None).as_bool().unwrap();
-            let final_cond_not = expr_to_z3(ctx, arr, cond, env, None).as_bool().unwrap().not();
-            Bool::and(ctx, &[&final_inv, &final_cond_not]).into()
+            let final_inv = expr_to_z3(ctx, arr, invariant, env, None)?
+                .as_bool().ok_or("Invariant must be boolean")?;
+            let final_cond_not = expr_to_z3(ctx, arr, cond, env, None)?
+                .as_bool().ok_or("Loop condition must be boolean")?
+                .not();
+            Ok(Bool::and(ctx, &[&final_inv, &final_cond_not]).into())
         },
         Expr::Let { var, value, body } => {
-            let val = expr_to_z3(ctx, arr, value, env, solver_opt);
+            let val = expr_to_z3(ctx, arr, value, env, solver_opt)?;
             let old_val = env.insert(var.clone(), val);
-            let res = expr_to_z3(ctx, arr, body, env, solver_opt);
+            let res = expr_to_z3(ctx, arr, body, env, solver_opt)?;
             if let Some(prev) = old_val { env.insert(var.clone(), prev); }
             else { env.remove(var); }
-            res
+            Ok(res)
+        },
+        Expr::Assign { var, value } => {
+            let val = expr_to_z3(ctx, arr, value, env, solver_opt)?;
+            env.insert(var.clone(), val.clone());
+            Ok(val)
         },
         Expr::Block(stmts) => {
-            let mut last_val = Int::from_i64(ctx, 0).into();
+            let env_snapshot = env.clone();
+            let mut last_val: Dynamic<'a> = Int::from_i64(ctx, 0).into();
             for stmt in stmts {
-                last_val = expr_to_z3(ctx, arr, stmt, env, solver_opt);
+                match stmt {
+                    Expr::Let { var, value, .. } => {
+                        let val = expr_to_z3(ctx, arr, value, env, solver_opt)?;
+                        env.insert(var.clone(), val.clone());
+                        last_val = val;
+                    },
+                    _ => {
+                        last_val = expr_to_z3(ctx, arr, stmt, env, solver_opt)?;
+                    }
+                }
             }
-            last_val
+            *env = env_snapshot;
+            Ok(last_val)
         },
         Expr::BinaryOp(left, op, right) => {
-            let l = expr_to_z3(ctx, arr, left, env, solver_opt);
-            let r = expr_to_z3(ctx, arr, right, env, solver_opt);
+            let l = expr_to_z3(ctx, arr, left, env, solver_opt)?;
+            let r = expr_to_z3(ctx, arr, right, env, solver_opt)?;
 
             match op {
                 Op::Div => {
-                    let denominator = r.as_int().unwrap();
+                    let denominator = r.as_int().ok_or("Division operand must be integer")?;
                     if let Some(solver) = solver_opt {
                         solver.push();
                         solver.assert(&denominator._eq(&Int::from_i64(ctx, 0)));
                         if solver.check() == SatResult::Sat {
-                            panic!("Verification Error: Potential division by zero detected.");
+                            solver.pop(1);
+                            return Err("Verification Error: Potential division by zero detected.".into());
                         }
                         solver.pop(1);
                     }
-                    (l.as_int().unwrap() / denominator).into()
+                    Ok((l.as_int().ok_or("Division operand must be integer")? / denominator).into())
                 },
-                Op::Add => (l.as_int().unwrap() + r.as_int().unwrap()).into(),
-                Op::Sub => (l.as_int().unwrap() - r.as_int().unwrap()).into(),
-                Op::Mul => (l.as_int().unwrap() * r.as_int().unwrap()).into(),
-                Op::Gt  => l.as_int().unwrap().gt(&r.as_int().unwrap()).into(),
-                Op::Lt  => l.as_int().unwrap().lt(&r.as_int().unwrap()).into(),
-                Op::Ge  => l.as_int().unwrap().ge(&r.as_int().unwrap()).into(),
-                Op::Le  => l.as_int().unwrap().le(&r.as_int().unwrap()).into(),
-                Op::Eq  => l.as_int().unwrap()._eq(&r.as_int().unwrap()).into(),
-                Op::Neq => l.as_int().unwrap()._eq(&r.as_int().unwrap()).not().into(),
-                Op::And => Bool::and(ctx, &[&l.as_bool().unwrap(), &r.as_bool().unwrap()]).into(),
-                Op::Or  => Bool::or(ctx, &[&l.as_bool().unwrap(), &r.as_bool().unwrap()]).into(),
-                Op::Implies => l.as_bool().unwrap().implies(&r.as_bool().unwrap()).into(),
+                Op::Add => Ok((l.as_int().ok_or("Operand must be integer")? + r.as_int().ok_or("Operand must be integer")?).into()),
+                Op::Sub => Ok((l.as_int().ok_or("Operand must be integer")? - r.as_int().ok_or("Operand must be integer")?).into()),
+                Op::Mul => Ok((l.as_int().ok_or("Operand must be integer")? * r.as_int().ok_or("Operand must be integer")?).into()),
+                Op::Gt  => Ok(l.as_int().ok_or("Operand must be integer")?.gt(&r.as_int().ok_or("Operand must be integer")?).into()),
+                Op::Lt  => Ok(l.as_int().ok_or("Operand must be integer")?.lt(&r.as_int().ok_or("Operand must be integer")?).into()),
+                Op::Ge  => Ok(l.as_int().ok_or("Operand must be integer")?.ge(&r.as_int().ok_or("Operand must be integer")?).into()),
+                Op::Le  => Ok(l.as_int().ok_or("Operand must be integer")?.le(&r.as_int().ok_or("Operand must be integer")?).into()),
+                Op::Eq  => Ok(l.as_int().ok_or("Operand must be integer")?._eq(&r.as_int().ok_or("Operand must be integer")?).into()),
+                Op::Neq => Ok(l.as_int().ok_or("Operand must be integer")?._eq(&r.as_int().ok_or("Operand must be integer")?).not().into()),
+                Op::And => Ok(Bool::and(ctx, &[&l.as_bool().ok_or("Operand must be boolean")?, &r.as_bool().ok_or("Operand must be boolean")?]).into()),
+                Op::Or  => Ok(Bool::or(ctx, &[&l.as_bool().ok_or("Operand must be boolean")?, &r.as_bool().ok_or("Operand must be boolean")?]).into()),
+                Op::Implies => Ok(l.as_bool().ok_or("Operand must be boolean")?.implies(&r.as_bool().ok_or("Operand must be boolean")?).into()),
             }
         }
     }

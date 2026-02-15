@@ -25,8 +25,11 @@ pub enum Expr {
         value: Box<Expr>,
         body: Box<Expr>,
     },
+    Assign {
+        var: String,
+        value: Box<Expr>,
+    },
     Block(Vec<Expr>),
-    // 新設: ループ構文 (条件, 不変量, ボディ)
     While {
         cond: Box<Expr>,
         invariant: Box<Expr>,
@@ -155,6 +158,18 @@ fn parse_statement(tokens: &[String], pos: &mut usize) -> Expr {
             var,
             value: Box::new(value),
             body: Box::new(Expr::Number(0)),
+        }
+    } else if *pos + 1 < tokens.len()
+        && tokens[*pos].chars().next().map_or(false, |c| c.is_alphabetic() || c == '_')
+        && tokens[*pos + 1] == "="
+    {
+        let var = tokens[*pos].clone();
+        *pos += 1; // var_name
+        *pos += 1; // =
+        let value = parse_implies(tokens, pos);
+        Expr::Assign {
+            var,
+            value: Box::new(value),
         }
     } else {
         parse_implies(tokens, pos)

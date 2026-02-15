@@ -16,9 +16,9 @@ pub fn verify(atom: &Atom, output_dir: &Path) -> Result<(), String> {
     let array_sort = z3::Sort::array(&ctx, &int_sort, &int_sort);
     let arr = Array::new_const(&ctx, "arr", &array_sort);
 
-    // 変数環境 (let で定義された変数を保持)
     let mut env: HashMap<String, Dynamic> = HashMap::new();
 
+    // 1. 事前条件 (Requires / ForAll) のアサート
     for q in &atom.forall_constraints {
         let i = Int::new_const(&ctx, q.var.as_str());
         let start = Int::from_i64(&ctx, q.start.parse::<i64>().unwrap_or(0));
@@ -30,7 +30,7 @@ pub fn verify(atom: &Atom, output_dir: &Path) -> Result<(), String> {
 
         let range_cond = Bool::and(&ctx, &[&i.ge(&start), &i.lt(&end)]);
         let expr_ast = parse_expression(&q.condition);
-        let condition_z3 = expr_to_z3(&ctx, &arr, &expr_ast, &mut env).as_bool().expect("Condition must be boolean");
+        let condition_z3 = expr_to_z3(&ctx, &arr, &expr_ast, &mut env, None).as_bool().expect("Condition must be boolean");
 
         let quantifier_expr = match q.q_type {
             QuantifierType::ForAll => z3::ast::forall_const(&ctx, &[&i], &[], &range_cond.implies(&condition_z3)),
@@ -39,76 +39,83 @@ pub fn verify(atom: &Atom, output_dir: &Path) -> Result<(), String> {
         solver.assert(&quantifier_expr);
     }
 
-    // Body の検証
+    // 2. Body の解析と安全性検証
     let body_ast = parse_expression(&atom.body_expr);
-    let body_result = expr_to_z3(&ctx, &arr, &body_ast, &mut env);
 
-    // ゼロ除算チェック
-    if atom.body_expr.contains("/") {
-        solver.push();
-        // 現在の環境における「分母」が0になり得るかをチェックするロジックが必要だが
-        // ここでは簡単のため、bという変数が定義されている場合に0との比較を行う
-        let b = Int::new_const(&ctx, "b");
-        solver.assert(&b._eq(&Int::from_i64(&ctx, 0)));
+    // 修正：expr_to_z3 に solver を渡し、式の中で除算が見つかるたびに安全性をチェックする
+    let _body_result = expr_to_z3(&ctx, &arr, &body_ast, &mut env, Some(&solver));
 
-        if solver.check() == SatResult::Sat {
-            save_visualizer_report(output_dir, "failed", &atom.name, "N/A", "0", "Potential division by zero.");
-            return Err("Unsafe division found.".into());
-        }
-        solver.pop(1);
-    }
-
+    // 3. 最終的な論理矛盾チェック
     if solver.check() == SatResult::Unsat {
-        save_visualizer_report(output_dir, "failed", &atom.name, "N/A", "N/A", "Logic contradiction found.");
-        Err("Verification failed.".into())
-    } else {
-        save_visualizer_report(output_dir, "success", &atom.name, "N/A", "N/A", "All constraints including let-bindings are safe.");
-        Ok(())
+        save_visualizer_report(output_dir, "failed", &atom.name, "N/A", "N/A", "Logic contradiction in constraints.");
+        return Err("Verification failed: Contradiction found.".into());
     }
+
+    save_visualizer_report(output_dir, "success", &atom.name, "N/A", "N/A", "All paths verified safe.");
+    Ok(())
 }
 
 fn expr_to_z3<'a>(
     ctx: &'a Context,
     arr: &Array<'a>,
     expr: &Expr,
-    env: &mut HashMap<String, Dynamic<'a>>
+    env: &mut HashMap<String, Dynamic<'a>>,
+    solver_opt: Option<&Solver<'a>> // 安全性チェック用
 ) -> Dynamic<'a> {
     match expr {
         Expr::Number(n) => Int::from_i64(ctx, *n).into(),
         Expr::Variable(name) => {
-            // envに変数があればそれを使う（letで定義された値）
             env.get(name).cloned().unwrap_or_else(|| Int::new_const(ctx, name.as_str()).into())
         },
         Expr::ArrayAccess(_name, index_expr) => {
-            let idx = expr_to_z3(ctx, arr, index_expr, env).as_int().expect("Index must be integer");
+            let idx = expr_to_z3(ctx, arr, index_expr, env, solver_opt).as_int().expect("Index must be integer");
             arr.select(&idx).into()
         },
         Expr::IfThenElse { cond, then_branch, else_branch } => {
-            let c = expr_to_z3(ctx, arr, cond, env).as_bool().expect("If condition must be boolean");
-            let t = expr_to_z3(ctx, arr, then_branch, env);
-            let e = expr_to_z3(ctx, arr, else_branch, env);
+            let c = expr_to_z3(ctx, arr, cond, env, solver_opt).as_bool().expect("If condition must be boolean");
+
+            // ifのパスごとに環境を分離して検証（簡略化のため現状はDynamicでのITE）
+            let t = expr_to_z3(ctx, arr, then_branch, env, solver_opt);
+            let e = expr_to_z3(ctx, arr, else_branch, env, solver_opt);
             c.ite(&t, &e)
         },
         Expr::Let { var, value, body } => {
-            let val = expr_to_z3(ctx, arr, value, env);
+            let val = expr_to_z3(ctx, arr, value, env, solver_opt);
             env.insert(var.clone(), val);
-            expr_to_z3(ctx, arr, body, env)
+            expr_to_z3(ctx, arr, body, env, solver_opt)
         },
         Expr::Block(stmts) => {
             let mut last_val = Int::from_i64(ctx, 0).into();
             for stmt in stmts {
-                last_val = expr_to_z3(ctx, arr, stmt, env);
+                last_val = expr_to_z3(ctx, arr, stmt, env, solver_opt);
             }
             last_val
         },
         Expr::BinaryOp(left, op, right) => {
-            let l = expr_to_z3(ctx, arr, left, env);
-            let r = expr_to_z3(ctx, arr, right, env);
+            let l = expr_to_z3(ctx, arr, left, env, solver_opt);
+            let r = expr_to_z3(ctx, arr, right, env, solver_opt);
+
             match op {
+                Op::Div => {
+                    let denominator = r.as_int().unwrap();
+                    // 修正：除算が見つかったら、その時点のパス条件で分母が0になり得るか検証
+                    if let Some(solver) = solver_opt {
+                        solver.push();
+                        solver.assert(&denominator._eq(&Int::from_i64(ctx, 0)));
+                        if solver.check() == SatResult::Sat {
+                            // 0になり得る反例が見つかった
+                            let _model = solver.get_model();
+                            // 実際はここでプロセスを中断するかエラーフラグを立てる必要がある
+                            // Mumeiでは即座にエラーとして報告
+                            panic!("Verification Error: Potential division by zero detected.");
+                        }
+                        solver.pop(1);
+                    }
+                    (l.as_int().unwrap() / denominator).into()
+                },
                 Op::Add => (l.as_int().unwrap() + r.as_int().unwrap()).into(),
                 Op::Sub => (l.as_int().unwrap() - r.as_int().unwrap()).into(),
                 Op::Mul => (l.as_int().unwrap() * r.as_int().unwrap()).into(),
-                Op::Div => (l.as_int().unwrap() / r.as_int().unwrap()).into(),
                 Op::Gt  => l.as_int().unwrap().gt(&r.as_int().unwrap()).into(),
                 Op::Lt  => l.as_int().unwrap().lt(&r.as_int().unwrap()).into(),
                 Op::Ge  => l.as_int().unwrap().ge(&r.as_int().unwrap()).into(),

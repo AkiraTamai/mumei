@@ -1,5 +1,5 @@
 use inkwell::context::Context;
-use inkwell::values::{BasicValue, BasicValueEnum, IntValue, FunctionValue};
+use inkwell::values::{IntValue, FunctionValue};
 use inkwell::builder::Builder;
 use inkwell::module::Module;
 use inkwell::IntPredicate;
@@ -36,7 +36,7 @@ pub fn compile(atom: &Atom, output_path: &Path) -> Result<(), String> {
     let result_val = compile_expr(&context, &builder, &module, &function, &body_ast, &mut variables)?;
 
     // 5. 戻り値の設定
-    builder.build_return(Some(&result_val));
+    builder.build_return(Some(&result_val)).map_err(|e| e.to_string())?;
 
     // 6. LLVM IR (.ll) ファイルとして書き出し
     let path_with_ext = output_path.with_extension("ll");
@@ -66,18 +66,18 @@ fn compile_expr<'a>(
             let rhs = compile_expr(context, builder, module, function, right, variables)?;
 
             match op {
-                Op::Add => Ok(builder.build_int_add(lhs, rhs, "add_tmp")),
-                Op::Sub => Ok(builder.build_int_sub(lhs, rhs, "sub_tmp")),
-                Op::Mul => Ok(builder.build_int_mul(lhs, rhs, "mul_tmp")),
-                Op::Div => Ok(builder.build_int_signed_div(lhs, rhs, "div_tmp")),
+                Op::Add => Ok(builder.build_int_add(lhs, rhs, "add_tmp").map_err(|e| e.to_string())?),
+                Op::Sub => Ok(builder.build_int_sub(lhs, rhs, "sub_tmp").map_err(|e| e.to_string())?),
+                Op::Mul => Ok(builder.build_int_mul(lhs, rhs, "mul_tmp").map_err(|e| e.to_string())?),
+                Op::Div => Ok(builder.build_int_signed_div(lhs, rhs, "div_tmp").map_err(|e| e.to_string())?),
                 // 比較演算 (i1型をi64型にゼロ拡張)
                 Op::Eq => {
-                    let cmp = builder.build_int_compare(IntPredicate::EQ, lhs, rhs, "eq_tmp");
-                    Ok(builder.build_int_z_extend(cmp, context.i64_type(), "bool_tmp"))
+                    let cmp = builder.build_int_compare(IntPredicate::EQ, lhs, rhs, "eq_tmp").map_err(|e| e.to_string())?;
+                    Ok(builder.build_int_z_extend(cmp, context.i64_type(), "bool_tmp").map_err(|e| e.to_string())?)
                 },
                 Op::Lt => {
-                    let cmp = builder.build_int_compare(IntPredicate::SLT, lhs, rhs, "lt_tmp");
-                    Ok(builder.build_int_z_extend(cmp, context.i64_type(), "bool_tmp"))
+                    let cmp = builder.build_int_compare(IntPredicate::SLT, lhs, rhs, "lt_tmp").map_err(|e| e.to_string())?;
+                    Ok(builder.build_int_z_extend(cmp, context.i64_type(), "bool_tmp").map_err(|e| e.to_string())?)
                 },
                 _ => Err(format!("LLVM Codegen: Unsupported operator {:?}", op)),
             }
@@ -90,24 +90,23 @@ fn compile_expr<'a>(
             let after_block = context.append_basic_block(*function, "loop.after");
 
             // Headerへジャンプ
-            builder.build_unconditional_branch(header_block);
+            builder.build_unconditional_branch(header_block).map_err(|e| e.to_string())?;
 
             // --- Header: 条件判定 ---
             builder.position_at_end(header_block);
             let cond_val = compile_expr(context, builder, module, function, cond, variables)?;
-            let i1_type = context.bool_type();
             let cond_bool = builder.build_int_compare(
                 IntPredicate::NE,
                 cond_val,
                 context.i64_type().const_int(0, false),
                 "loop_cond"
-            );
-            builder.build_conditional_branch(cond_bool, body_block, after_block);
+            ).map_err(|e| e.to_string())?;
+            builder.build_conditional_branch(cond_bool, body_block, after_block).map_err(|e| e.to_string())?;
 
             // --- Body: 実行 ---
             builder.position_at_end(body_block);
             compile_expr(context, builder, module, function, body, variables)?;
-            builder.build_unconditional_branch(header_block); // Headerに戻る
+            builder.build_unconditional_branch(header_block).map_err(|e| e.to_string())?; // Headerに戻る
 
             // --- After: 継続 ---
             builder.position_at_end(after_block);

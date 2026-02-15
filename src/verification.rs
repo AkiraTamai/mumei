@@ -8,13 +8,12 @@ use std::collections::HashMap;
 
 pub fn verify(atom: &Atom, output_dir: &Path) -> Result<(), String> {
     let mut cfg = Config::new();
-    cfg.set_timeout(10000);
+    cfg.set_timeout_msec(10000);
     let ctx = Context::new(&cfg);
     let solver = Solver::new(&ctx);
 
-    let int_sort = Int::get_sort(&ctx);
-    let array_sort = z3::Sort::array(&ctx, &int_sort, &int_sort);
-    let arr = Array::new_const(&ctx, "arr", &array_sort);
+    let int_sort = z3::Sort::int(&ctx);
+    let arr = Array::new_const(&ctx, "arr", &int_sort, &int_sort);
 
     let mut env: HashMap<String, Dynamic> = HashMap::new();
 

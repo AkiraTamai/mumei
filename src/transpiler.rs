@@ -11,7 +11,7 @@ pub fn transpile(atom: &Atom, lang: TargetLanguage) -> String {
     match lang {
         TargetLanguage::TypeScript => transpile_to_ts(atom),
         TargetLanguage::Rust => transpile_to_rust(atom),
-        TargetLanguage::Go => transpile_to_go(atom), // Goを追加
+        TargetLanguage::Go => transpile_to_go(atom),
     }
 }
 
@@ -109,11 +109,10 @@ fn format_expr_go(expr: &Expr) -> String {
     }
 }
 
-// --- Rust 変換ロジック ---
+// --- Rust 変換ロジック (修正済み) ---
 fn transpile_to_rust(atom: &Atom) -> String {
     let params: Vec<String> = atom.params.iter().map(|p| format!("{}: i64", p)).collect();
     let params_str = params.join(", ");
-    // Rustは式ベースなのでBlockの扱いが楽
     let body = format_expr_rust(&crate::parser::parse_expression(&atom.body_expr));
 
     format!(
@@ -123,6 +122,45 @@ fn transpile_to_rust(atom: &Atom) -> String {
 }
 
 fn format_expr_rust(expr: &Expr) -> String {
-    // Rust版の実装 (TypeScript版に近いが、セミコロンの有無などを調整)
-    "/* Rust implementation follows the same recursive pattern */".to_string()
+    match expr {
+        Expr::Number(n) => n.to_string(),
+        Expr::Variable(v) => v.clone(),
+        Expr::ArrayAccess(name, idx) => format!("{}[{} as usize]", name, format_expr_rust(idx)),
+        Expr::BinaryOp(l, op, r) => {
+            let op_str = match op {
+                Op::Add => "+", Op::Sub => "-", Op::Mul => "*", Op::Div => "/",
+                Op::Eq => "==", Op::Neq => "!=", Op::Gt => ">", Op::Lt => "<",
+                Op::Ge => ">=", Op::Le => "<=", Op::And => "&&", Op::Or => "||",
+                Op::Implies => "/* implies */",
+            };
+            format!("({} {} {})", format_expr_rust(l), op_str, format_expr_rust(r))
+        },
+        Expr::IfThenElse { cond, then_branch, else_branch } => {
+            // Rustはifが式なのでそのまま記述可能
+            format!(
+                "if {} {{ {} }} else {{ {} }}",
+                format_expr_rust(cond),
+                format_expr_rust(then_branch),
+                format_expr_rust(else_branch)
+            )
+        },
+        Expr::Let { var, value, body: _ } => {
+            format!("let {} = {};", var, format_expr_rust(value))
+        },
+        Expr::Block(stmts) => {
+            let mut lines = Vec::new();
+            for (i, stmt) in stmts.iter().enumerate() {
+                let s = format_expr_rust(stmt);
+                if i == stmts.len() - 1 {
+                    // 最後の式はセミコロンなし（戻り値）
+                    lines.push(s);
+                } else {
+                    // 途中の式やletはセミコロンあり
+                    if s.ends_with(';') { lines.push(s); }
+                    else { lines.push(format!("{};", s)); }
+                }
+            }
+            format!("{{\n        {}\n    }}", lines.join("\n        "))
+        }
+    }
 }

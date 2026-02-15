@@ -20,13 +20,11 @@ pub enum Expr {
         then_branch: Box<Expr>,
         else_branch: Box<Expr>,
     },
-    // 新設：ローカル変数定義 (let var = value; body)
     Let {
         var: String,
         value: Box<Expr>,
         body: Box<Expr>,
     },
-    // 新設：ブロック構文 (複数の式の集合)
     Block(Vec<Expr>),
 }
 
@@ -63,9 +61,8 @@ pub fn parse(source: &str) -> Atom {
     let name_re = Regex::new(r"atom\s+(\w+)\s*\(([^)]*)\)").unwrap();
     let req_re = Regex::new(r"requires:\s*([^;]+);").unwrap();
     let ens_re = Regex::new(r"ensures:\s*([^;]+);").unwrap();
-    // body: { ... } または body: ... ; の両方に対応
-    let body_re = Regex::new(r"body:\s*(\{[\s\S]*?\}|[^;]+);").unwrap();
 
+    // 量子化子の正規表現
     let forall_re = Regex::new(r"forall\(\s*(\w+)\s*,\s*([^,]+)\s*,\s*([^,]+)\s*,\s*([^)]+)\)").unwrap();
     let exists_re = Regex::new(r"exists\(\s*(\w+)\s*,\s*([^,]+)\s*,\s*([^,]+)\s*,\s*([^)]+)\)").unwrap();
 
@@ -75,7 +72,29 @@ pub fn parse(source: &str) -> Atom {
 
     let requires_raw = req_re.captures(source).map_or("true".to_string(), |c| c[1].trim().to_string());
     let ensures = ens_re.captures(source).map_or("true".to_string(), |c| c[1].trim().to_string());
-    let body_raw = body_re.captures(source).expect("Failed to parse body expression")[1].trim().to_string();
+
+    // --- body 抽出ロジックの修正点 ---
+    // 非貪欲正規表現 (*?) はネストした波括弧で失敗するため、カウンタ方式を採用
+    let body_marker = "body:";
+    let body_start_pos = source.find(body_marker).expect("Failed to find body:") + body_marker.len();
+    let body_snippet = source[body_start_pos..].trim();
+
+    let mut body_raw = String::new();
+    if body_snippet.starts_with('{') {
+        let mut brace_count = 0;
+        for c in body_snippet.chars() {
+            body_raw.push(c);
+            if c == '{' { brace_count += 1; }
+            else if c == '}' {
+                brace_count -= 1;
+                if brace_count == 0 { break; }
+            }
+        }
+    } else {
+        // 単一行（中括弧なし）の場合はセミコロンまでを抽出
+        body_raw = body_snippet.split(';').next().unwrap_or("").to_string();
+    }
+    // -------------------------------
 
     let mut forall_constraints = Vec::new();
     for cap in forall_re.captures_iter(&requires_raw) {
@@ -98,7 +117,6 @@ pub fn parse(source: &str) -> Atom {
 // --- 4. 再帰下降式解析エンジン (Expression Parser) ---
 
 pub fn tokenize(input: &str) -> Vec<String> {
-    // セミコロン、イコール、中括弧を追加
     let re = Regex::new(r"(\d+|[a-zA-Z_]\w*|==|!=|>=|<=|=>|&&|\|\||[+\-*/><()\[\]{};=])").unwrap();
     re.find_iter(input).map(|m| m.as_str().to_string()).collect()
 }
@@ -132,12 +150,10 @@ fn parse_statement(tokens: &[String], pos: &mut usize) -> Expr {
         if *pos < tokens.len() && tokens[*pos] == "=" { *pos += 1; }
         let value = parse_implies(tokens, pos);
 
-        // Letの後は残りの文をbodyとして再帰的にパースするか、単一の代入として保持
-        // ここではBlock内で処理されるため、値の定義として返す
         Expr::Let {
             var,
             value: Box::new(value),
-            body: Box::new(Expr::Number(0)), // Blockが実質的なbodyを管理
+            body: Box::new(Expr::Number(0)),
         }
     } else {
         parse_implies(tokens, pos)

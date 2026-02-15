@@ -1,54 +1,60 @@
-use crate::parser::Atom;
-use std::fs;
-use std::path::Path;
+use crate::parser::{Expr, Op, Atom, parse_expression};
 
-/// MumeiのAtomをTypeScriptのソースコードに変換する
-pub fn transpile(atom: &Atom, output_path: &Path) -> Result<(), String> {
-    let mut ts_code = String::new();
+pub fn transpile_to_ts(atom: &Atom) -> String {
+    let params = atom.params.join(", ");
+    let body = format_expr_ts(&parse_expression(&atom.body_expr));
 
-    // 1. JSDoc (ドキュメンテーション)
-    ts_code.push_str("/**\n");
-    ts_code.push_str(&format!(" * {} - Verified by Mumei (Mathematical Proof-Driven Logic)\n", atom.name));
-    ts_code.push_str(" *\n");
-    ts_code.push_str(" * This code is automatically generated. Do not edit.\n");
-    ts_code.push_str(&format!(" * @requires {}\n", atom.requires));
+    format!(
+        "/**\n * Verified Atom: {}\n * Requires: {}\n * Ensures: {}\n */\nfunction {}({}): any {{\n    {}\n}}",
+        atom.name, atom.requires, atom.ensures, atom.name, params, body
+    )
+}
 
-    // 引数の説明を追加
-    for param in &atom.params {
-        ts_code.push_str(&format!(" * @param {{number}} {} - Input value (treated as integer)\n", param));
+fn format_expr_ts(expr: &Expr) -> String {
+    match expr {
+        Expr::Number(n) => n.to_string(),
+        Expr::Variable(v) => v.clone(),
+        Expr::ArrayAccess(name, idx) => format!("{}[{}]", name, format_expr_ts(idx)),
+        Expr::BinaryOp(l, op, r) => {
+            let op_str = match op {
+                Op::Add => "+", Op::Sub => "-", Op::Mul => "*", Op::Div => "/",
+                Op::Eq => "===", Op::Neq => "!==", Op::Gt => ">", Op::Lt => "<",
+                Op::Ge => ">=", Op::Le => "<=", Op::And => "&&", Op::Or => "||",
+                Op::Implies => "/* implies */",
+            };
+            format!("({} {} {})", format_expr_ts(l), op_str, format_expr_ts(r))
+        },
+        Expr::IfThenElse { cond, then_branch, else_branch } => {
+            format!(
+                "if ({}) {{\n        {}\n    }} else {{\n        {}\n    }}",
+                format_expr_ts(cond),
+                format_expr_ts(then_branch),
+                format_expr_ts(else_branch)
+            )
+        },
+        Expr::While { cond, invariant, body } => {
+            format!(
+                "// invariant: {}\n    while ({}) {{\n        {}\n    }}",
+                format_expr_ts(invariant),
+                format_expr_ts(cond),
+                format_expr_ts(body)
+            )
+        },
+        Expr::Let { var, value, body: _ } => {
+            format!("let {} = {};", var, format_expr_ts(value))
+        },
+        Expr::Assign { var, value } => {
+            format!("{} = {};", var, format_expr_ts(value))
+        },
+        Expr::Block(stmts) => {
+            stmts.iter().map(|s| {
+                let code = format_expr_ts(s);
+                if code.starts_with("if") || code.starts_with("let") || code.starts_with("while") || code.starts_with("//") || code.ends_with(';') {
+                    code
+                } else {
+                    format!("return {};", code)
+                }
+            }).collect::<Vec<_>>().join("\n    ")
+        }
     }
-    ts_code.push_str(" * @returns {number} The calculated result\n");
-    ts_code.push_str(" * @throws {Error} If pre-conditions are violated\n");
-    ts_code.push_str(" */\n");
-
-    // 2. 関数定義 (Export)
-    let params = atom.params.iter()
-        .map(|p| format!("{}: number", p))
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    ts_code.push_str(&format!("export function {}({}): number {{\n", atom.name, params));
-
-    // 3. 実行時バリデーション (Runtime Validation)
-    // TypeScript/JSは型チェックがコンパイル時のみなので、実行時のガードが重要
-    if atom.requires.contains("b != 0") {
-        ts_code.push_str("    // Mumei Pre-condition Check\n");
-        ts_code.push_str("    if (b === 0) {\n");
-        ts_code.push_str(&format!(
-            "        throw new Error(`Mumei Violation: Requirement 'b != 0' failed in function '{}'`);\n",
-            atom.name
-        ));
-        ts_code.push_str("    }\n\n");
-    }
-
-    // 4. ロジック本体
-    // MumeiのロジックをそのままJS式として出力
-    ts_code.push_str(&format!("    return {};\n", atom.body_expr));
-    ts_code.push_str("}\n");
-
-    // 5. ファイル書き出し (.ts)
-    let ts_file_path = output_path.with_extension("ts");
-    fs::write(&ts_file_path, ts_code).map_err(|e| e.to_string())?;
-
-    Ok(())
 }

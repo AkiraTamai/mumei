@@ -4,9 +4,21 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-pest = "2.7"
-pest_derive = "2.7"
-z3 = "0.12"
-inkwell = { version = "0.2", features = ["llvm15-0"] }
+# CLI解析: 刀を振るうためのコマンドラインインターフェース
 clap = { version = "4.4", features = ["derive"] }
+
+# 構文解析: 正規表現ベースの高速な字句解析
+regex = "1.10"
+
+# 形式検証: Z3 SMTソルバによる数学的証明
+# 注意: システムに libz3-dev 等のインストールが必要です
+z3 = "0.12"
+
+# コード生成: LLVM IR 生成用の低レイヤライブラリ
+# バージョン指定ではなく git から直接取得するように変更
+inkwell = { git = "https://github.com/TheDan64/inkwell", branch = "master", features = ["llvm17-0"] }
+
+# レポート出力: 検証結果の JSON 書き出し
 serde_json = "1.0"
+
+# ※ 以前使用していた pest は regex ベースの自作パーサーに移行したため依存関係から削除していますが、必要に応じて残すことも可能

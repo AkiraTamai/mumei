@@ -2,29 +2,42 @@
 
 **Mathematical Proof-Driven Programming Language for AI Agents.**
 
-「無銘（Mumei）」は、作者の個性を排し、数学的な「正しさ」のみを追求するAIネイティブなプログラミング言語です。AIがコードを生成する際、実行前にその論理的欠陥を数学的に証明・排除し、不純物のない「真実のコード」のみをマシンコード（LLVM）および検証済みソースコード（Rust/Go/TS）へと昇華させます。
+**Mumei (無銘)** is an AI-native programming language designed to eliminate the developer's personality and pursue only mathematical "truth." When an AI generates code, Mumei mathematically proves and eliminates logical flaws before execution, refining the "pure code" into machine code (LLVM) and verified source code (Rust/Go/TypeScript).
 
 ---
 
-## 🛠️ 設計思想 (Design Philosophy)
+## ⚖️ Comparison with Formal Methods
 
-Mumeiは以下の5つの工程（鍛造プロセス）を経て、実行バイナリ、検証済みソース、および検証レポートを生成します。
+Mumei is designed to bridge the gap between heavyweight formal proof assistants like Lean or Coq and modern application development.
 
-1. **Polishing (Parser):** `atom` と呼ばれる極小の関数単位でコードを解析します。
-2. **The Ritual of Truth (Verification):** Z3 SMT Solverを用い、事前条件 (`requires`) が実装 (`body`) の安全性を数学的に担保しているか検証します。
-3. **Visual Inspection (Visualizer):** 検証で発見された「論理の亀裂（反例）」をリアルタイムで視覚化します。
-4. **Tempering (Codegen):** 検証をパスしたコードを LLVM IR へと変換し、高速な実行能力を与えます。
-5. **Sharpening (Transpiler):** 検証済みロジックを、ドキュメントとアサーション付きの高品質な **Rust/Go/TypeScript** コードとして出力します。
+| Feature | Lean 4 / Coq | Mumei |
+| --- | --- | --- |
+| **Verification Lead** | Human (Requires math expertise) | SMT Solver (Automated AI verification) |
+| **Learning Curve** | Extremely Steep | Moderate (Close to standard coding) |
+| **Primary Output** | Custom Runtime / C | Rust, Go, TypeScript, LLVM |
+| **AI Agent Role** | Auxiliary / Experimental | Primary Driver (Self-healing loops) |
 
 ---
 
-## 🚀 セットアップ (Installation)
+## 🛠️ Design Philosophy
 
-### 1. 依存ライブラリの導入
+Mumei generates executable binaries, verified source code, and verification reports through five distinct stages (The Forging Process):
 
-* **LLVM 15:** ネイティブコード生成用
-* **Z3 Solver:** 論理検証用
-* **Python 3.x:** ビジュアライザー、修復スクリプト、MCPサーバー用
+1. **Polishing (Parser):** Analyzes code in minimal functional units called `atoms`. Supports `if-else` branching, `let` variable bindings, and block syntax `{}`.
+2. **The Ritual of Truth (Verification):** Utilizes the Z3 SMT Solver to mathematically guarantee that the implementation (`body`) satisfies the safety requirements (`requires`).
+3. **Visual Inspection (Visualizer):** Real-time visualization of "logical fractures" (counter-examples) discovered during verification.
+4. **Tempering (Codegen):** Converts verified code into LLVM IR, granting high-performance execution capabilities.
+5. **Sharpening (Transpiler):** Exports verified logic as high-quality **Rust, Go, and TypeScript** source code complete with documentation and assertions.
+
+---
+
+## 🚀 Installation
+
+### 1. Install Dependencies
+
+* **LLVM 15:** For native code generation.
+* **Z3 Solver:** For formal logic verification.
+* **Python 3.x:** For the visualizer, healing scripts, and MCP server.
 
 ```bash
 # macOS
@@ -38,9 +51,9 @@ pip install streamlit pandas python-dotenv openai mcp-server-fastmcp
 
 ```
 
-### 2. 環境変数の設定
+### 2. Configure Environment Variables
 
-ルートディレクトリに `.env` ファイルを作成してください。 **※ `.env` ファイルは Git の追跡から除外（.gitignoreに追加）してください。**
+Create a `.env` file in the root directory.
 
 ```text
 OPENAI_API_KEY=your_api_key_here
@@ -51,81 +64,100 @@ OPENAI_API_KEY=your_api_key_here
 
 ## 🤖 MCP Server (AI Agent Integration)
 
-Mumeiは **Model Context Protocol (MCP)** に対応しています。
-最新のサーバー実装では、リクエストごとに一時ディレクトリを作成して隔離（サンドボックス化）するため、並行実行時もデータの競合が発生しません。
+Mumei supports the **Model Context Protocol (MCP)**, functioning as a tool for AI agents to autonomously forge "correct code."
 
-### 1. Claude Desktop への登録
+### Available Tools
 
-`claude_desktop_config.json` に設定を追記します。
-
-```json
-{
-  "mcpServers": {
-    "mumei": {
-      "command": "python",
-      "args": ["/絶対パス/to/mumei/mcp_server.py"],
-      "env": {
-        "OPENAI_API_KEY": "your_api_key_here"
-      }
-    }
-  }
-}
-
-```
-
-### 2. 提供されるツール (Tools)
-
-* **`forge_blade`**: Mumeiコードを検証・コンパイル・マルチ言語変換し、**検証レポートを含めて**一括で返却します（並行安全）。
-* **`self_heal_loop`**: ローカルの `sword_test.mm` を対象に、検証をパスするまでAIが自律的に修正を行います。
+* **`forge_blade`**: Verifies, compiles, and transpiles Mumei code into multiple languages (Rust/Go/TS), returning the verification report in a single pass.
+* **`self_heal_loop`**: Triggers an autonomous loop where the AI fixes code until it passes verification.
 
 ---
 
-## 📖 使い方 (Usage)
+## 📂 Project Structure
 
-### 1. 手動での鍛造
+* `src/parser.rs`: AST definition, syntax parsing for `if-else`, `let`, and `blocks`.
+* `src/verification.rs`: Formal verification via Z3. Implements `Ite` (If-Then-Else) logic for branching.
+* `src/transpiler.rs`: Multi-language export engine (Rust, Go, TypeScript).
+* `src/codegen.rs`: LLVM IR generation.
+* `src/main.rs`: The Forging Commander. Orchestrates the output pipeline.
+
+---
+
+## 🗺️ Roadmap
+
+* [x] **Multi-Language Support:** Transpilation to Rust, Go, and TypeScript.
+* [x] **Control Flow:** Support for `if-else` branching and `let` variable bindings.
+* [x] **Stateless MCP Server:** Implementation of thread-safe temporary directory isolation.
+* [ ] **Loop Support:** Support for `for` / `while` syntax and **Loop Invariant** formal verification.
+* [ ] **Standard Library:** Expanded sets for array manipulation, math functions, and string processing.
+* [ ] **Type System 2.0:** Native verification support for unsigned integers (u64) and floating-point (f64).
+* [ ] **Refinement Types:** Introduction of types with intrinsic constraints (e.g., `where value > 0`).
+* [ ] **VS Code Extension:** Real-time verification error feedback (LSP support).
+
+---
+
+## 📖 Workflow Tutorial (Example)
+
+Mumei transforms "specifications" into "multi-language implementations" in four steps:
+
+### 1. Define an Atom (`sword_test.mm`)
+
+Write code including mathematical constraints. In this example, we define logic that safely returns `0` if the divisor `b` is `0`, otherwise performs division.
+
+```mumei
+atom safe_divide(a, b)
+requires:
+    true;
+ensures:
+    (b == 0 => result == 0) && (b != 0 => result == a / b);
+body: {
+    let res = if b == 0 {
+        0
+    } else {
+        a / b
+    };
+    res
+};
+
+```
+
+### 2. Run Verification and Compilation
 
 ```bash
-# 検証結果(report.json)は指定した出力先のディレクトリに生成されます
 cargo run -- sword_test.mm --output katana
 
 ```
 
-### 2. 自律修復 (Self-Healing Loop)
+### 3. Internal Process Mechanics
 
-検証に失敗した場合、AIが自動的にエラーログと反例を分析し、ソースコードを修正します。
+1. **Polishing:** The `if-else` and `let` blocks are converted into an Abstract Syntax Tree (AST).
+2. **Verification:** Z3 checks if there is any case where `b` could be `0`. Since the division is guarded by the `if b == 0` check, **it is mathematically proven that the division path never encounters b=0**, and verification passes.
+3. **Tempering:** High-speed intermediate code `katana.ll` is generated.
+4. **Sharpening:** The verified logic is exported as source files for three target languages.
 
-```bash
-python self_healing.py
+### 4. Verify Artifacts
 
+Upon successful verification, the following files are automatically generated:
+
+* **`katana.rs` (Rust):** `pub fn safe_divide(a: i64, b: i64) -> i64 { ... }`
+* **`katana.go` (Go):** `func safe_divide(a int64, b int64) int64 { ... }`
+* **`katana.ts` (TypeScript):** `function safe_divide(a: any, b: any): any { ... }`
+
+- sample
+```
+./build_and_run.sh
+・・・
+✨ Build Success!
+🚀 Running Mumei on sword_test.mm...
+🗡️  Mumei: Forging the blade...
+✨ [1/4] Polishing Syntax: Atom 'sword_sum' identified.
+⚖️  [2/4] Verification: Passed. The logic is flawless.
+⚙️  [3/4] Tempering: Done. Created 'katana.ll'
+🌍 [4/4] Sharpening: Exporting verified Rust, Go, and TypeScript sources...
+✅ Done. Created 'katana.rs', 'katana.go', 'katana.ts'
+🎉 Blade forged and sharpened successfully.
+✨ Process complete.
 ```
 
----
-
-## 📊 Inspection (Visualizer)
-
-Mumeiは単に「エラー」を返すだけでなく、**なぜその論理が破綻したのか**を具体的な数値で提示します。
-
-* **起動:** `streamlit run visualizer/app.py`
-* **機能:** 検証失敗時の **反例 (Counter-example)** の提示、およびAI用修正プロンプトの自動生成。
-
----
-
-## 📂 プロジェクト構造
-
-* `src/main.rs`: 鍛造プロセスの司令塔。出力先ディレクトリに基づくレポートパス管理を実装。
-* `src/verification.rs`: Z3を使用した形式検証。隔離されたパスへの `report.json` 出力に対応。
-* `src/transpiler/`: Rust, Go, TypeScript への変換ロジック。
-* `self_healing.py`: OpenAI APIを利用した自律的論理修正スクリプト。
-* `mcp_server.py`: 並行安全性を確保した一時ディレクトリ方式の MCP サーバー。
-
----
-
-## 🗺️ ロードマップ (Roadmap)
-
-* [x] **Mumei Visualizer:** 検証プロセスの可視化。
-* [x] **Mumei Transpiler (Rust):** 検証済みコードの Rust 変換。
-* [x] **Self-Healing Loop:** AIによる自律的な論理修正。
-* [x] **Stateless MCP Server:** 並行安全な一時ディレクトリ方式の実装。
-* [ ] **Multi-Language Support:** Go および TypeScript トランスパイラの完備。
 
 ---

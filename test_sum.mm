@@ -1,4 +1,4 @@
-atom sword_sum(n)
+atom safe_add(n)
 requires:
     n >= 0;
 ensures:

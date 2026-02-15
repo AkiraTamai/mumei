@@ -1,52 +1,197 @@
 use inkwell::context::Context;
-use inkwell::values::BasicValueEnum;
-use crate::parser::Atom;
+use inkwell::values::{IntValue, FunctionValue, PhiValue};
+use inkwell::builder::Builder;
+use inkwell::module::Module;
+use inkwell::IntPredicate;
+use crate::parser::{Atom, Expr, Op, parse_expression};
+use std::collections::HashMap;
 use std::path::Path;
 
-/// MumeiのアトムをLLVM IRに変換し、ファイルに出力する
 pub fn compile(atom: &Atom, output_path: &Path) -> Result<(), String> {
-    // LLVMのコンテキスト、モジュール、ビルダーを作成
     let context = Context::create();
     let module = context.create_module(&atom.name);
     let builder = context.create_builder();
 
-    // 1. 関数の型定義 (現状は i32 型の引数2つ、戻り値1つと仮定)
-    let i32_type = context.i32_type();
-    let fn_type = i32_type.fn_type(&[i32_type.into(), i32_type.into()], false);
+    let i64_type = context.i64_type();
 
-    // 2. 関数本体をモジュールに追加
+    let param_types = vec![i64_type.into(); atom.params.len()];
+    let fn_type = i64_type.fn_type(&param_types, false);
     let function = module.add_function(&atom.name, fn_type, None);
 
-    // 3. 基本ブロック（関数の開始地点）を作成
-    let entry = context.append_basic_block(function, "entry");
-    builder.position_at_end(entry);
+    let entry_block = context.append_basic_block(function, "entry");
+    builder.position_at_end(entry_block);
 
-    // 4. 引数の取得
-    let a = function.get_nth_param(0).ok_or("Param 'a' not found")?.into_int_value();
-    let b = function.get_nth_param(1).ok_or("Param 'b' not found")?.into_int_value();
+    let mut variables = HashMap::new();
+    for (i, param_name) in atom.params.iter().enumerate() {
+        let val = function.get_nth_param(i as u32).unwrap().into_int_value();
+        variables.insert(param_name.clone(), val);
+    }
 
-    // 5. ボディ（実装）の命令生成
-    // ※ 簡易実装のため、body_expr内の演算子を見てLLVM命令を発行
-    let res = if atom.body_expr.contains("+") {
-        builder.build_int_add(a, b, "tmp_add")
-    } else if atom.body_expr.contains("-") {
-        builder.build_int_sub(a, b, "tmp_sub")
-    } else if atom.body_expr.contains("*") {
-        builder.build_int_mul(a, b, "tmp_mul")
-    } else if atom.body_expr.contains("/") {
-        // 検証を通過しているため、ここではゼロ除算の心配はない
-        builder.build_int_signed_div(a, b, "tmp_div")
-    } else {
-        // デフォルトは加算
-        builder.build_int_add(a, b, "tmp_def")
-    };
+    let body_ast = parse_expression(&atom.body_expr);
+    let result_val = compile_expr(&context, &builder, &module, &function, &body_ast, &mut variables)?;
 
-    // 6. 戻り値の設定
-    builder.build_return(Some(&res));
+    builder.build_return(Some(&result_val)).map_err(|e| e.to_string())?;
 
-    // 7. LLVM IR (.ll) ファイルとして書き出し
     let path_with_ext = output_path.with_extension("ll");
     module.print_to_file(&path_with_ext).map_err(|e| e.to_string())?;
 
     Ok(())
+}
+
+fn compile_expr<'a>(
+    context: &'a Context,
+    builder: &Builder<'a>,
+    module: &Module<'a>,
+    function: &FunctionValue<'a>,
+    expr: &Expr,
+    variables: &mut HashMap<String, IntValue<'a>>,
+) -> Result<IntValue<'a>, String> {
+    match expr {
+        Expr::Number(n) => Ok(context.i64_type().const_int(*n as u64, true)),
+
+        Expr::Variable(name) => variables.get(name)
+            .cloned()
+            .ok_or_else(|| format!("Undefined variable: {}", name)),
+
+        Expr::BinaryOp(left, op, right) => {
+            let lhs = compile_expr(context, builder, module, function, left, variables)?;
+            let rhs = compile_expr(context, builder, module, function, right, variables)?;
+
+            match op {
+                Op::Add => Ok(builder.build_int_add(lhs, rhs, "add_tmp").map_err(|e| e.to_string())?),
+                Op::Sub => Ok(builder.build_int_sub(lhs, rhs, "sub_tmp").map_err(|e| e.to_string())?),
+                Op::Mul => Ok(builder.build_int_mul(lhs, rhs, "mul_tmp").map_err(|e| e.to_string())?),
+                Op::Div => Ok(builder.build_int_signed_div(lhs, rhs, "div_tmp").map_err(|e| e.to_string())?),
+                Op::Eq => {
+                    let cmp = builder.build_int_compare(IntPredicate::EQ, lhs, rhs, "eq_tmp").map_err(|e| e.to_string())?;
+                    Ok(builder.build_int_z_extend(cmp, context.i64_type(), "bool_tmp").map_err(|e| e.to_string())?)
+                },
+                Op::Neq => {
+                    let cmp = builder.build_int_compare(IntPredicate::NE, lhs, rhs, "neq_tmp").map_err(|e| e.to_string())?;
+                    Ok(builder.build_int_z_extend(cmp, context.i64_type(), "bool_tmp").map_err(|e| e.to_string())?)
+                },
+                Op::Lt => {
+                    let cmp = builder.build_int_compare(IntPredicate::SLT, lhs, rhs, "lt_tmp").map_err(|e| e.to_string())?;
+                    Ok(builder.build_int_z_extend(cmp, context.i64_type(), "bool_tmp").map_err(|e| e.to_string())?)
+                },
+                Op::Gt => {
+                    let cmp = builder.build_int_compare(IntPredicate::SGT, lhs, rhs, "gt_tmp").map_err(|e| e.to_string())?;
+                    Ok(builder.build_int_z_extend(cmp, context.i64_type(), "bool_tmp").map_err(|e| e.to_string())?)
+                },
+                Op::Le => {
+                    let cmp = builder.build_int_compare(IntPredicate::SLE, lhs, rhs, "le_tmp").map_err(|e| e.to_string())?;
+                    Ok(builder.build_int_z_extend(cmp, context.i64_type(), "bool_tmp").map_err(|e| e.to_string())?)
+                },
+                Op::Ge => {
+                    let cmp = builder.build_int_compare(IntPredicate::SGE, lhs, rhs, "ge_tmp").map_err(|e| e.to_string())?;
+                    Ok(builder.build_int_z_extend(cmp, context.i64_type(), "bool_tmp").map_err(|e| e.to_string())?)
+                },
+                _ => Err(format!("LLVM Codegen: Unsupported operator {:?}", op)),
+            }
+        },
+
+        Expr::IfThenElse { cond, then_branch, else_branch } => {
+            let cond_val = compile_expr(context, builder, module, function, cond, variables)?;
+            let cond_bool = builder.build_int_compare(
+                IntPredicate::NE,
+                cond_val,
+                context.i64_type().const_int(0, false),
+                "if_cond"
+            ).map_err(|e| e.to_string())?;
+
+            let then_block = context.append_basic_block(*function, "then");
+            let else_block = context.append_basic_block(*function, "else");
+            let merge_block = context.append_basic_block(*function, "merge");
+
+            builder.build_conditional_branch(cond_bool, then_block, else_block)
+                .map_err(|e| e.to_string())?;
+
+            builder.position_at_end(then_block);
+            let then_val = compile_expr(context, builder, module, function, then_branch, variables)?;
+            let then_end_block = builder.get_insert_block().unwrap();
+            builder.build_unconditional_branch(merge_block).map_err(|e| e.to_string())?;
+
+            builder.position_at_end(else_block);
+            let else_val = compile_expr(context, builder, module, function, else_branch, variables)?;
+            let else_end_block = builder.get_insert_block().unwrap();
+            builder.build_unconditional_branch(merge_block).map_err(|e| e.to_string())?;
+
+            builder.position_at_end(merge_block);
+            let phi = builder.build_phi(context.i64_type(), "if_result")
+                .map_err(|e| e.to_string())?;
+            phi.add_incoming(&[(&then_val, then_end_block), (&else_val, else_end_block)]);
+            Ok(phi.as_basic_value().into_int_value())
+        },
+
+        Expr::While { cond, invariant: _, body } => {
+            let header_block = context.append_basic_block(*function, "loop.header");
+            let body_block = context.append_basic_block(*function, "loop.body");
+            let after_block = context.append_basic_block(*function, "loop.after");
+
+            let pre_loop_vars = variables.clone();
+            let entry_end_block = builder.get_insert_block().unwrap();
+
+            builder.build_unconditional_branch(header_block).map_err(|e| e.to_string())?;
+
+            builder.position_at_end(header_block);
+            let mut phi_nodes: Vec<(String, PhiValue<'a>)> = Vec::new();
+            for (name, pre_val) in &pre_loop_vars {
+                let phi = builder.build_phi(context.i64_type(), &format!("phi_{}", name))
+                    .map_err(|e| e.to_string())?;
+                phi.add_incoming(&[(pre_val, entry_end_block)]);
+                phi_nodes.push((name.clone(), phi));
+                variables.insert(name.clone(), phi.as_basic_value().into_int_value());
+            }
+
+            let cond_val = compile_expr(context, builder, module, function, cond, variables)?;
+            let cond_bool = builder.build_int_compare(
+                IntPredicate::NE,
+                cond_val,
+                context.i64_type().const_int(0, false),
+                "loop_cond"
+            ).map_err(|e| e.to_string())?;
+            builder.build_conditional_branch(cond_bool, body_block, after_block)
+                .map_err(|e| e.to_string())?;
+
+            builder.position_at_end(body_block);
+            compile_expr(context, builder, module, function, body, variables)?;
+            let body_end_block = builder.get_insert_block().unwrap();
+
+            for (name, phi) in &phi_nodes {
+                if let Some(body_val) = variables.get(name) {
+                    phi.add_incoming(&[(body_val, body_end_block)]);
+                }
+            }
+
+            builder.build_unconditional_branch(header_block).map_err(|e| e.to_string())?;
+
+            builder.position_at_end(after_block);
+            for (name, phi) in &phi_nodes {
+                variables.insert(name.clone(), phi.as_basic_value().into_int_value());
+            }
+            Ok(context.i64_type().const_int(0, false))
+        },
+
+        Expr::Block(stmts) => {
+            let mut last_val = context.i64_type().const_int(0, false);
+            for stmt in stmts {
+                last_val = compile_expr(context, builder, module, function, stmt, variables)?;
+            }
+            Ok(last_val)
+        },
+
+        Expr::Let { var, value, body: _ } => {
+            let val = compile_expr(context, builder, module, function, value, variables)?;
+            variables.insert(var.clone(), val);
+            Ok(val)
+        },
+
+        Expr::Assign { var, value } => {
+            let val = compile_expr(context, builder, module, function, value, variables)?;
+            variables.insert(var.clone(), val);
+            Ok(val)
+        },
+
+        _ => Err("LLVM Codegen: Unimplemented expression type".to_string()),
+    }
 }

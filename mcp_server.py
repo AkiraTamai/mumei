@@ -39,7 +39,6 @@ def forge_blade(source_code: str, output_name: str = "katana") -> str:
         response_parts = []
 
         # --- 🔍 隔離されたレポートの読み込み (並行安全の核心) ---
-        # verification.rs が --output で指定したディレクトリに report.json を出す前提
         report_file = tmp_path / "report.json"
         if report_file.exists():
             report_data = report_file.read_text(encoding="utf-8")
@@ -51,8 +50,10 @@ def forge_blade(source_code: str, output_name: str = "katana") -> str:
             for ext in [".rs", ".go", ".ts", ".ll"]:
                 gen_file = tmp_path / f"{output_name}{ext}"
                 if gen_file.exists():
+                    # 拡張子に合わせてシンタックスハイライトを変更
+                    lang = "rust" if ext in [".rs", ".ll"] else "go" if ext == ".go" else "typescript"
                     content = gen_file.read_text(encoding="utf-8")
-                    response_parts.append(f"\n### 生成コード: {output_name}{ext}\n```rust\n{content}\n```")
+                    response_parts.append(f"\n### 生成コード: {output_name}{ext}\n```{lang}\n{content}\n```")
 
             return "\n".join(response_parts)
         else:
@@ -63,27 +64,29 @@ def forge_blade(source_code: str, output_name: str = "katana") -> str:
 
             return "\n".join(response_parts)
 
-# ※ inspect_flaws は並行環境で競合を引き起こすため廃止
-# AIは forge_blade のレスポンスに含まれるレポートを直接利用します。
-
 @mcp.tool()
 def self_heal_loop() -> str:
     """
     self_healing.py を実行し、AIによる自律修正ループ（sword_test.mm対象）を開始します。
     """
     root_dir = Path(__file__).parent.absolute()
-    result = subprocess.run(
-    result = subprocess.run(
-        ["python", "self_healing.py"],
-        cwd=root_dir,
-        capture_output=True,
-        text=True,
-        timeout=300
-    )
-    if result.returncode == 0:
-        return f"✅ 自律修正完了:\n{result.stdout}"
-    else:
-        return f"❌ 自律修正失敗:\n{result.stderr}\n{result.stdout}"
+
+    try:
+        result = subprocess.run(
+            ["python", "self_healing.py"],
+            cwd=root_dir,
+            capture_output=True,
+            text=True,
+            timeout=300
+        )
+        if result.returncode == 0:
+            return f"✅ 自律修正完了:\n{result.stdout}"
+        else:
+            return f"❌ 自律修正失敗:\n{result.stderr}\n{result.stdout}"
+    except subprocess.TimeoutExpired:
+        return "❌ エラー: 自律修正ループがタイムアウトしました（300秒）。"
+    except Exception as e:
+        return f"❌ 実行エラー: {str(e)}"
 
 if __name__ == "__main__":
     mcp.run()

@@ -55,16 +55,17 @@ pub fn verify(atom: &Atom, output_dir: &Path) -> Result<(), String> {
     }
 
     // 2. 引数（params）に対する精緻型制約の自動適用
-    // ここでは簡易的に、変数名から型を推論するか、命名規則等で精緻型を適用する仕組みを想定
-    // 将来的には Atom 構造体に引数の型情報を持たせることが望ましい
-    let type_defs = TYPE_ENV.lock().map_err(|_| "Failed to lock TYPE_ENV")?;
-    for param in &atom.params {
-        // 例: パラメータ名に対応する型が登録されていれば制約を適用
-        // 実際の実装では `arg: Type` のパース結果を利用するように拡張が必要
-        if let Some(refined) = type_defs.get(param) {
-            apply_refinement_constraint(&ctx, &arr, &solver, param, refined)?;
+    // パラメータの型注釈 (例: `n: Nat`) を使って精緻型を検索し、制約を適用する
+    {
+        let type_defs = TYPE_ENV.lock().map_err(|_| "Failed to lock TYPE_ENV")?;
+        for param in &atom.params {
+            if let Some(type_name) = &param.type_name {
+                if let Some(refined) = type_defs.get(type_name) {
+                    apply_refinement_constraint(&ctx, &arr, &solver, &param.name, refined)?;
+                }
+            }
         }
-    }
+    } // MutexGuard はここで解放される
 
     // 3. 前提条件 (requires)
     if atom.requires.trim() != "true" {

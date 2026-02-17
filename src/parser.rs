@@ -63,9 +63,15 @@ pub struct RefinedType {
 }
 
 #[derive(Debug, Clone)]
+pub struct Param {
+    pub name: String,
+    pub type_name: Option<String>, // 例: Some("Nat") — 型注釈がない場合は None
+}
+
+#[derive(Debug, Clone)]
 pub struct Atom {
     pub name: String,
-    pub params: Vec<String>,
+    pub params: Vec<Param>,
     pub requires: String,
     pub forall_constraints: Vec<Quantifier>,
     pub ensures: String,
@@ -83,18 +89,23 @@ pub enum Item {
 pub fn parse_module(source: &str) -> Vec<Item> {
     let mut items = Vec::new();
 
-    // type 定義の正規表現: type Name = Base where v Predicate;
-    let type_re = Regex::new(r"(?m)^type\s+(\w+)\s*=\s*(\w+)\s+where\s+(\w+)\s+([^;]+);").unwrap();
+    // type 定義の正規表現: type Name = Base where predicate;
+    // operand と述語全体を一括キャプチャし、operand は述語文字列の先頭トークンとして抽出する
+    let type_re = Regex::new(r"(?m)^type\s+(\w+)\s*=\s*(\w+)\s+where\s+([^;]+);").unwrap();
     // atom 定義の開始位置を見つけるための簡易正規表現
     let atom_re = Regex::new(r"atom\s+\w+").unwrap();
 
     // 1. type 定義を解析
     for cap in type_re.captures_iter(source) {
+        let full_predicate = cap[3].trim().to_string(); // 例: "v >= 0"
+        // 述語文字列の先頭トークンを operand として抽出する
+        let tokens = tokenize(&full_predicate);
+        let operand = tokens.first().cloned().unwrap_or_else(|| "v".to_string());
         items.push(Item::TypeDef(RefinedType {
             name: cap[1].to_string(),
             _base_type: cap[2].to_string(),
-            operand: cap[3].to_string(),
-            predicate_raw: cap[4].trim().to_string(),
+            operand,
+            predicate_raw: full_predicate,
         }));
     }
 
@@ -121,7 +132,25 @@ pub fn parse_atom(source: &str) -> Atom {
 
     let name_caps = name_re.captures(source).expect("Failed to parse atom name");
     let name = name_caps[1].to_string();
-    let params = name_caps[2].split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+    let params: Vec<Param> = name_caps[2]
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            // "n: Nat" のような型注釈付きパラメータをパース
+            if let Some((param_name, type_name)) = s.split_once(':') {
+                Param {
+                    name: param_name.trim().to_string(),
+                    type_name: Some(type_name.trim().to_string()),
+                }
+            } else {
+                Param {
+                    name: s.to_string(),
+                    type_name: None,
+                }
+            }
+        })
+        .collect();
 
     let requires_raw = req_re.captures(source).map_or("true".to_string(), |c| c[1].trim().to_string());
     let ensures = ens_re.captures(source).map_or("true".to_string(), |c| c[1].trim().to_string());

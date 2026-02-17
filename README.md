@@ -1,8 +1,33 @@
+最新の「精緻型（Refinement Types）」の実装、および `LLVM 18` への完全移行を反映した `README.md` です。ロードマップの更新と、精緻型を利用したワークフローの解説を追加しています。
+
+---
+
 # 🗡️ Mumei (無銘)
 
 **Mathematical Proof-Driven Programming Language for AI Agents.**
 
 **Mumei (無銘)** is an AI-native programming language designed to eliminate developer bias and pursue only mathematical "Truth." When an AI generates code, Mumei mathematically proves and eliminates logical flaws before execution, refining the "Pure Code" into machine code (LLVM) and verified source code (Rust/Go/TypeScript).
+
+---
+
+## 💎 New Feature: Refinement Types
+
+Mumei now supports **Refinement Types**, allowing you to embed logical predicates directly into the type system. This moves the burden of proof from function preconditions to the type level, enabling "Correct-by-Construction" data structures.
+
+```mumei
+// Define a type for positive integers
+type Nat = i64 where v > 0;
+
+atom safe_divide(a, b)
+requires:
+    true; // b > 0 is already guaranteed by the type Nat!
+ensures:
+    result >= 0;
+body: {
+    a / b; // Proven safe from division-by-zero via Nat constraints
+}
+
+```
 
 ---
 
@@ -13,7 +38,7 @@ Mumei is designed to bridge the gap between heavyweight formal proof assistants 
 | Feature | Lean 4 / Coq | Mumei |
 | --- | --- | --- |
 | **Verification Lead** | Human (Requires math expertise) | SMT Solver (Automated AI verification) |
-| **Learning Curve** | Extremely Steep | Moderate (Close to standard coding) |
+| **Type System** | Dependent Types | **Refinement Types (Z3-backed)** |
 | **Primary Output** | Custom Runtime / C | **Rust, Go, TypeScript, LLVM 18** |
 | **Loop Verification** | Manual Inductive Proofs | **Automated Loop Invariant Verification** |
 | **AI Agent Role** | Auxiliary / Experimental | Primary Driver (Self-healing loops) |
@@ -24,8 +49,8 @@ Mumei is designed to bridge the gap between heavyweight formal proof assistants 
 
 Mumei generates executable binaries and verified source code through five distinct stages:
 
-1. **Polishing (Parser):** Analyzes code in minimal functional units called `atoms`. Supports `if-else` branching, `let` bindings, and **`while` loops**.
-2. **The Ritual of Truth (Verification):** Utilizes the **Z3 SMT Solver**. For loops, it mathematically guarantees that the "Loop Invariant" is maintained throughout execution.
+1. **Polishing (Parser):** Analyzes `atoms` and `type` definitions in a single module. Supports `if-else`, `let`, and **`while` loops**.
+2. **The Ritual of Truth (Verification):** Utilizes the **Z3 SMT Solver**. It manages a **Global Type Environment** to track Refinement Types and automatically injects constraints into the proof process.
 3. **Visual Inspection (Visualizer):** Real-time visualization of "Logical Fractures" (counter-examples) discovered during verification.
 4. **Tempering (Codegen):** Converts verified code into **LLVM IR (v18)**, granting native-level high-performance execution.
 5. **Sharpening (Transpiler):** Exports verified logic as high-quality **Rust, Go, and TypeScript** source code.
@@ -57,7 +82,7 @@ OPENAI_API_KEY=your_api_key_here
 
 ```
 
-*Note: The build process requires specific path exports (e.g., `LLVM_SYS_170_PREFIX`). Refer to `build_and_run.sh` for details.*
+*Note: The build process requires specific path exports (e.g., `LLVM_SYS_180_PREFIX`). Refer to `build_and_run.sh` for automated configuration.*
 
 ---
 
@@ -72,8 +97,8 @@ Mumei supports the **Model Context Protocol (MCP)**, functioning as a specialize
 
 ## 📂 Project Structure
 
-* `src/parser.rs`: AST definition. Parsing logic for `if-else`, `let`, and **`while` loops**.
-* `src/verification.rs`: Formal verification via Z3. Implements automated Loop Invariant checking.
+* `src/parser.rs`: Supports **Module-level parsing** (multiple atoms and types). AST definition for loops and refinement types.
+* `src/verification.rs`: Formal verification via Z3. Implements **Global Type Environment** for constraint propagation.
 * **`src/transpiler/`**: Structured multi-language export engine (Modularized).
 * `src/codegen.rs`: LLVM IR (v18) generation engine.
 * `src/main.rs`: The Forging Commander (Orchestrator).
@@ -86,27 +111,24 @@ Mumei supports the **Model Context Protocol (MCP)**, functioning as a specialize
 * [x] **Control Flow:** Support for `if-else` branching and `let` variable bindings.
 * [x] **Loop Support:** **Formal verification of `while` loops and Loop Invariants.**
 * [x] **LLVM 18 Integration:** Support for the latest LLVM toolchain.
-* [x] **Mumei Visualizer:** Visualization of the formal verification process and counter-examples.
-* [x] **Mumei Transpiler:** Exporting verified logic into high-quality Rust source code.
-* [x] **Self-Healing Loop:** Autonomous logic correction using AI feedback loops.
-* [x] **Mumei MCP Server:** Implementation of the Model Context Protocol for AI Agent integration.
-* [ ] **Standard Library:** Expanded sets for array manipulation, math, and string processing.
+* [x] **Refinement Types:** Introduction of types with intrinsic constraints (e.g., `where value > 0`).
+* [x] **Mumei MCP Server:** AI Agent integration via Model Context Protocol.
+* [ ] **Standard Library:** Expanded sets for array manipulation (Bounds Checking), math, and string processing.
 * [ ] **Type System 2.0:** Native verification for unsigned integers (u64) and floating-point (f64).
-* [ ] **Refinement Types:** Introduction of types with intrinsic constraints (e.g., `where value > 0`).
 * [ ] **VS Code Extension:** Real-time verification feedback via LSP.
-* [ ] **etc** ・・・
 
 ---
 
-## 📖 Workflow Example: Verifying Loops (`sword_test.mm`)
+## 📖 Workflow Example: Refined Loop (`sword_test.mm`)
 
-Mumei mathematically proves the correctness of even complex loops.
+Mumei mathematically proves the correctness of loops using refined types.
 
-### 1. Define an Atom
-
-Calculate the sum from `0` to `n`. We define the invariant that the variable `s` must always be greater than or equal to `0`.
+### 1. Define Refinement Types and Atoms
 
 ```mumei
+// Define Refinement Type: Natural numbers
+type Nat = i64 where v >= 0;
+
 atom sword_sum(n)
 requires:
     n >= 0;
@@ -135,24 +157,30 @@ body: {
 
 ### 3. Execution Results
 
-1. **Polishing:** Converts the `while` block and `invariant` clause into an AST.
-2. **Verification:** Z3 checks the invariant at three stages: "Before entering loop," "During each iteration," and "After loop exit" to ensure `ensures` is always satisfied.
-3. **Sharpening:** The mathematically proven logic is exported to `dist/katana.rs` and other target files.
+1. **Polishing:** Registers `Nat` in the type environment and converts the `while` block.
+2. **Verification:** Z3 checks the invariant and type constraints to ensure no logical fractures exist.
+3. **Sharpening:** The verified logic is exported to `dist/katana.rs`, `dist/katana.go`, etc.
 
-- sample
-```
+```text
 ./build_and_run.sh
 ・・・
+    Finished `release` profile [optimized] target(s) in 19.86s
 ✨ Build Success!
+📝 Creating/Updating sword_test.mm with Refinement Types...
 🚀 Running Mumei on sword_test.mm...
 🗡️  Mumei: Forging the blade...
-✨ [1/4] Polishing Syntax: Atom 'sword_sum' identified.
-⚖️  [2/4] Verification: Passed. The logic is flawless.
-⚙️  [3/4] Tempering: Done. Created 'katana.ll'
-🌍 [4/4] Sharpening: Exporting verified Rust, Go, and TypeScript sources...
-✅ Done. Created 'katana.rs', 'katana.go', 'katana.ts'
+  ✨ Registered Refined Type: 'Nat'
+  ✨ [1/4] Polishing Syntax: Atom 'sword_sum' identified.
+  ⚖️  [2/4] Verification: Passed. The logic is flawless.
+  ⚙️  [3/4] Tempering: Done. Created 'katana.ll'
+  🌍 [4/4] Sharpening: Exporting verified Rust, Go, and TypeScript sources...
+  ✅ Done. Created 'katana.rs', 'katana.go', 'katana.ts'
 🎉 Blade forged and sharpened successfully.
+---
+✅ Verification and Code Generation Complete!
+📍 LLVM IR  : dist/katana.ll
+📍 Rust     : dist/katana.rs
+📍 Go       : dist/katana.go
+📍 TS       : dist/katana.ts
 ✨ Process complete.
 ```
-
----

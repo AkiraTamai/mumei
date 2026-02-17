@@ -57,7 +57,7 @@ pub struct Quantifier {
 #[derive(Debug, Clone)]
 pub struct RefinedType {
     pub name: String,         // 例: "Nat"
-    pub base_type: String,    // 例: "i64"
+    pub _base_type: String,    // 例: "i64" 今後拡張のためアンダースコア_
     pub operand: String,      // 例: "v"
     pub predicate_raw: String, // 解析前の述語文字列
 }
@@ -92,7 +92,7 @@ pub fn parse_module(source: &str) -> Vec<Item> {
     for cap in type_re.captures_iter(source) {
         items.push(Item::TypeDef(RefinedType {
             name: cap[1].to_string(),
-            base_type: cap[2].to_string(),
+            _base_type: cap[2].to_string(),
             operand: cap[3].to_string(),
             predicate_raw: cap[4].trim().to_string(),
         }));

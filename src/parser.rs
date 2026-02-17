@@ -37,7 +37,7 @@ pub enum Expr {
     },
 }
 
-// --- 2. 量子化子と Atom の定義 ---
+// --- 2. 量子化子、精緻型、および Item の定義 ---
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum QuantifierType {
@@ -55,6 +55,14 @@ pub struct Quantifier {
 }
 
 #[derive(Debug, Clone)]
+pub struct RefinedType {
+    pub name: String,         // 例: "Nat"
+    pub base_type: String,    // 例: "i64"
+    pub operand: String,      // 例: "v"
+    pub predicate_raw: String, // 解析前の述語文字列
+}
+
+#[derive(Debug, Clone)]
 pub struct Atom {
     pub name: String,
     pub params: Vec<String>,
@@ -64,9 +72,46 @@ pub struct Atom {
     pub body_expr: String,
 }
 
+#[derive(Debug, Clone)]
+pub enum Item {
+    Atom(Atom),
+    TypeDef(RefinedType),
+}
+
 // --- 3. メインパーサーロジック ---
 
-pub fn parse(source: &str) -> Atom {
+pub fn parse_module(source: &str) -> Vec<Item> {
+    let mut items = Vec::new();
+
+    // type 定義の正規表現: type Name = Base where v Predicate;
+    let type_re = Regex::new(r"(?m)^type\s+(\w+)\s*=\s*(\w+)\s+where\s+(\w+)\s+([^;]+);").unwrap();
+    // atom 定義の開始位置を見つけるための簡易正規表現
+    let atom_re = Regex::new(r"atom\s+\w+").unwrap();
+
+    // 1. type 定義を解析
+    for cap in type_re.captures_iter(source) {
+        items.push(Item::TypeDef(RefinedType {
+            name: cap[1].to_string(),
+            base_type: cap[2].to_string(),
+            operand: cap[3].to_string(),
+            predicate_raw: cap[4].trim().to_string(),
+        }));
+    }
+
+    // 2. atom 定義を分割して解析 (簡易的に "atom" キーワードで分割)
+    let atom_indices: Vec<_> = atom_re.find_iter(source).map(|m| m.start()).collect();
+    for i in 0..atom_indices.len() {
+        let start = atom_indices[i];
+        let end = if i + 1 < atom_indices.len() { atom_indices[i+1] } else { source.len() };
+        let atom_source = &source[start..end];
+        items.push(Item::Atom(parse_atom(atom_source)));
+    }
+
+    items
+}
+
+/// 個別の Atom 解析 (既存の parse ロジック)
+pub fn parse_atom(source: &str) -> Atom {
     let name_re = Regex::new(r"atom\s+(\w+)\s*\(([^)]*)\)").unwrap();
     let req_re = Regex::new(r"requires:\s*([^;]+);").unwrap();
     let ens_re = Regex::new(r"ensures:\s*([^;]+);").unwrap();
@@ -249,7 +294,6 @@ fn parse_primary(tokens: &[String], pos: &mut usize) -> Expr {
     if *pos >= tokens.len() { return Expr::Number(0); }
     let token = &tokens[*pos];
 
-    // --- ループ構文の追加 ---
     if token == "while" {
         *pos += 1; // while
         let cond = parse_implies(tokens, pos);
@@ -266,7 +310,6 @@ fn parse_primary(tokens: &[String], pos: &mut usize) -> Expr {
         }
         panic!("Mumei loops require an 'invariant' for formal verification.");
     }
-    // ----------------------
 
     if token == "if" {
         *pos += 1; // if

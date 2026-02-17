@@ -1,10 +1,25 @@
 use z3::ast::{Ast, Int, Bool, Array, Dynamic};
 use z3::{Config, Context, Solver, SatResult};
-use crate::parser::{Atom, QuantifierType, Expr, Op, parse_expression};
+use crate::parser::{Atom, QuantifierType, Expr, Op, parse_expression, RefinedType};
 use std::fs;
 use std::path::Path;
 use serde_json::json;
 use std::collections::HashMap;
+use std::sync::Mutex;
+use once_cell::sync::Lazy;
+
+// --- 型環境のグローバル管理 ---
+// main.rs で登録された精緻型を保持するためのスレッドセーフなグローバルマップ
+static TYPE_ENV: Lazy<Mutex<HashMap<String, RefinedType>>> = Lazy::new(|| {
+    Mutex::new(HashMap::new())
+});
+
+/// 精緻型をグローバルな型環境に登録する
+pub fn register_type(refined_type: &RefinedType) -> Result<(), String> {
+    let mut env = TYPE_ENV.lock().map_err(|_| "Failed to lock TYPE_ENV")?;
+    env.insert(refined_type.name.clone(), refined_type.clone());
+    Ok(())
+}
 
 pub fn verify(atom: &Atom, output_dir: &Path) -> Result<(), String> {
     let mut cfg = Config::new();
@@ -17,6 +32,7 @@ pub fn verify(atom: &Atom, output_dir: &Path) -> Result<(), String> {
 
     let mut env: HashMap<String, Dynamic> = HashMap::new();
 
+    // 1. 量子化制約の処理
     for q in &atom.forall_constraints {
         let i = Int::new_const(&ctx, q.var.as_str());
         let start = Int::from_i64(&ctx, q.start.parse::<i64>().unwrap_or(0));
@@ -38,6 +54,20 @@ pub fn verify(atom: &Atom, output_dir: &Path) -> Result<(), String> {
         solver.assert(&quantifier_expr);
     }
 
+    // 2. 引数（params）に対する精緻型制約の自動適用
+    // パラメータの型注釈 (例: `n: Nat`) を使って精緻型を検索し、制約を適用する
+    {
+        let type_defs = TYPE_ENV.lock().map_err(|_| "Failed to lock TYPE_ENV")?;
+        for param in &atom.params {
+            if let Some(type_name) = &param.type_name {
+                if let Some(refined) = type_defs.get(type_name) {
+                    apply_refinement_constraint(&ctx, &arr, &solver, &param.name, refined)?;
+                }
+            }
+        }
+    } // MutexGuard はここで解放される
+
+    // 3. 前提条件 (requires)
     if atom.requires.trim() != "true" {
         let req_ast = parse_expression(&atom.requires);
         let req_z3 = expr_to_z3(&ctx, &arr, &req_ast, &mut env, None)?;
@@ -46,9 +76,11 @@ pub fn verify(atom: &Atom, output_dir: &Path) -> Result<(), String> {
         }
     }
 
+    // 4. ボディの検証
     let body_ast = parse_expression(&atom.body_expr);
     let body_result = expr_to_z3(&ctx, &arr, &body_ast, &mut env, Some(&solver))?;
 
+    // 5. 事後条件 (ensures)
     if atom.ensures.trim() != "true" {
         env.insert("result".to_string(), body_result);
         let ens_ast = parse_expression(&atom.ensures);
@@ -75,6 +107,28 @@ pub fn verify(atom: &Atom, output_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// 特定の変数に対して精緻型の制約を Z3 ソルバーに適用する
+fn apply_refinement_constraint<'a>(
+    ctx: &'a Context,
+    arr: &Array<'a>,
+    solver: &Solver<'a>,
+    var_name: &str,
+    refined: &RefinedType
+) -> Result<(), String> {
+    let mut local_env = HashMap::new();
+    let var_z3 = Int::new_const(ctx, var_name);
+
+    // 制約式内の `v` (operand) を現在の変数名に置き換えるための環境設定
+    local_env.insert(refined.operand.clone(), var_z3.into());
+
+    let predicate_ast = parse_expression(&refined.predicate_raw);
+    let predicate_z3 = expr_to_z3(ctx, arr, &predicate_ast, &mut local_env, None)?
+        .as_bool().ok_or(format!("Predicate for type {} must be boolean", refined.name))?;
+
+    solver.assert(&predicate_z3);
+    Ok(())
+}
+
 fn expr_to_z3<'a>(
     ctx: &'a Context,
     arr: &Array<'a>,
@@ -85,7 +139,11 @@ fn expr_to_z3<'a>(
     match expr {
         Expr::Number(n) => Ok(Int::from_i64(ctx, *n).into()),
         Expr::Variable(name) => {
-            Ok(env.get(name).cloned().unwrap_or_else(|| Int::new_const(ctx, name.as_str()).into()))
+            let val = env.get(name).cloned().unwrap_or_else(|| Int::new_const(ctx, name.as_str()).into());
+
+            // 変数参照時、もしその変数名が精緻型として登録されている名前を含んでいれば制約を適用するロジック（暫定）
+            // 将来的にはシンボルテーブルで型情報を厳密に管理する
+            Ok(val)
         },
         Expr::ArrayAccess(_name, index_expr) => {
             let idx = expr_to_z3(ctx, arr, index_expr, env, solver_opt)?

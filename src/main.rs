@@ -7,6 +7,7 @@ use clap::Parser;
 use std::fs;
 use std::path::Path;
 use crate::transpiler::{TargetLanguage, transpile};
+use crate::parser::Item;
 
 #[derive(Parser)]
 #[command(name = "Mumei Compiler", version = "0.1.0")]
@@ -30,57 +31,78 @@ fn main() {
     println!("🗡️  Mumei: Forging the blade...");
 
     // --- 1. Parsing (構文解析) ---
-    // AST (Abstract Syntax Tree) を生成
-    let atom = parser::parse(&source);
-    println!("  ✨ [1/4] Polishing Syntax: Atom '{}' identified.", atom.name);
+    // 複数の Item (Atom や TypeDef) を含むモジュールとして解析
+    let items = parser::parse_module(&source);
 
     let output_path = Path::new(&cli.output);
     let output_dir = output_path.parent().unwrap_or(Path::new("."));
-    // ファイル名部分（拡張子なし）を取得
     let file_stem = output_path.file_stem().and_then(|s| s.to_str()).unwrap_or(&cli.output);
 
-    // --- 2. Verification (形式検証: Z3) ---
-    // ここがガードレール。論理的に正しくないコードはここで遮断されます。
-    match verification::verify(&atom, output_dir) {
-        Ok(_) => println!("  ⚖️  [2/4] Verification: Passed. The logic is flawless."),
-        Err(e) => {
-            eprintln!("  ❌ [2/4] Verification: Failed! Flaw detected in logic: {}", e);
-            // 検証に失敗した場合は、不完全（危険）な成果物を出さないよう即座に終了
-            std::process::exit(1);
+    // 成果物を管理するためのフラグやカウンタ
+    let mut atom_count = 0;
+
+    for item in items {
+        match item {
+            // --- 精緻型の登録 ---
+            Item::TypeDef(refined_type) => {
+                println!("  ✨ Registered Refined Type: '{}'", refined_type.name);
+                // 後ほど verification.rs に実装する登録関数を呼び出し
+                if let Err(e) = verification::register_type(&refined_type) {
+                    eprintln!("  ❌ Type Registration Failed: {}", e);
+                    std::process::exit(1);
+                }
+            }
+
+            // --- Atom の処理 (既存のパイプライン) ---
+            Item::Atom(atom) => {
+                atom_count += 1;
+                println!("  ✨ [1/4] Polishing Syntax: Atom '{}' identified.", atom.name);
+
+                // --- 2. Verification (形式検証: Z3) ---
+                match verification::verify(&atom, output_dir) {
+                    Ok(_) => println!("  ⚖️  [2/4] Verification: Passed. The logic is flawless."),
+                    Err(e) => {
+                        eprintln!("  ❌ [2/4] Verification: Failed! Flaw detected in logic: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+
+                // --- 3. Codegen (低レイヤ生成: LLVM IR) ---
+                match codegen::compile(&atom, output_path) {
+                    Ok(_) => println!("  ⚙️  [3/4] Tempering: Done. Created '{}.ll'", file_stem),
+                    Err(e) => {
+                        eprintln!("  ❌ [3/4] Tempering: Failed! {}", e);
+                        std::process::exit(1);
+                    }
+                }
+
+                // --- 4. Transpile (多言語エクスポート) ---
+                println!("  🌍 [4/4] Sharpening: Exporting verified Rust, Go, and TypeScript sources...");
+
+                let targets = [
+                    (TargetLanguage::Rust, "rs"),
+                    (TargetLanguage::Go, "go"),
+                    (TargetLanguage::TypeScript, "ts"),
+                ];
+
+                for (lang, ext) in targets.iter() {
+                    let code = transpile(&atom, *lang);
+                    let out_filename = format!("{}.{}", file_stem, ext);
+                    let out_full_path = output_dir.join(&out_filename);
+
+                    if let Err(e) = fs::write(&out_full_path, code) {
+                        eprintln!("  ❌ Failed to write {}: {}", out_filename, e);
+                        std::process::exit(1);
+                    }
+                }
+                println!("  ✅ Done. Created '{0}.rs', '{0}.go', '{0}.ts'", file_stem);
+            }
         }
     }
 
-    // --- 3. Codegen (低レイヤ生成: LLVM IR) ---
-    // 形式検証をパスした「正しい論理」のみがマシンコードへ変換される
-    match codegen::compile(&atom, output_path) {
-        Ok(_) => println!("  ⚙️  [3/4] Tempering: Done. Created '{}.ll'", file_stem),
-        Err(e) => {
-            eprintln!("  ❌ [3/4] Tempering: Failed! {}", e);
-            std::process::exit(1);
-        }
+    if atom_count == 0 {
+        println!("⚠️  Warning: No atoms found in the source file.");
+    } else {
+        println!("🎉 Blade forged and sharpened successfully.");
     }
-
-    // --- 4. Transpile (多言語エクスポート) ---
-    // 高レイヤ言語への出力
-    println!("  🌍 [4/4] Sharpening: Exporting verified Rust, Go, and TypeScript sources...");
-
-    let targets = [
-        (TargetLanguage::Rust, "rs"),
-        (TargetLanguage::Go, "go"),
-        (TargetLanguage::TypeScript, "ts"),
-    ];
-
-    for (lang, ext) in targets.iter() {
-        let code = transpile(&atom, *lang);
-        let out_filename = format!("{}.{}", file_stem, ext);
-        let out_full_path = output_dir.join(&out_filename);
-
-        if let Err(e) = fs::write(&out_full_path, code) {
-            eprintln!("  ❌ Failed to write {}: {}", out_filename, e);
-            std::process::exit(1);
-        }
-    }
-
-    println!("  ✅ Done. Created '{0}.rs', '{0}.go', '{0}.ts'", file_stem);
-    println!("🎉 Blade forged and sharpened successfully.");
 }

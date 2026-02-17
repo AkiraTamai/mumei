@@ -1,7 +1,7 @@
 use crate::parser::{Expr, Op, Atom, parse_expression};
 
 pub fn transpile_to_go(atom: &Atom) -> String {
-    let params: Vec<String> = atom.params.iter().map(|p| format!("{} int64", p)).collect();
+    let params: Vec<String> = atom.params.iter().map(|p| format!("{} int64", p.name)).collect();
     let params_str = params.join(", ");
     let body = format_expr_go(&parse_expression(&atom.body_expr));
 

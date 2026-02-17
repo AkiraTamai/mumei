@@ -1,7 +1,3 @@
-最新の「精緻型（Refinement Types）」の実装、および `LLVM 18` への完全移行を反映した `README.md` です。ロードマップの更新と、精緻型を利用したワークフローの解説を追加しています。
-
----
-
 # 🗡️ Mumei (無銘)
 
 **Mathematical Proof-Driven Programming Language for AI Agents.**

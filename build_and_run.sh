@@ -53,7 +53,7 @@ cat <<EOF > sword_test.mm
 // Define Refinement Type: Natural numbers (non-negative)
 type Nat = i64 where v >= 0;
 
-atom sword_sum(n)
+atom sword_sum(n: Nat)
 requires:
     n >= 0;
 ensures:

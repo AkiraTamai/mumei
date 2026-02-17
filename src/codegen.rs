@@ -22,9 +22,9 @@ pub fn compile(atom: &Atom, output_path: &Path) -> Result<(), String> {
     builder.position_at_end(entry_block);
 
     let mut variables = HashMap::new();
-    for (i, param_name) in atom.params.iter().enumerate() {
+    for (i, param) in atom.params.iter().enumerate() {
         let val = function.get_nth_param(i as u32).unwrap().into_int_value();
-        variables.insert(param_name.clone(), val);
+        variables.insert(param.name.clone(), val);
     }
 
     let body_ast = parse_expression(&atom.body_expr);

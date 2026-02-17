@@ -1,7 +1,7 @@
 use crate::parser::{Expr, Op, Atom, parse_expression};
 
 pub fn transpile_to_ts(atom: &Atom) -> String {
-    let params = atom.params.join(", ");
+    let params: String = atom.params.iter().map(|p| format!("{}: number", p.name)).collect::<Vec<_>>().join(", ");
     let body = format_expr_ts(&parse_expression(&atom.body_expr));
 
     format!(

@@ -1,4 +1,5 @@
 use crate::parser::{Expr, Op, Atom, parse_expression};
+use crate::verification::resolve_base_type;
 
 pub fn transpile_to_rust(atom: &Atom) -> String {
     // 引数の型を精緻型のベース型からマッピング (Type System 2.0)
@@ -15,11 +16,17 @@ pub fn transpile_to_rust(atom: &Atom) -> String {
     )
 }
 
-fn map_type_rust(type_name: Option<&str>) -> &str {
+fn map_type_rust(type_name: Option<&str>) -> String {
     match type_name {
-        Some("f64") => "f64",
-        Some("u64") => "u64",
-        _ => "i64",
+        Some(name) => {
+            let base = resolve_base_type(name);
+            match base.as_str() {
+                "f64" => "f64".to_string(),
+                "u64" => "u64".to_string(),
+                _ => "i64".to_string(),
+            }
+        },
+        None => "i64".to_string(),
     }
 }
 

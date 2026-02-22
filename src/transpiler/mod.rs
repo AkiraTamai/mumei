@@ -1,4 +1,5 @@
 use crate::parser::{Atom, Expr, Op, parse_expression};
+use crate::verification::resolve_base_type;
 
 pub fn transpile_to_rust(atom: &Atom) -> String {
     let params = atom.params.iter()
@@ -11,11 +12,17 @@ pub fn transpile_to_rust(atom: &Atom) -> String {
             atom.name, params, transpile_expr(&body_ast))
 }
 
-fn map_type(type_name: &Option<String>) -> &str {
+fn map_type(type_name: &Option<String>) -> String {
     match type_name.as_deref() {
-        Some("f64") => "f64",
-        Some("u64") => "u64",
-        _ => "i64",
+        Some(name) => {
+            let base = resolve_base_type(name);
+            match base.as_str() {
+                "f64" => "f64".to_string(),
+                "u64" => "u64".to_string(),
+                _ => "i64".to_string(),
+            }
+        },
+        None => "i64".to_string(),
     }
 }
 

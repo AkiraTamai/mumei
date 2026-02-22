@@ -19,6 +19,17 @@ pub fn register_type(refined_type: &RefinedType) -> Result<(), String> {
     Ok(())
 }
 
+/// 精緻型名からベース型名を解決する（例: "Nat" -> "i64", "Pos" -> "f64"）
+/// 未登録の型名はそのまま返す
+pub fn resolve_base_type(type_name: &str) -> String {
+    if let Ok(env) = TYPE_ENV.lock() {
+        if let Some(refined) = env.get(type_name) {
+            return refined._base_type.clone();
+        }
+    }
+    type_name.to_string()
+}
+
 pub fn verify(atom: &Atom, output_dir: &Path) -> Result<(), String> {
     let mut cfg = Config::new();
     cfg.set_timeout_msec(10000);

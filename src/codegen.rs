@@ -204,7 +204,7 @@ fn compile_expr<'a>(
             Ok(last_val)
         },
 
-        Expr::Let { var, value, body: _ } | Expr::Assign { var, value } => {
+        Expr::Let { var, value } | Expr::Assign { var, value } => {
             let val = compile_expr(context, builder, module, function, value, variables)?;
             variables.insert(var.clone(), val);
             Ok(val)

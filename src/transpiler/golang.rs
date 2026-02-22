@@ -78,7 +78,7 @@ fn format_expr_go(expr: &Expr) -> String {
             )
         },
 
-        Expr::Let { var, value, body: _ } => {
+        Expr::Let { var, value } => {
             match value.as_ref() {
                 Expr::IfThenElse { cond, then_branch, else_branch } => {
                     format!(

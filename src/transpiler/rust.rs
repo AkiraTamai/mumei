@@ -84,7 +84,7 @@ fn format_expr_rust(expr: &Expr) -> String {
             )
         },
 
-        Expr::Let { var, value, body: _ } => {
+        Expr::Let { var, value } => {
             format!("let mut {} = {};", var, format_expr_rust(value))
         },
 

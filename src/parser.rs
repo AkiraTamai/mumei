@@ -24,7 +24,6 @@ pub enum Expr {
     Let {
         var: String,
         value: Box<Expr>,
-        body: Box<Expr>,
     },
     Assign {
         var: String,
@@ -217,7 +216,7 @@ fn parse_statement(tokens: &[String], pos: &mut usize) -> Expr {
         *pos += 1;
         if *pos < tokens.len() && tokens[*pos] == "=" { *pos += 1; }
         let value = parse_implies(tokens, pos);
-        Expr::Let { var, value: Box::new(value), body: Box::new(Expr::Number(0)) }
+        Expr::Let { var, value: Box::new(value) }
     } else if *pos + 1 < tokens.len()
         && tokens[*pos].chars().next().map_or(false, |c| c.is_alphabetic() || c == '_')
         && tokens[*pos + 1] == "="

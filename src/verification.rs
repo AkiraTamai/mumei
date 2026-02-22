@@ -278,7 +278,7 @@ fn expr_to_z3<'a>(
             let e = expr_to_z3(ctx, arr, else_branch, env, solver_opt)?;
             Ok(c.ite(&t, &e))
         },
-        Expr::Let { var, value, body: _ } => {
+        Expr::Let { var, value } => {
             // Block 内の逐次実行では変数を env に残す（スコープ管理は Block 側で行う）
             let val = expr_to_z3(ctx, arr, value, env, solver_opt)?;
             env.insert(var.clone(), val.clone());

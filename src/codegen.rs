@@ -81,8 +81,16 @@ fn compile_expr<'a>(
             let rhs = compile_expr(context, builder, module, function, right, variables)?;
 
             if lhs.is_float_value() || rhs.is_float_value() {
-                let l = lhs.into_float_value();
-                let r = rhs.into_float_value();
+                let l = if lhs.is_float_value() {
+                    lhs.into_float_value()
+                } else {
+                    builder.build_signed_int_to_float(lhs.into_int_value(), context.f64_type(), "int_to_float_l").map_err(|e| e.to_string())?
+                };
+                let r = if rhs.is_float_value() {
+                    rhs.into_float_value()
+                } else {
+                    builder.build_signed_int_to_float(rhs.into_int_value(), context.f64_type(), "int_to_float_r").map_err(|e| e.to_string())?
+                };
                 match op {
                     Op::Add => Ok(builder.build_float_add(l, r, "fadd_tmp").map_err(|e| e.to_string())?.into()),
                     Op::Sub => Ok(builder.build_float_sub(l, r, "fsub_tmp").map_err(|e| e.to_string())?.into()),

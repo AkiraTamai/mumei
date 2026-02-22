@@ -56,8 +56,6 @@ fn format_expr_go(expr: &Expr) -> String {
                 Op::Eq => "==", Op::Neq => "!=", Op::Gt => ">", Op::Lt => "<",
                 Op::Ge => ">=", Op::Le => "<=", Op::And => "&&", Op::Or => "||",
                 Op::Implies => "/* implies */",
-                Op::And => "&&",
-                Op::Or => "||",
             };
             format!("({} {} {})", format_expr_go(l), op_str, format_expr_go(r))
         },

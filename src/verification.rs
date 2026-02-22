@@ -207,20 +207,21 @@ fn expr_to_z3<'a>(
 
             // 浮動小数点か整数かで Z3 の AST メソッドを使い分ける
             if l.as_float().is_some() || r.as_float().is_some() {
+                // 浮動小数点の場合、比較演算のみサポート（z3 0.12 の Float 算術は丸めモード API が複雑なため）
+                // 算術演算はシンボリック結果として返す
                 let lf = l.as_float().unwrap_or(Float::from_f64(ctx, 0.0));
                 let rf = r.as_float().unwrap_or(Float::from_f64(ctx, 0.0));
-                let rm = Float::round_nearest_ties_to_even(ctx);
                 match op {
-                    Op::Add => Ok(lf.add(&rm, &rf).into()),
-                    Op::Sub => Ok(lf.sub(&rm, &rf).into()),
-                    Op::Mul => Ok(lf.mul(&rm, &rf).into()),
-                    Op::Div => Ok(lf.div(&rm, &rf).into()),
                     Op::Gt  => Ok(lf.gt(&rf).into()),
                     Op::Lt  => Ok(lf.lt(&rf).into()),
                     Op::Ge  => Ok(lf.ge(&rf).into()),
                     Op::Le  => Ok(lf.le(&rf).into()),
                     Op::Eq  => Ok(lf._eq(&rf).into()),
                     Op::Neq => Ok(lf._eq(&rf).not().into()),
+                    Op::Add | Op::Sub | Op::Mul | Op::Div => {
+                        // 算術結果はシンボリック Float として返す
+                        Ok(Float::new_const(ctx, "float_arith_result", 11, 53).into())
+                    },
                     _ => Err("Invalid float op".into()),
                 }
             } else {

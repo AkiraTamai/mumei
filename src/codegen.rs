@@ -1,5 +1,5 @@
 use inkwell::context::Context;
-use inkwell::values::{BasicValueEnum, FunctionValue, PhiValue};
+use inkwell::values::{AnyValue, BasicValueEnum, FunctionValue, PhiValue};
 use inkwell::builder::Builder;
 use inkwell::module::Module;
 use inkwell::IntPredicate;

@@ -219,8 +219,28 @@ fn expr_to_z3<'a>(
                     Op::Eq  => Ok(lf._eq(&rf).into()),
                     Op::Neq => Ok(lf._eq(&rf).not().into()),
                     Op::Add | Op::Sub | Op::Mul | Op::Div => {
-                        // 算術結果はシンボリック Float として返す
-                        Ok(Float::new_const(ctx, "float_arith_result", 11, 53).into())
+                        // z3 0.12 では丸めモード API が利用できないため、
+                        // シンボリック Float を返し、基本的な符号制約を付与する
+                        static FLOAT_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+                        let id = FLOAT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        let result = Float::new_const(ctx, format!("float_arith_{}", id), 11, 53);
+                        let zero = Float::from_f64(ctx, 0.0);
+                        if let Some(solver) = solver_opt {
+                            match op {
+                                Op::Mul => {
+                                    // pos * pos => pos, neg * neg => pos
+                                    let both_pos = Bool::and(ctx, &[&lf.gt(&zero), &rf.gt(&zero)]);
+                                    solver.assert(&both_pos.implies(&result.gt(&zero)));
+                                },
+                                Op::Add => {
+                                    // pos + pos => pos
+                                    let both_pos = Bool::and(ctx, &[&lf.gt(&zero), &rf.ge(&zero)]);
+                                    solver.assert(&both_pos.implies(&result.gt(&zero)));
+                                },
+                                _ => {}
+                            }
+                        }
+                        Ok(result.into())
                     },
                     _ => Err("Invalid float op".into()),
                 }

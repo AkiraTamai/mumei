@@ -30,6 +30,11 @@ fn map_type_rust(type_name: Option<&str>) -> String {
     }
 }
 
+/// 外側の括弧を除去するヘルパー（生成コードの不要な括弧 warning を防ぐ）
+fn strip_parens(s: &str) -> &str {
+    if s.starts_with('(') && s.ends_with(')') { &s[1..s.len()-1] } else { s }
+}
+
 fn format_expr_rust(expr: &Expr) -> String {
     match expr {
         Expr::Number(n) => n.to_string(),
@@ -76,20 +81,23 @@ fn format_expr_rust(expr: &Expr) -> String {
         },
 
         Expr::While { cond, invariant, body } => {
+            let cond_str = format_expr_rust(cond);
             format!(
                 "{{ // invariant: {}\n        while {} {{ {} }} \n    }}",
                 format_expr_rust(invariant),
-                format_expr_rust(cond),
+                strip_parens(&cond_str),
                 format_expr_rust(body)
             )
         },
 
         Expr::Let { var, value } => {
-            format!("let mut {} = {};", var, format_expr_rust(value))
+            let val_str = format_expr_rust(value);
+            format!("let mut {} = {};", var, strip_parens(&val_str))
         },
 
         Expr::Assign { var, value } => {
-            format!("{} = {};", var, format_expr_rust(value))
+            let val_str = format_expr_rust(value);
+            format!("{} = {};", var, strip_parens(&val_str))
         },
 
         Expr::Block(stmts) => {

@@ -185,7 +185,7 @@ pub fn parse_atom(source: &str) -> Atom {
 
 pub fn tokenize(input: &str) -> Vec<String> {
     // 小数点(.)を含む数値に対応
-    let re = Regex::new(r"(\d+\.\d+|\d+|[a-zA-Z_]\w*|==|!=|>=|<=|=>|&&|\|\||[+\-*/><()\[\]{};=])").unwrap();
+    let re = Regex::new(r"(\d+\.\d+|\d+|[a-zA-Z_]\w*|==|!=|>=|<=|=>|&&|\|\||[+\-*/><()\[\]{};=,])").unwrap();
     re.find_iter(input).map(|m| m.as_str().to_string()).collect()
 }
 

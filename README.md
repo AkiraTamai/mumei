@@ -2,35 +2,35 @@
 
 **Mathematical Proof-Driven Programming Language (prototype).**
 
-**Mumei (無銘)** は、ソースコードを
+**Mumei (無銘)** is an experimental language that processes source code through the pipeline:
 
 > parse → verify (Z3) → codegen (LLVM IR) → transpile (Rust / Go / TypeScript)
 
-のパイプラインで処理し、形式検証に通った Atom を LLVM IR と各言語のソースコードへ出力する実験的な言語です。
+Only atoms that pass formal verification are compiled to LLVM IR and transpiled to multi-language source code.
 
 ---
 
-## ✨ Type System 2.0（Refinement Types + f64/u64）
+## ✨ Type System 2.0 (Refinement Types + f64/u64)
 
-Mumei は **Refinement Types（精緻型）** をサポートします。
+Mumei supports **Refinement Types** — types with embedded logical predicates verified by Z3.
 
 ```mumei
 type Nat = i64 where v >= 0;
 type Pos = f64 where v > 0.0;
 ```
 
-- `type Name = Base where predicate;` 形式
-- `Base` は現在 `i64 | u64 | f64`
-- `predicate` は Z3 で検証され、`atom` の引数に型注釈を付けると自動的に制約が適用されます
+- Syntax: `type Name = Base where predicate;`
+- `Base` can be `i64`, `u64`, or `f64`
+- The `predicate` is verified by Z3. When a parameter is annotated with a refined type, its constraints are automatically injected into the verification context.
 
-### 例: 型注釈で前提を削る
+### Example: Eliminating preconditions via type annotations
 
 ```mumei
 type NonZero = i64 where v != 0;
 
 atom safe_divide(a: i64, b: NonZero)
 requires:
-    true; // b != 0 は型(NonZero)が保証
+    true; // b != 0 is guaranteed by the NonZero type
 ensures:
     true;
 body: {
@@ -40,57 +40,57 @@ body: {
 
 ---
 
-## 📦 Standard Library（現在サポートされている呼び出し）
+## 📦 Standard Library (Currently supported calls)
 
-式として以下の関数呼び出しをサポートします：
+The following function calls are supported as expressions:
 
 - `sqrt(x)`
 - `len(a)`
 - `cast_to_int(x)`
 
-注意：現状 `len()` は検証側で `arr_len` というシンボリック定数として扱われ、LLVM 側はダミー実装になっています（プロトタイプ段階）。
+Note: `len()` is currently modeled as a symbolic constant (`arr_len`) on the verification side, and uses a placeholder implementation in LLVM codegen (prototype stage).
 
 ---
 
 ## 🛠️ Forging Process
 
-1. **Polishing (Parser)**: `type` と `atom` をモジュール単位で解析。`if/else`、`let`、`while invariant`、関数呼び出し、配列アクセスをサポート。
-2. **Verification (Z3)**: requires/ensures/loop invariant を検証。引数の精緻型制約を自動注入し、配列アクセスには境界チェックを挿入。
-3. **Tempering (LLVM IR)**: Atom ごとに `.ll` を出力。
-4. **Sharpening (Transpiler)**: 全 Atom をバンドルして `.rs/.go/.ts` を出力。
+1. **Polishing (Parser):** Parses `type` and `atom` definitions at the module level. Supports `if/else`, `let`, `while invariant`, function calls, and array access.
+2. **Verification (Z3):** Verifies `requires`, `ensures`, and loop invariants. Automatically injects refinement type constraints for parameters and inserts bounds checking for array access.
+3. **Tempering (LLVM IR):** Emits a `.ll` file per atom.
+4. **Sharpening (Transpiler):** Bundles all atoms and outputs `.rs`, `.go`, and `.ts` files.
 
 ---
 
-## 🚀 Quickstart（macOS）
+## 🚀 Quickstart (macOS)
 
-### 1) 依存のインストール
+### 1) Install dependencies
 
 ```bash
 xcode-select --install
 brew install llvm@18 z3
 ```
 
-### 2) ビルド & 実行
+### 2) Build & Run
 
 ```bash
 ./build_and_run.sh
 
-# 必要ならクリーンビルド
+# Clean build if needed
 ./build_and_run.sh --clean
 ```
 
-`build_and_run.sh` が LLVM/Z3 の環境変数設定、ビルド、テスト用 `sword_test.mm` 生成、実行まで行います。
+`build_and_run.sh` handles LLVM/Z3 environment configuration, compilation, test file (`sword_test.mm`) generation, and execution.
 
 ---
 
-## 📄 Language Example（`sword_test.mm`）
+## 📄 Language Example (`sword_test.mm`)
 
 ```mumei
 // Type System 2.0: Refinement Types
 type Nat = i64 where v >= 0;
 type Pos = f64 where v > 0.0;
 
-// Atom 1: i64 ループ（loop invariant 検証）
+// Atom 1: i64 loop with loop invariant verification
 atom sword_sum(n: Nat)
 requires:
     n >= 0;
@@ -108,7 +108,7 @@ body: {
     s
 };
 
-// Atom 2: f64 精緻型（浮動小数点の検証）
+// Atom 2: f64 refinement type (floating-point verification)
 atom scale(x: Pos)
 requires:
     x > 0.0;
@@ -123,9 +123,9 @@ body: {
 
 ## 📦 Outputs
 
-`--output dist/katana` の場合：
+With `--output dist/katana`:
 
-- LLVM IR: `dist/katana_<AtomName>.ll`（Atom ごと）
+- LLVM IR: `dist/katana_<AtomName>.ll` (one per atom)
 - Rust: `dist/katana.rs`
 - Go: `dist/katana.go`
 - TypeScript: `dist/katana.ts`
@@ -134,21 +134,21 @@ body: {
 
 ## 📂 Project Structure
 
-- `src/parser.rs`: AST / tokenizer / parser（`Expr::Float`, `Expr::Call` などを含む）
-- `src/verification.rs`: Z3 による検証、精緻型の登録（グローバル型環境）
-- `src/codegen.rs`: LLVM IR 生成（float/int 混在の昇格を含む）
-- `src/transpiler/`: Rust/Go/TS への変換
-- `src/main.rs`: コンパイラのオーケストレーター（Atom 単位の `.ll` 出力、言語別コードのバンドル出力）
+- `src/parser.rs`: AST, tokenizer, and parser (includes `Expr::Float`, `Expr::Call`, etc.)
+- `src/verification.rs`: Z3-based verification and refinement type registration (global type environment)
+- `src/codegen.rs`: LLVM IR generation (with mixed float/int promotion)
+- `src/transpiler/`: Transpilation to Rust, Go, and TypeScript
+- `src/main.rs`: Compiler orchestrator (per-atom `.ll` output, bundled multi-language output)
 
 ---
 
 ## 🗺️ Roadmap
 
-- [x] Refinement Types（Z3-backed）
-- [x] `while` + loop invariant の検証
-- [x] `f64` リテラル / `u64` ベース型の導入（基本制約のみ）
-- [x] 標準関数呼び出し（`sqrt`, `len` など）
-- [ ] Float 算術のより厳密な検証（現状は一部シンボリック扱い）
-- [ ] 配列長モデルの実装（`len()` の実体化、境界チェックの強化）
-- [ ] エディタ統合（LSP / VS Code Extension）
+- [x] Refinement Types (Z3-backed)
+- [x] `while` + loop invariant verification
+- [x] `f64` literals / `u64` base type support (basic constraints only)
+- [x] Standard library function calls (`sqrt`, `len`, etc.)
+- [ ] Stricter float arithmetic verification (currently partially symbolic)
+- [ ] Array length model (`len()` materialization, enhanced bounds checking)
+- [ ] Editor integration (LSP / VS Code Extension)
 

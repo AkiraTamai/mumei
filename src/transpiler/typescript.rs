@@ -60,7 +60,7 @@ fn format_expr_ts(expr: &Expr) -> String {
             )
         },
 
-        Expr::Let { var, value, body: _ } => {
+        Expr::Let { var, value } => {
             format!("let {} = {};", var, format_expr_ts(value))
         },
 

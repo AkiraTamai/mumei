@@ -206,14 +206,15 @@ fn expr_to_z3<'a>(
             let r = expr_to_z3(ctx, arr, right, env, solver_opt)?;
 
             // 浮動小数点か整数かで Z3 の AST メソッドを使い分ける
-            if l.is_float() || r.is_float() {
-                let lf = l.as_float().unwrap_or(Float::from_f64(ctx, 0.0, &z3::Sort::double(ctx)));
-                let rf = r.as_float().unwrap_or(Float::from_f64(ctx, 0.0, &z3::Sort::double(ctx)));
+            if l.as_float().is_some() || r.as_float().is_some() {
+                let lf = l.as_float().unwrap_or(Float::from_f64(ctx, 0.0));
+                let rf = r.as_float().unwrap_or(Float::from_f64(ctx, 0.0));
+                let rm = Float::round_nearest_ties_to_even(ctx);
                 match op {
-                    Op::Add => Ok(lf.add(&rf).into()),
-                    Op::Sub => Ok(lf.sub(&rf).into()),
-                    Op::Mul => Ok(lf.mul(&rf).into()),
-                    Op::Div => Ok(lf.div(&rf).into()),
+                    Op::Add => Ok(lf.add(&rm, &rf).into()),
+                    Op::Sub => Ok(lf.sub(&rm, &rf).into()),
+                    Op::Mul => Ok(lf.mul(&rm, &rf).into()),
+                    Op::Div => Ok(lf.div(&rm, &rf).into()),
                     Op::Gt  => Ok(lf.gt(&rf).into()),
                     Op::Lt  => Ok(lf.lt(&rf).into()),
                     Op::Ge  => Ok(lf.ge(&rf).into()),

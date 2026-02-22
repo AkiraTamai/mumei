@@ -66,7 +66,8 @@ fn compile_expr<'a>(
                         module.add_function("llvm.sqrt.f64", fn_type, None)
                     });
                     let call = builder.build_call(sqrt_func, &[arg.into()], "sqrt_tmp").map_err(|e| e.to_string())?;
-                    Ok(call.try_as_basic_value().left().unwrap())
+                    let result = call.as_any_value_enum();
+                    Ok(result.into_float_value().into())
                 },
                 "len" => {
                     // 標準ライブラリ: 配列長を返す（現状は検証用ダミー定数10）

@@ -278,12 +278,11 @@ fn expr_to_z3<'a>(
             let e = expr_to_z3(ctx, arr, else_branch, env, solver_opt)?;
             Ok(c.ite(&t, &e))
         },
-        Expr::Let { var, value, body } => {
+        Expr::Let { var, value, body: _ } => {
+            // Block 内の逐次実行では変数を env に残す（スコープ管理は Block 側で行う）
             let val = expr_to_z3(ctx, arr, value, env, solver_opt)?;
-            let old = env.insert(var.clone(), val);
-            let res = expr_to_z3(ctx, arr, body, env, solver_opt)?;
-            if let Some(v) = old { env.insert(var.clone(), v); } else { env.remove(var); }
-            Ok(res)
+            env.insert(var.clone(), val.clone());
+            Ok(val)
         },
         Expr::Assign { var, value } => {
             let val = expr_to_z3(ctx, arr, value, env, solver_opt)?;
@@ -296,15 +295,18 @@ fn expr_to_z3<'a>(
             Ok(last)
         },
         Expr::While { cond, invariant, body } => {
-            // Loop Invariant 検証ロジック (既存)
+            // Loop Invariant 検証ロジック
             if let Some(solver) = solver_opt {
                 let inv = expr_to_z3(ctx, arr, invariant, env, None)?.as_bool().unwrap();
-                // Base case
+                // Base case: 現在の env（let で初期化済み）で invariant が成立するか
                 solver.push();
                 solver.assert(&inv.not());
-                if solver.check() == SatResult::Sat { return Err("Invariant fails initially".into()); }
+                if solver.check() == SatResult::Sat {
+                    solver.pop(1);
+                    return Err("Invariant fails initially".into());
+                }
                 solver.pop(1);
-                // Inductive step (簡略化)
+                // Inductive step: invariant && cond のもとで body 実行後も invariant が保たれるか
                 let c = expr_to_z3(ctx, arr, cond, env, None)?.as_bool().unwrap();
                 solver.push();
                 solver.assert(&inv);
@@ -312,14 +314,16 @@ fn expr_to_z3<'a>(
                 expr_to_z3(ctx, arr, body, env, Some(solver))?;
                 let inv_after = expr_to_z3(ctx, arr, invariant, env, None)?.as_bool().unwrap();
                 solver.assert(&inv_after.not());
-                if solver.check() == SatResult::Sat { return Err("Invariant not preserved".into()); }
+                if solver.check() == SatResult::Sat {
+                    solver.pop(1);
+                    return Err("Invariant not preserved".into());
+                }
                 solver.pop(1);
             }
             let inv = expr_to_z3(ctx, arr, invariant, env, None)?.as_bool().unwrap();
             let c_not = expr_to_z3(ctx, arr, cond, env, None)?.as_bool().unwrap().not();
             Ok(Bool::and(ctx, &[&inv, &c_not]).into())
-        }
-        _ => Err("Unsupported expr in Z3 conversion".into()),
+        },
     }
 }
 

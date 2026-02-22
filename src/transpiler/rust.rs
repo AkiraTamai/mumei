@@ -8,12 +8,36 @@ pub fn transpile_to_rust(atom: &Atom) -> String {
         .collect();
     let params_str = params.join(", ");
 
-    let body = format_expr_rust(&parse_expression(&atom.body_expr));
+    let body_ast = parse_expression(&atom.body_expr);
+    let body = format_expr_rust(&body_ast);
+
+    // 戻り値型の推論: ボディに f64 リテラルや f64 パラメータが含まれていれば f64
+    let has_float_param = atom.params.iter().any(|p| {
+        p.type_name.as_deref()
+            .map(|t| resolve_base_type(t) == "f64")
+            .unwrap_or(false)
+    });
+    let return_type = if has_float_param || body_contains_float(&body_ast) { "f64" } else { "i64" };
 
     format!(
-        "/// Verified Atom: {}\n/// Requires: {}\n/// Ensures: {}\npub fn {}({}) -> i64 {{\n    {}\n}}",
-        atom.name, atom.requires, atom.ensures, atom.name, params_str, body
+        "/// Verified Atom: {}\n/// Requires: {}\n/// Ensures: {}\npub fn {}({}) -> {} {{\n    {}\n}}",
+        atom.name, atom.requires, atom.ensures, atom.name, params_str, return_type, body
     )
+}
+
+/// AST に f64 リテラルが含まれるかを再帰的にチェック
+fn body_contains_float(expr: &Expr) -> bool {
+    match expr {
+        Expr::Float(_) => true,
+        Expr::BinaryOp(l, _, r) => body_contains_float(l) || body_contains_float(r),
+        Expr::Block(stmts) => stmts.iter().any(body_contains_float),
+        Expr::Let { value, .. } | Expr::Assign { value, .. } => body_contains_float(value),
+        Expr::IfThenElse { cond, then_branch, else_branch } =>
+            body_contains_float(cond) || body_contains_float(then_branch) || body_contains_float(else_branch),
+        Expr::While { cond, body, .. } => body_contains_float(cond) || body_contains_float(body),
+        Expr::Call(_, args) => args.iter().any(body_contains_float),
+        _ => false,
+    }
 }
 
 fn map_type_rust(type_name: Option<&str>) -> String {
@@ -105,8 +129,8 @@ fn format_expr_rust(expr: &Expr) -> String {
             for (i, stmt) in stmts.iter().enumerate() {
                 let s = format_expr_rust(stmt);
                 if i == stmts.len() - 1 {
-                    // 最後の式はセミコロンなし（返り値）
-                    lines.push(s);
+                    // 最後の式はセミコロンなし（返り値）、不要な括弧も除去
+                    lines.push(strip_parens(&s).to_string());
                 } else {
                     if s.ends_with(';') || s.ends_with('}') {
                         lines.push(s);

@@ -12,6 +12,7 @@ pub enum Op {
 #[derive(Debug, Clone)]
 pub enum Expr {
     Number(i64),
+    Float(f64), // 追加: 浮動小数点
     Variable(String),
     ArrayAccess(String, Box<Expr>),
     BinaryOp(Box<Expr>, Op, Box<Expr>),
@@ -23,7 +24,6 @@ pub enum Expr {
     Let {
         var: String,
         value: Box<Expr>,
-        body: Box<Expr>,
     },
     Assign {
         var: String,
@@ -35,6 +35,7 @@ pub enum Expr {
         invariant: Box<Expr>,
         body: Box<Expr>,
     },
+    Call(String, Vec<Expr>), // 追加: 標準関数呼び出し
 }
 
 // --- 2. 量子化子、精緻型、および Item の定義 ---
@@ -56,16 +57,16 @@ pub struct Quantifier {
 
 #[derive(Debug, Clone)]
 pub struct RefinedType {
-    pub name: String,         // 例: "Nat"
-    pub _base_type: String,    // 例: "i64" 今後拡張のためアンダースコア_
-    pub operand: String,      // 例: "v"
-    pub predicate_raw: String, // 解析前の述語文字列
+    pub name: String,
+    pub _base_type: String,   // i64, u64, f64 を保持
+    pub operand: String,
+    pub predicate_raw: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct Param {
     pub name: String,
-    pub type_name: Option<String>, // 例: Some("Nat") — 型注釈がない場合は None
+    pub type_name: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -88,17 +89,12 @@ pub enum Item {
 
 pub fn parse_module(source: &str) -> Vec<Item> {
     let mut items = Vec::new();
-
-    // type 定義の正規表現: type Name = Base where predicate;
-    // operand と述語全体を一括キャプチャし、operand は述語文字列の先頭トークンとして抽出する
+    // type 定義: i64 | u64 | f64 を許容するように変更
     let type_re = Regex::new(r"(?m)^type\s+(\w+)\s*=\s*(\w+)\s+where\s+([^;]+);").unwrap();
-    // atom 定義の開始位置を見つけるための簡易正規表現
     let atom_re = Regex::new(r"atom\s+\w+").unwrap();
 
-    // 1. type 定義を解析
     for cap in type_re.captures_iter(source) {
-        let full_predicate = cap[3].trim().to_string(); // 例: "v >= 0"
-        // 述語文字列の先頭トークンを operand として抽出する
+        let full_predicate = cap[3].trim().to_string();
         let tokens = tokenize(&full_predicate);
         let operand = tokens.first().cloned().unwrap_or_else(|| "v".to_string());
         items.push(Item::TypeDef(RefinedType {
@@ -109,7 +105,6 @@ pub fn parse_module(source: &str) -> Vec<Item> {
         }));
     }
 
-    // 2. atom 定義を分割して解析 (簡易的に "atom" キーワードで分割)
     let atom_indices: Vec<_> = atom_re.find_iter(source).map(|m| m.start()).collect();
     for i in 0..atom_indices.len() {
         let start = atom_indices[i];
@@ -121,7 +116,6 @@ pub fn parse_module(source: &str) -> Vec<Item> {
     items
 }
 
-/// 個別の Atom 解析 (既存の parse ロジック)
 pub fn parse_atom(source: &str) -> Atom {
     let name_re = Regex::new(r"atom\s+(\w+)\s*\(([^)]*)\)").unwrap();
     let req_re = Regex::new(r"requires:\s*([^;]+);").unwrap();
@@ -137,17 +131,13 @@ pub fn parse_atom(source: &str) -> Atom {
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .map(|s| {
-            // "n: Nat" のような型注釈付きパラメータをパース
             if let Some((param_name, type_name)) = s.split_once(':') {
                 Param {
                     name: param_name.trim().to_string(),
                     type_name: Some(type_name.trim().to_string()),
                 }
             } else {
-                Param {
-                    name: s.to_string(),
-                    type_name: None,
-                }
+                Param { name: s.to_string(), type_name: None }
             }
         })
         .collect();
@@ -192,10 +182,9 @@ pub fn parse_atom(source: &str) -> Atom {
     }
 }
 
-// --- 4. 再帰下降式解析エンジン (Expression Parser) ---
-
 pub fn tokenize(input: &str) -> Vec<String> {
-    let re = Regex::new(r"(\d+|[a-zA-Z_]\w*|==|!=|>=|<=|=>|&&|\|\||[+\-*/><()\[\]{};=])").unwrap();
+    // 小数点(.)を含む数値に対応
+    let re = Regex::new(r"(\d+\.\d+|\d+|[a-zA-Z_]\w*|==|!=|>=|<=|=>|&&|\|\||[+\-*/><()\[\]{};=,])").unwrap();
     re.find_iter(input).map(|m| m.as_str().to_string()).collect()
 }
 
@@ -207,13 +196,13 @@ pub fn parse_expression(input: &str) -> Expr {
 
 fn parse_block_or_expr(tokens: &[String], pos: &mut usize) -> Expr {
     if *pos < tokens.len() && tokens[*pos] == "{" {
-        *pos += 1; // {
+        *pos += 1;
         let mut stmts = Vec::new();
         while *pos < tokens.len() && tokens[*pos] != "}" {
             stmts.push(parse_statement(tokens, pos));
             if *pos < tokens.len() && tokens[*pos] == ";" { *pos += 1; }
         }
-        if *pos < tokens.len() && tokens[*pos] == "}" { *pos += 1; } // }
+        if *pos < tokens.len() && tokens[*pos] == "}" { *pos += 1; }
         Expr::Block(stmts)
     } else {
         parse_implies(tokens, pos)
@@ -222,29 +211,21 @@ fn parse_block_or_expr(tokens: &[String], pos: &mut usize) -> Expr {
 
 fn parse_statement(tokens: &[String], pos: &mut usize) -> Expr {
     if *pos < tokens.len() && tokens[*pos] == "let" {
-        *pos += 1; // let
+        *pos += 1;
         let var = tokens[*pos].clone();
-        *pos += 1; // var_name
+        *pos += 1;
         if *pos < tokens.len() && tokens[*pos] == "=" { *pos += 1; }
         let value = parse_implies(tokens, pos);
-
-        Expr::Let {
-            var,
-            value: Box::new(value),
-            body: Box::new(Expr::Number(0)),
-        }
+        Expr::Let { var, value: Box::new(value) }
     } else if *pos + 1 < tokens.len()
         && tokens[*pos].chars().next().map_or(false, |c| c.is_alphabetic() || c == '_')
         && tokens[*pos + 1] == "="
     {
         let var = tokens[*pos].clone();
-        *pos += 1; // var_name
-        *pos += 1; // =
+        *pos += 1;
+        *pos += 1;
         let value = parse_implies(tokens, pos);
-        Expr::Assign {
-            var,
-            value: Box::new(value),
-        }
+        Expr::Assign { var, value: Box::new(value) }
     } else {
         parse_implies(tokens, pos)
     }
@@ -284,9 +265,9 @@ fn parse_comparison(tokens: &[String], pos: &mut usize) -> Expr {
     let mut node = parse_add_sub(tokens, pos);
     if *pos < tokens.len() {
         let op = match tokens[*pos].as_str() {
-            ">"  => Some(Op::Gt), "<"  => Some(Op::Lt), "==" => Some(Op::Eq),
+            ">" => Some(Op::Gt), "<" => Some(Op::Lt), "==" => Some(Op::Eq),
             "!=" => Some(Op::Neq), ">=" => Some(Op::Ge), "<=" => Some(Op::Le),
-            _    => None,
+            _ => None,
         };
         if let Some(operator) = op {
             *pos += 1;
@@ -323,35 +304,27 @@ fn parse_primary(tokens: &[String], pos: &mut usize) -> Expr {
     if *pos >= tokens.len() { return Expr::Number(0); }
     let token = &tokens[*pos];
 
+    // while, if 処理 (既存通り)
     if token == "while" {
-        *pos += 1; // while
+        *pos += 1;
         let cond = parse_implies(tokens, pos);
-
         if *pos < tokens.len() && tokens[*pos] == "invariant" {
-            *pos += 1; // invariant
+            *pos += 1;
             let inv = parse_implies(tokens, pos);
             let body = parse_block_or_expr(tokens, pos);
-            return Expr::While {
-                cond: Box::new(cond),
-                invariant: Box::new(inv),
-                body: Box::new(body),
-            };
+            return Expr::While { cond: Box::new(cond), invariant: Box::new(inv), body: Box::new(body) };
         }
-        panic!("Mumei loops require an 'invariant' for formal verification.");
+        panic!("Mumei loops require an 'invariant'.");
     }
 
     if token == "if" {
-        *pos += 1; // if
+        *pos += 1;
         let cond = parse_implies(tokens, pos);
         let then_branch = parse_block_or_expr(tokens, pos);
         if *pos < tokens.len() && tokens[*pos] == "else" {
-            *pos += 1; // else
+            *pos += 1;
             let else_branch = parse_block_or_expr(tokens, pos);
-            return Expr::IfThenElse {
-                cond: Box::new(cond),
-                then_branch: Box::new(then_branch),
-                else_branch: Box::new(else_branch),
-            };
+            return Expr::IfThenElse { cond: Box::new(cond), then_branch: Box::new(then_branch), else_branch: Box::new(else_branch) };
         }
         panic!("Mumei requires an 'else' branch.");
     }
@@ -363,7 +336,21 @@ fn parse_primary(tokens: &[String], pos: &mut usize) -> Expr {
         node
     } else if let Ok(n) = token.parse::<i64>() {
         Expr::Number(n)
+    } else if let Ok(f) = token.parse::<f64>() {
+        // 数値トークンがドットを含む場合は Float として解釈
+        if token.contains('.') { Expr::Float(f) } else { Expr::Number(token.parse().unwrap()) }
+    } else if *pos < tokens.len() && tokens[*pos] == "(" {
+        // 関数呼び出し: name(args)
+        *pos += 1; // (
+        let mut args = Vec::new();
+        while *pos < tokens.len() && tokens[*pos] != ")" {
+            args.push(parse_implies(tokens, pos));
+            if *pos < tokens.len() && tokens[*pos] == "," { *pos += 1; }
+        }
+        if *pos < tokens.len() && tokens[*pos] == ")" { *pos += 1; }
+        Expr::Call(token.clone(), args)
     } else if *pos < tokens.len() && tokens[*pos] == "[" {
+        // 配列アクセス
         *pos += 1; // [
         let index = parse_implies(tokens, pos);
         if *pos < tokens.len() && tokens[*pos] == "]" { *pos += 1; }

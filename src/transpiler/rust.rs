@@ -1,21 +1,90 @@
 use crate::parser::{Expr, Op, Atom, parse_expression};
+use crate::verification::resolve_base_type;
 
 pub fn transpile_to_rust(atom: &Atom) -> String {
-    let params: Vec<String> = atom.params.iter().map(|p| format!("{}: i64", p.name)).collect();
+    // 引数の型を精緻型のベース型からマッピング (Type System 2.0)
+    let params: Vec<String> = atom.params.iter()
+        .map(|p| format!("{}: {}", p.name, map_type_rust(p.type_name.as_deref())))
+        .collect();
     let params_str = params.join(", ");
-    let body = format_expr_rust(&parse_expression(&atom.body_expr));
+
+    let body_ast = parse_expression(&atom.body_expr);
+    let body = format_expr_rust(&body_ast);
+
+    // 戻り値型の推論: ボディに f64 リテラルや f64 パラメータが含まれていれば f64
+    let has_float_param = atom.params.iter().any(|p| {
+        p.type_name.as_deref()
+            .map(|t| resolve_base_type(t) == "f64")
+            .unwrap_or(false)
+    });
+    let return_type = if has_float_param || body_contains_float(&body_ast) { "f64" } else { "i64" };
 
     format!(
-        "/// Verified Atom: {}\n/// Requires: {}\n/// Ensures: {}\npub fn {}({}) -> i64 {{\n    {}\n}}",
-        atom.name, atom.requires, atom.ensures, atom.name, params_str, body
+        "/// Verified Atom: {}\n/// Requires: {}\n/// Ensures: {}\npub fn {}({}) -> {} {{\n    {}\n}}",
+        atom.name, atom.requires, atom.ensures, atom.name, params_str, return_type, body
     )
+}
+
+/// AST に f64 リテラルが含まれるかを再帰的にチェック
+fn body_contains_float(expr: &Expr) -> bool {
+    match expr {
+        Expr::Float(_) => true,
+        Expr::BinaryOp(l, _, r) => body_contains_float(l) || body_contains_float(r),
+        Expr::Block(stmts) => stmts.iter().any(body_contains_float),
+        Expr::Let { value, .. } | Expr::Assign { value, .. } => body_contains_float(value),
+        Expr::IfThenElse { cond, then_branch, else_branch } =>
+            body_contains_float(cond) || body_contains_float(then_branch) || body_contains_float(else_branch),
+        Expr::While { cond, body, .. } => body_contains_float(cond) || body_contains_float(body),
+        Expr::Call(_, args) => args.iter().any(body_contains_float),
+        _ => false,
+    }
+}
+
+fn map_type_rust(type_name: Option<&str>) -> String {
+    match type_name {
+        Some(name) => {
+            let base = resolve_base_type(name);
+            match base.as_str() {
+                "f64" => "f64".to_string(),
+                "u64" => "u64".to_string(),
+                _ => "i64".to_string(),
+            }
+        },
+        None => "i64".to_string(),
+    }
+}
+
+/// 外側の括弧を除去するヘルパー（生成コードの不要な括弧 warning を防ぐ）
+fn strip_parens(s: &str) -> &str {
+    if s.starts_with('(') && s.ends_with(')') { &s[1..s.len()-1] } else { s }
 }
 
 fn format_expr_rust(expr: &Expr) -> String {
     match expr {
         Expr::Number(n) => n.to_string(),
+        Expr::Float(f) => {
+            // Rustのリテラルとして明確にするため、.0を保証
+            let s = f.to_string();
+            if s.contains('.') { s } else { format!("{}.0", s) }
+        },
         Expr::Variable(v) => v.clone(),
-        Expr::ArrayAccess(name, idx) => format!("{}[{} as usize]", name, format_expr_rust(idx)),
+        Expr::ArrayAccess(name, idx) => {
+            // インデックスは常に usize にキャスト
+            format!("{}[{} as usize]", name, format_expr_rust(idx))
+        },
+
+        Expr::Call(name, args) => {
+            let args_str: Vec<String> = args.iter().map(format_expr_rust).collect();
+            match name.as_str() {
+                "sqrt" => {
+                    // Rustでは f64 のメソッドとして呼び出す。整数ならキャストが必要。
+                    format!("(({}) as f64).sqrt()", args_str.join(", "))
+                },
+                "len" => format!("{}.len() as i64", args_str.join(", ")),
+                _ => format!("{}({})", name, args_str.join(", ")),
+            }
+        },
+
         Expr::BinaryOp(l, op, r) => {
             let op_str = match op {
                 Op::Add => "+", Op::Sub => "-", Op::Mul => "*", Op::Div => "/",
@@ -25,6 +94,7 @@ fn format_expr_rust(expr: &Expr) -> String {
             };
             format!("({} {} {})", format_expr_rust(l), op_str, format_expr_rust(r))
         },
+
         Expr::IfThenElse { cond, then_branch, else_branch } => {
             format!(
                 "if {} {{ {} }} else {{ {} }}",
@@ -33,26 +103,34 @@ fn format_expr_rust(expr: &Expr) -> String {
                 format_expr_rust(else_branch)
             )
         },
+
         Expr::While { cond, invariant, body } => {
+            let cond_str = format_expr_rust(cond);
             format!(
                 "{{ // invariant: {}\n        while {} {{ {} }} \n    }}",
                 format_expr_rust(invariant),
-                format_expr_rust(cond),
+                strip_parens(&cond_str),
                 format_expr_rust(body)
             )
         },
-        Expr::Let { var, value, body: _ } => {
-            format!("let mut {} = {};", var, format_expr_rust(value))
+
+        Expr::Let { var, value } => {
+            let val_str = format_expr_rust(value);
+            format!("let mut {} = {};", var, strip_parens(&val_str))
         },
+
         Expr::Assign { var, value } => {
-            format!("{} = {};", var, format_expr_rust(value))
+            let val_str = format_expr_rust(value);
+            format!("{} = {};", var, strip_parens(&val_str))
         },
+
         Expr::Block(stmts) => {
             let mut lines = Vec::new();
             for (i, stmt) in stmts.iter().enumerate() {
                 let s = format_expr_rust(stmt);
                 if i == stmts.len() - 1 {
-                    lines.push(s);
+                    // 最後の式はセミコロンなし（返り値）、不要な括弧も除去
+                    lines.push(strip_parens(&s).to_string());
                 } else {
                     if s.ends_with(';') || s.ends_with('}') {
                         lines.push(s);

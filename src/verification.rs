@@ -126,7 +126,7 @@ fn apply_refinement_constraint<'a>(
 ) -> Result<(), String> {
     // Type System 2.0: ベース型に基づいて変数を生成
     let var_z3: Dynamic = match refined._base_type.as_str() {
-        "f64" => Float::new_const(ctx, var_name, &z3::Sort::double(ctx)).into(),
+        "f64" => Float::new_const(ctx, var_name, 11, 53).into(),
         "u64" => {
             let v = Int::new_const(ctx, var_name);
             solver.assert(&v.ge(&Int::from_i64(ctx, 0))); // u64 の基本制約: v >= 0
@@ -157,7 +157,7 @@ fn expr_to_z3<'a>(
 ) -> Result<Dynamic<'a>, String> {
     match expr {
         Expr::Number(n) => Ok(Int::from_i64(ctx, *n).into()),
-        Expr::Float(f) => Ok(Float::from_f64(ctx, *f, &z3::Sort::double(ctx)).into()),
+        Expr::Float(f) => Ok(Float::from_f64(ctx, *f).into()),
         Expr::Variable(name) => {
             Ok(env.get(name).cloned().unwrap_or_else(|| Int::new_const(ctx, name.as_str()).into()))
         },
@@ -165,16 +165,20 @@ fn expr_to_z3<'a>(
             match name.as_str() {
                 "len" => Ok(Int::new_const(ctx, "arr_len").into()),
                 "sqrt" => {
-                    let val = expr_to_z3(ctx, arr, &args[0], env, solver_opt)?
-                        .as_float().ok_or("sqrt requires float")?;
-                    Ok(val.sqrt().into())
+                    // Z3 0.12 の Float には sqrt メソッドがないため、
+                    // シンボリック変数として扱い、sqrt(x) >= 0 の制約を付与
+                    let _val = expr_to_z3(ctx, arr, &args[0], env, solver_opt)?;
+                    let result = Float::new_const(ctx, "sqrt_result", 11, 53);
+                    if let Some(solver) = solver_opt {
+                        let zero = Float::from_f64(ctx, 0.0);
+                        solver.assert(&result.ge(&zero));
+                    }
+                    Ok(result.into())
                 },
                 "cast_to_int" => {
-                    let val = expr_to_z3(ctx, arr, &args[0], env, solver_opt)?;
-                    if let Some(f) = val.as_float() {
-                        // Rounding to nearest integer
-                        Ok(f.to_int().into())
-                    } else { Ok(val) }
+                    // Z3 0.12 では Float->Int 直接変換がないため、シンボリック整数を返す
+                    let _val = expr_to_z3(ctx, arr, &args[0], env, solver_opt)?;
+                    Ok(Int::new_const(ctx, "cast_result").into())
                 }
                 _ => Err(format!("Unknown function: {}", name)),
             }

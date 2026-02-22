@@ -208,6 +208,25 @@ fn expr_to_z3<'a>(
                     _ => Err("Invalid float op".into()),
                 }
             } else {
+                // Boolean 演算子は as_int() の前に処理する（オペランドが Bool のため）
+                match op {
+                    Op::And => {
+                        let lb = l.as_bool().ok_or("Expected bool for &&")?;
+                        let rb = r.as_bool().ok_or("Expected bool for &&")?;
+                        return Ok(Bool::and(ctx, &[&lb, &rb]).into());
+                    },
+                    Op::Or => {
+                        let lb = l.as_bool().ok_or("Expected bool for ||")?;
+                        let rb = r.as_bool().ok_or("Expected bool for ||")?;
+                        return Ok(Bool::or(ctx, &[&lb, &rb]).into());
+                    },
+                    Op::Implies => {
+                        let lb = l.as_bool().ok_or("Expected bool for =>")?;
+                        let rb = r.as_bool().ok_or("Expected bool for =>")?;
+                        return Ok(lb.implies(&rb).into());
+                    },
+                    _ => {}
+                }
                 let li = l.as_int().ok_or("Expected int")?;
                 let ri = r.as_int().ok_or("Expected int")?;
                 match op {
@@ -232,9 +251,7 @@ fn expr_to_z3<'a>(
                     Op::Le  => Ok(li.le(&ri).into()),
                     Op::Eq  => Ok(li._eq(&ri).into()),
                     Op::Neq => Ok(li._eq(&ri).not().into()),
-                    Op::And => Ok(Bool::and(ctx, &[&l.as_bool().unwrap(), &r.as_bool().unwrap()]).into()),
-                    Op::Or  => Ok(Bool::or(ctx, &[&l.as_bool().unwrap(), &r.as_bool().unwrap()]).into()),
-                    Op::Implies => Ok(l.as_bool().unwrap().implies(&r.as_bool().unwrap()).into()),
+                    _ => Err(format!("Unsupported int operator {:?}", op)),
                 }
             }
         },

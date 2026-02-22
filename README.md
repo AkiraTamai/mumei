@@ -74,8 +74,8 @@ brew install llvm@18 z3
 
 ```bash
 ./build_and_run.sh
-# 
-必要ならクリーンビルド
+
+# 必要ならクリーンビルド
 ./build_and_run.sh --clean
 ```
 
@@ -86,9 +86,12 @@ brew install llvm@18 z3
 ## 📄 Language Example（`sword_test.mm`）
 
 ```mumei
+// Type System 2.0: Refinement Types
 type Nat = i64 where v >= 0;
+type Pos = f64 where v > 0.0;
 
-autom sword_sum(n: Nat)
+// Atom 1: i64 ループ（loop invariant 検証）
+atom sword_sum(n: Nat)
 requires:
     n >= 0;
 ensures:
@@ -103,6 +106,16 @@ body: {
         i = i + 1;
     };
     s
+};
+
+// Atom 2: f64 精緻型（浮動小数点の検証）
+atom scale(x: Pos)
+requires:
+    x > 0.0;
+ensures:
+    result > 0.0;
+body: {
+    x * 2.0
 };
 ```
 

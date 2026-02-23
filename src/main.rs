@@ -73,6 +73,8 @@ fn main() {
             Item::StructDef(struct_def) => module_env.register_struct(struct_def),
             Item::EnumDef(enum_def) => module_env.register_enum(enum_def),
             Item::Atom(atom) => module_env.register_atom(atom),
+            Item::TraitDef(trait_def) => module_env.register_trait(trait_def),
+            Item::ImplDef(impl_def) => module_env.register_impl(impl_def),
         }
     }
 
@@ -119,6 +121,19 @@ fn main() {
                 go_bundle.push_str("\n\n");
                 ts_bundle.push_str(&transpile_enum(enum_def, TargetLanguage::TypeScript));
                 ts_bundle.push_str("\n\n");
+            }
+
+            // --- トレイト定義 ---
+            Item::TraitDef(trait_def) => {
+                let method_names: Vec<&str> = trait_def.methods.iter().map(|m| m.name.as_str()).collect();
+                let law_names: Vec<&str> = trait_def.laws.iter().map(|(n, _)| n.as_str()).collect();
+                println!("  📜 Registered Trait: '{}' (methods: {}, laws: {})",
+                    trait_def.name, method_names.join(", "), law_names.join(", "));
+            }
+
+            // --- トレイト実装 ---
+            Item::ImplDef(impl_def) => {
+                println!("  🔧 Registered Impl: {} for {}", impl_def.trait_name, impl_def.target_type);
             }
 
             // --- Atom の処理 ---

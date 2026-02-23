@@ -138,6 +138,8 @@ fn resolve_imports_recursive(
                     Item::TypeDef(t) => type_names.push(t.name.clone()),
                     Item::StructDef(s) => struct_names.push(s.name.clone()),
                     Item::EnumDef(_) => {},
+                    Item::TraitDef(_) => {},
+                    Item::ImplDef(_) => {},
                     Item::Import(_) => {},
                 }
             }
@@ -193,6 +195,13 @@ fn register_imported_items(items: &[Item], alias: Option<&str>, module_env: &mut
                     fqn_enum.name = format!("{}::{}", prefix, enum_def.name);
                     module_env.register_enum(&fqn_enum);
                 }
+            }
+            Item::TraitDef(trait_def) => {
+                module_env.register_trait(trait_def);
+                // トレイトは FQN 登録不要（トレイト名はグローバルに一意と仮定）
+            }
+            Item::ImplDef(impl_def) => {
+                module_env.register_impl(impl_def);
             }
             Item::Import(_) => {
                 // 再帰的に処理済み

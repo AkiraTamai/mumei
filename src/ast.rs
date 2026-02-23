@@ -361,6 +361,7 @@ impl Monomorphizer {
         Some(Atom {
             name: mono_name,
             type_params: vec![],
+            where_bounds: vec![], // 単相化後は境界なし
             params,
             requires: generic.requires.clone(),
             forall_constraints: generic.forall_constraints.clone(),

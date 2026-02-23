@@ -1063,6 +1063,94 @@ body: x;
     }
 
     #[test]
+    fn test_parse_trait_def() {
+        let source = r#"
+trait Comparable {
+    fn leq(a: Self, b: Self) -> bool;
+    law reflexive: leq(x, x) == true;
+    law transitive: leq(a, b) && leq(b, c) => leq(a, c);
+}
+"#;
+        let items = parse_module(source);
+        let traits: Vec<_> = items.iter().filter_map(|i| {
+            if let Item::TraitDef(t) = i { Some(t) } else { None }
+        }).collect();
+
+        assert_eq!(traits.len(), 1);
+        let t = &traits[0];
+        assert_eq!(t.name, "Comparable");
+        assert_eq!(t.methods.len(), 1);
+        assert_eq!(t.methods[0].name, "leq");
+        assert_eq!(t.methods[0].param_types, vec!["Self", "Self"]);
+        assert_eq!(t.methods[0].return_type, "bool");
+        assert_eq!(t.laws.len(), 2);
+        assert_eq!(t.laws[0].0, "reflexive");
+        assert_eq!(t.laws[1].0, "transitive");
+    }
+
+    #[test]
+    fn test_parse_impl_def() {
+        let source = r#"
+impl Comparable for i64 {
+    fn leq(a: i64, b: i64) -> bool { a <= b }
+}
+"#;
+        let items = parse_module(source);
+        let impls: Vec<_> = items.iter().filter_map(|i| {
+            if let Item::ImplDef(im) = i { Some(im) } else { None }
+        }).collect();
+
+        assert_eq!(impls.len(), 1);
+        assert_eq!(impls[0].trait_name, "Comparable");
+        assert_eq!(impls[0].target_type, "i64");
+        assert_eq!(impls[0].method_bodies.len(), 1);
+        assert_eq!(impls[0].method_bodies[0].0, "leq");
+        assert_eq!(impls[0].method_bodies[0].1, "a <= b");
+    }
+
+    #[test]
+    fn test_parse_atom_with_trait_bounds() {
+        let source = r#"
+atom min<T: Comparable>(a: T, b: T)
+requires: true;
+ensures: true;
+body: a;
+"#;
+        let items = parse_module(source);
+        let atoms: Vec<_> = items.iter().filter_map(|i| {
+            if let Item::Atom(a) = i { Some(a) } else { None }
+        }).collect();
+
+        assert_eq!(atoms.len(), 1);
+        let a = &atoms[0];
+        assert_eq!(a.name, "min");
+        assert_eq!(a.type_params, vec!["T"]);
+        assert_eq!(a.where_bounds.len(), 1);
+        assert_eq!(a.where_bounds[0].param, "T");
+        assert_eq!(a.where_bounds[0].bounds, vec!["Comparable"]);
+    }
+
+    #[test]
+    fn test_parse_atom_with_multiple_bounds() {
+        let source = r#"
+atom sorted_min<T: Comparable + Numeric>(a: T, b: T)
+requires: true;
+ensures: true;
+body: a;
+"#;
+        let items = parse_module(source);
+        let atoms: Vec<_> = items.iter().filter_map(|i| {
+            if let Item::Atom(a) = i { Some(a) } else { None }
+        }).collect();
+
+        assert_eq!(atoms.len(), 1);
+        let a = &atoms[0];
+        assert_eq!(a.type_params, vec!["T"]);
+        assert_eq!(a.where_bounds.len(), 1);
+        assert_eq!(a.where_bounds[0].bounds, vec!["Comparable", "Numeric"]);
+    }
+
+    #[test]
     fn test_parse_non_generic_backward_compat() {
         // 非ジェネリック定義が引き続き正しくパースされることを確認
         let source = r#"

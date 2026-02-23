@@ -12,7 +12,7 @@ pub enum Op {
 #[derive(Debug, Clone)]
 pub enum Expr {
     Number(i64),
-    Float(f64), // 追加: 浮動小数点
+    Float(f64),
     Variable(String),
     ArrayAccess(String, Box<Expr>),
     BinaryOp(Box<Expr>, Op, Box<Expr>),
@@ -33,9 +33,18 @@ pub enum Expr {
     While {
         cond: Box<Expr>,
         invariant: Box<Expr>,
+        /// 停止性証明用の減少式（Ranking Function）。None なら停止性チェックをスキップ
+        decreases: Option<Box<Expr>>,
         body: Box<Expr>,
     },
-    Call(String, Vec<Expr>), // 追加: 標準関数呼び出し
+    Call(String, Vec<Expr>),
+    /// 構造体インスタンス生成: TypeName { field1: expr1, field2: expr2 }
+    StructInit {
+        type_name: String,
+        fields: Vec<(String, Expr)>,
+    },
+    /// フィールドアクセス: expr.field_name
+    FieldAccess(Box<Expr>, String),
 }
 
 // --- 2. 量子化子、精緻型、および Item の定義 ---
@@ -79,10 +88,27 @@ pub struct Atom {
     pub body_expr: String,
 }
 
+/// 構造体フィールド定義（オプションで精緻型制約を保持）
+#[derive(Debug, Clone)]
+pub struct StructField {
+    pub name: String,
+    pub type_name: String,
+    /// フィールドの精緻型制約（例: "v >= 0"）。None なら制約なし
+    pub constraint: Option<String>,
+}
+
+/// 構造体定義
+#[derive(Debug, Clone)]
+pub struct StructDef {
+    pub name: String,
+    pub fields: Vec<StructField>,
+}
+
 #[derive(Debug, Clone)]
 pub enum Item {
     Atom(Atom),
     TypeDef(RefinedType),
+    StructDef(StructDef),
 }
 
 // --- 3. メインパーサーロジック ---
@@ -92,6 +118,8 @@ pub fn parse_module(source: &str) -> Vec<Item> {
     // type 定義: i64 | u64 | f64 を許容するように変更
     let type_re = Regex::new(r"(?m)^type\s+(\w+)\s*=\s*(\w+)\s+where\s+([^;]+);").unwrap();
     let atom_re = Regex::new(r"atom\s+\w+").unwrap();
+    // struct 定義: struct Name { field: Type, ... }
+    let struct_re = Regex::new(r"(?m)^struct\s+(\w+)\s*\{([^}]*)\}").unwrap();
 
     for cap in type_re.captures_iter(source) {
         let full_predicate = cap[3].trim().to_string();
@@ -103,6 +131,31 @@ pub fn parse_module(source: &str) -> Vec<Item> {
             operand,
             predicate_raw: full_predicate,
         }));
+    }
+
+    for cap in struct_re.captures_iter(source) {
+        let name = cap[1].to_string();
+        let fields_raw = &cap[2];
+        let fields: Vec<StructField> = fields_raw
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                // "x: f64 where v >= 0.0" → name="x", type="f64", constraint=Some("v >= 0.0")
+                let (field_part, constraint) = if let Some(idx) = s.find("where") {
+                    (s[..idx].trim(), Some(s[idx + 5..].trim().to_string()))
+                } else {
+                    (s.trim(), None)
+                };
+                let parts: Vec<&str> = field_part.splitn(2, ':').collect();
+                StructField {
+                    name: parts[0].trim().to_string(),
+                    type_name: parts.get(1).map(|t| t.trim().to_string()).unwrap_or_else(|| "i64".to_string()),
+                    constraint,
+                }
+            })
+            .collect();
+        items.push(Item::StructDef(StructDef { name, fields }));
     }
 
     let atom_indices: Vec<_> = atom_re.find_iter(source).map(|m| m.start()).collect();
@@ -183,8 +236,8 @@ pub fn parse_atom(source: &str) -> Atom {
 }
 
 pub fn tokenize(input: &str) -> Vec<String> {
-    // 小数点(.)を含む数値に対応
-    let re = Regex::new(r"(\d+\.\d+|\d+|[a-zA-Z_]\w*|==|!=|>=|<=|=>|&&|\|\||[+\-*/><()\[\]{};=,])").unwrap();
+    // 小数点(.)を含む数値リテラルを先にマッチし、残りの `.` はフィールドアクセス演算子として扱う
+    let re = Regex::new(r"(\d+\.\d+|\d+|[a-zA-Z_]\w*|==|!=|>=|<=|=>|&&|\|\||[+\-*/><()\[\]{};=,:.])").unwrap();
     re.find_iter(input).map(|m| m.as_str().to_string()).collect()
 }
 
@@ -310,9 +363,20 @@ fn parse_primary(tokens: &[String], pos: &mut usize) -> Expr {
         let cond = parse_implies(tokens, pos);
         if *pos < tokens.len() && tokens[*pos] == "invariant" {
             *pos += 1;
+            // `invariant:` の `:` をスキップ（tokenizer が `:` を独立トークンとして分離するため）
+            if *pos < tokens.len() && tokens[*pos] == ":" { *pos += 1; }
             let inv = parse_implies(tokens, pos);
+            // オプション: decreases 句（停止性証明用の減少式）
+            let decreases = if *pos < tokens.len() && tokens[*pos] == "decreases" {
+                *pos += 1;
+                // `decreases:` の `:` もスキップ
+                if *pos < tokens.len() && tokens[*pos] == ":" { *pos += 1; }
+                Some(Box::new(parse_implies(tokens, pos)))
+            } else {
+                None
+            };
             let body = parse_block_or_expr(tokens, pos);
-            return Expr::While { cond: Box::new(cond), invariant: Box::new(inv), body: Box::new(body) };
+            return Expr::While { cond: Box::new(cond), invariant: Box::new(inv), decreases, body: Box::new(body) };
         }
         panic!("Mumei loops require an 'invariant'.");
     }
@@ -330,15 +394,33 @@ fn parse_primary(tokens: &[String], pos: &mut usize) -> Expr {
     }
 
     *pos += 1;
-    if token == "(" {
+    let mut node = if token == "(" {
         let node = parse_implies(tokens, pos);
         if *pos < tokens.len() && tokens[*pos] == ")" { *pos += 1; }
         node
     } else if let Ok(n) = token.parse::<i64>() {
         Expr::Number(n)
     } else if let Ok(f) = token.parse::<f64>() {
-        // 数値トークンがドットを含む場合は Float として解釈
         if token.contains('.') { Expr::Float(f) } else { Expr::Number(token.parse().unwrap()) }
+    } else if *pos < tokens.len() && tokens[*pos] == "{" {
+        // 構造体初期化: TypeName { field: expr, ... }
+        // 大文字始まりの識別子の後に { が来たら構造体と判定
+        if token.chars().next().map_or(false, |c| c.is_uppercase()) {
+            *pos += 1; // skip {
+            let mut fields = Vec::new();
+            while *pos < tokens.len() && tokens[*pos] != "}" {
+                let field_name = tokens[*pos].clone();
+                *pos += 1;
+                if *pos < tokens.len() && tokens[*pos] == ":" { *pos += 1; }
+                let value = parse_implies(tokens, pos);
+                fields.push((field_name, value));
+                if *pos < tokens.len() && tokens[*pos] == "," { *pos += 1; }
+            }
+            if *pos < tokens.len() && tokens[*pos] == "}" { *pos += 1; }
+            Expr::StructInit { type_name: token.clone(), fields }
+        } else {
+            Expr::Variable(token.clone())
+        }
     } else if *pos < tokens.len() && tokens[*pos] == "(" {
         // 関数呼び出し: name(args)
         *pos += 1; // (
@@ -357,5 +439,16 @@ fn parse_primary(tokens: &[String], pos: &mut usize) -> Expr {
         Expr::ArrayAccess(token.clone(), Box::new(index))
     } else {
         Expr::Variable(token.clone())
+    };
+
+    // フィールドアクセスチェーン: expr.field1.field2 ...
+    while *pos < tokens.len() && tokens[*pos] == "." {
+        *pos += 1; // skip .
+        if *pos < tokens.len() {
+            let field = tokens[*pos].clone();
+            *pos += 1;
+            node = Expr::FieldAccess(Box::new(node), field);
+        }
     }
+    node
 }

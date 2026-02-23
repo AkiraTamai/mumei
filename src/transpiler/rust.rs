@@ -104,11 +104,15 @@ fn format_expr_rust(expr: &Expr) -> String {
             )
         },
 
-        Expr::While { cond, invariant, body } => {
+        Expr::While { cond, invariant, decreases, body } => {
             let cond_str = format_expr_rust(cond);
+            let dec_comment = decreases.as_ref()
+                .map(|d| format!(" decreases: {}", format_expr_rust(d)))
+                .unwrap_or_default();
             format!(
-                "{{ // invariant: {}\n        while {} {{ {} }} \n    }}",
+                "{{ // invariant: {}{}\n        while {} {{ {} }} \n    }}",
                 format_expr_rust(invariant),
+                dec_comment,
                 strip_parens(&cond_str),
                 format_expr_rust(body)
             )
@@ -129,7 +133,6 @@ fn format_expr_rust(expr: &Expr) -> String {
             for (i, stmt) in stmts.iter().enumerate() {
                 let s = format_expr_rust(stmt);
                 if i == stmts.len() - 1 {
-                    // 最後の式はセミコロンなし（返り値）、不要な括弧も除去
                     lines.push(strip_parens(&s).to_string());
                 } else {
                     if s.ends_with(';') || s.ends_with('}') {
@@ -140,6 +143,17 @@ fn format_expr_rust(expr: &Expr) -> String {
                 }
             }
             format!("{{\n        {}\n    }}", lines.join("\n        "))
-        }
+        },
+
+        Expr::StructInit { type_name, fields } => {
+            let field_strs: Vec<String> = fields.iter()
+                .map(|(name, expr)| format!("{}: {}", name, format_expr_rust(expr)))
+                .collect();
+            format!("{} {{ {} }}", type_name, field_strs.join(", "))
+        },
+
+        Expr::FieldAccess(expr, field) => {
+            format!("{}.{}", format_expr_rust(expr), field)
+        },
     }
 }

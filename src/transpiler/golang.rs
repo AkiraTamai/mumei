@@ -69,7 +69,7 @@ fn format_expr_go(expr: &Expr) -> String {
             )
         },
 
-        Expr::While { cond, invariant, body } => {
+        Expr::While { cond, invariant, decreases: _, body } => {
             format!(
                 "// invariant: {}\n    for {} {{\n        {}\n    }}",
                 format_expr_go(invariant),
@@ -100,7 +100,6 @@ fn format_expr_go(expr: &Expr) -> String {
         Expr::Block(stmts) => {
             stmts.iter().map(|s| {
                 let code = format_expr_go(s);
-                // 文（Statement）として扱うべきパターンの判定
                 if code.starts_with("if") || code.contains(":=") || code.contains(" = ") ||
                     code.starts_with("for") || code.starts_with("//") || code.starts_with("var") {
                     code
@@ -108,6 +107,17 @@ fn format_expr_go(expr: &Expr) -> String {
                     format!("return {}", code)
                 }
             }).collect::<Vec<_>>().join("\n    ")
-        }
+        },
+
+        Expr::StructInit { type_name, fields } => {
+            let field_strs: Vec<String> = fields.iter()
+                .map(|(name, expr)| format!("{}: {}", name, format_expr_go(expr)))
+                .collect();
+            format!("{}{{{}}}", type_name, field_strs.join(", "))
+        },
+
+        Expr::FieldAccess(expr, field) => {
+            format!("{}.{}", format_expr_go(expr), field)
+        },
     }
 }

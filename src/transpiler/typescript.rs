@@ -51,7 +51,7 @@ fn format_expr_ts(expr: &Expr) -> String {
             )
         },
 
-        Expr::While { cond, invariant, body } => {
+        Expr::While { cond, invariant, decreases: _, body } => {
             format!(
                 "// invariant: {}\n    while ({}) {{\n        {}\n    }}",
                 format_expr_ts(invariant),
@@ -90,6 +90,17 @@ fn format_expr_ts(expr: &Expr) -> String {
                 }
             }
             lines.join("\n    ")
-        }
+        },
+
+        Expr::StructInit { type_name: _, fields } => {
+            let field_strs: Vec<String> = fields.iter()
+                .map(|(name, expr)| format!("{}: {}", name, format_expr_ts(expr)))
+                .collect();
+            format!("{{ {} }}", field_strs.join(", "))
+        },
+
+        Expr::FieldAccess(expr, field) => {
+            format!("{}.{}", format_expr_ts(expr), field)
+        },
     }
 }

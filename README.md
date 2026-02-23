@@ -122,18 +122,25 @@ brew install llvm@18 z3
 🗡️  Mumei: Forging the blade (Type System 2.0 enabled)...
   ✨ Registered Refined Type: 'Nat' (i64)
   ✨ Registered Refined Type: 'Pos' (f64)
+  ✨ Registered Refined Type: 'StackIdx' (i64)
   🏗️  Registered Struct: 'Point' (fields: x, y)
   🏗️  Registered Struct: 'Circle' (fields: cx, cy, r)
   ✨ [1/4] Polishing Syntax: Atom 'sword_sum' identified.
   ⚖️  [2/4] Verification: Passed. Logic verified with Z3.
   ⚙️  [3/4] Tempering: Done. Compiled 'sword_sum' to LLVM IR.
   ...
-🎉 Blade forged successfully with 5 atoms.
+  ✨ [1/4] Polishing Syntax: Atom 'stack_clear' identified.
+  ⚖️  [2/4] Verification: Passed. Logic verified with Z3.
+  ⚙️  [3/4] Tempering: Done. Compiled 'stack_clear' to LLVM IR.
+  ...
+🎉 Blade forged successfully with 8 atoms.
 ```
 
 ---
 
-## 📄 Language Example (`sword_test.mm`)
+## 📄 Verification Suite (`sword_test.mm`)
+
+The test suite exercises **8 atoms** and **2 structs**, covering every verification feature:
 
 ```mumei
 type Nat = i64 where v >= 0;
@@ -174,6 +181,23 @@ body: {
     top + 1
 };
 
+// Robust Stack: clear loop with termination proof
+atom stack_clear(top: Nat)
+requires:
+    top >= 0;
+ensures:
+    result >= 0;
+body: {
+    let i = top;
+    while i > 0
+    invariant: i >= 0
+    decreases: i
+    {
+        i = i - 1;
+    };
+    i
+};
+
 // Geometric invariant: positive radius => positive area
 atom circle_area(r: Pos)
 requires:
@@ -184,6 +208,19 @@ body: {
     r * r * 3.14159
 };
 ```
+
+### Verified Properties
+
+| Atom | Verification |
+|---|---|
+| `sword_sum` | Loop invariant + **termination** (`decreases: n - i`) |
+| `scale` | Float refinement (Pos > 0.0 ⟹ result > 0.0) |
+| `stack_push` | Overflow prevention (top < max ⟹ top+1 ≤ max) |
+| `stack_pop` | Underflow prevention (top > 0 ⟹ top-1 ≥ 0) |
+| `circle_area` | Geometric invariant (r > 0 ⟹ area > 0) |
+| `robust_push` | Bounded stack push (0 ≤ top' ≤ max) |
+| `stack_clear` | Loop **termination** (`decreases: i`) + invariant preservation |
+| `dist_squared` | Non-negative distance (dx² + dy² ≥ 0) |
 
 ---
 
@@ -231,7 +268,9 @@ src/
 - [x] Structured error types (`MumeiError` enum)
 - [x] `VCtx` context object for verification (reduced function signatures)
 - [x] `llvm!` macro for codegen boilerplate reduction
+- [x] Comprehensive verification suite (8 atoms: stack ops, geometry, termination)
 - [ ] Struct method definitions (`atom` attached to struct)
 - [ ] Nested struct support
+- [ ] Negative test suite (intentional constraint violations)
 - [ ] Editor integration (LSP / VS Code Extension)
 

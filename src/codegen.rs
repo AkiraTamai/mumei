@@ -315,7 +315,6 @@ fn compile_expr<'a>(
                     let val = compile_expr(context, builder, module, function, field_expr, variables, array_ptrs)?;
                     let qualified = format!("__struct_{}_{}", type_name, field_name);
                     variables.insert(qualified, val);
-                    last_val = val;
                 }
                 // 構造体定義のフィールド順で LLVM StructType を構築
                 let field_types: Vec<inkwell::types::BasicTypeEnum> = sdef.fields.iter().map(|f| {

@@ -363,10 +363,14 @@ fn parse_primary(tokens: &[String], pos: &mut usize) -> Expr {
         let cond = parse_implies(tokens, pos);
         if *pos < tokens.len() && tokens[*pos] == "invariant" {
             *pos += 1;
+            // `invariant:` の `:` をスキップ（tokenizer が `:` を独立トークンとして分離するため）
+            if *pos < tokens.len() && tokens[*pos] == ":" { *pos += 1; }
             let inv = parse_implies(tokens, pos);
             // オプション: decreases 句（停止性証明用の減少式）
             let decreases = if *pos < tokens.len() && tokens[*pos] == "decreases" {
                 *pos += 1;
+                // `decreases:` の `:` もスキップ
+                if *pos < tokens.len() && tokens[*pos] == ":" { *pos += 1; }
                 Some(Box::new(parse_implies(tokens, pos)))
             } else {
                 None

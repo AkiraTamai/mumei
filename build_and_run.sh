@@ -51,13 +51,14 @@ if [ ! -f "sword_test.mm" ]; then
 fi
 
 # --- 5. メイン検証スイート実行 ---
+MUMEI=./target/release/mumei
 echo "🚀 Running Mumei Verification Suite..."
 echo "   sword_test.mm: Refinement Types, Structs, Generics, Traits, Laws, Termination"
 echo ""
 mkdir -p dist
 rm -f dist/katana* # 古い成果物を削除
 
-if ! ./target/release/mumei sword_test.mm --output dist/katana; then
+if ! $MUMEI build sword_test.mm -o dist/katana; then
     echo "❌ Error: Mumei verification failed on sword_test.mm"
     exit 1
 fi
@@ -77,7 +78,7 @@ EXAMPLES_FAILED=0
 
 # 6a. Inter-atom call test
 echo -n "  call_test.mm ... "
-if ./target/release/mumei examples/call_test.mm --output dist/call_test 2>/dev/null; then
+if $MUMEI build examples/call_test.mm -o dist/call_test 2>/dev/null; then
     echo "✅"
     EXAMPLES_PASSED=$((EXAMPLES_PASSED + 1))
 else
@@ -87,7 +88,7 @@ fi
 
 # 6b. ATM state machine (enum + match + guards)
 echo -n "  match_atm.mm ... "
-if ./target/release/mumei examples/match_atm.mm --output dist/match_atm 2>/dev/null; then
+if $MUMEI build examples/match_atm.mm -o dist/match_atm 2>/dev/null; then
     echo "✅"
     EXAMPLES_PASSED=$((EXAMPLES_PASSED + 1))
 else
@@ -97,7 +98,7 @@ fi
 
 # 6c. Expression evaluator (zero-division detection)
 echo -n "  match_evaluator.mm ... "
-if ./target/release/mumei examples/match_evaluator.mm --output dist/match_evaluator 2>/dev/null; then
+if $MUMEI build examples/match_evaluator.mm -o dist/match_evaluator 2>/dev/null; then
     echo "✅"
     EXAMPLES_PASSED=$((EXAMPLES_PASSED + 1))
 else
@@ -107,7 +108,7 @@ fi
 
 # 6d. Multi-file import test
 echo -n "  import_test/main.mm ... "
-if ./target/release/mumei examples/import_test/main.mm --output dist/import_test 2>/dev/null; then
+if $MUMEI build examples/import_test/main.mm -o dist/import_test 2>/dev/null; then
     echo "✅"
     EXAMPLES_PASSED=$((EXAMPLES_PASSED + 1))
 else
@@ -117,7 +118,7 @@ fi
 
 # 6e. Std library import test
 echo -n "  test_std_import.mm ... "
-if ./target/release/mumei tests/test_std_import.mm --output dist/test_std 2>/dev/null; then
+if $MUMEI build tests/test_std_import.mm -o dist/test_std 2>/dev/null; then
     echo "✅"
     EXAMPLES_PASSED=$((EXAMPLES_PASSED + 1))
 else

@@ -477,6 +477,8 @@ With `--output dist/katana`:
 - [x] Default arm optimization (prior arm negations as preconditions for `_` arms)
 - [x] Nested pattern decomposition (recursive `Variant(Variant(...))` support)
 - [x] Counter-example display on exhaustiveness failure (Z3 `get_model()`)
+- [x] Pattern Matrix codegen: linear if-else chain with clean CFG (no post-hoc switch insertion)
+- [x] Recursive ADT support in parser (`Self` / self-referencing Enum fields)
 - [ ] Equality ensures propagation (`ensures: result == n + 1` for chained call verification)
 - [ ] Fully qualified name (FQN) dot-notation in source code (`math.add(x, y)`)
 - [ ] Incremental build (re-verify only changed modules)

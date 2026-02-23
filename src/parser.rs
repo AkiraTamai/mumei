@@ -82,7 +82,12 @@ pub enum Pattern {
 pub struct EnumVariant {
     pub name: String,
     /// Variant が保持するフィールドの型名リスト（Unit variant なら空）
+    /// 再帰的 ADT: フィールド型に自身の Enum 名（例: "List"）を含めることで
+    /// `Cons(i64, List)` のような再帰的データ構造を定義可能。
+    /// パーサーは "Self" を Enum 自身の名前に自動展開する。
     pub fields: Vec<String>,
+    /// このバリアントが再帰的か（フィールドに自身の Enum 名を含むか）
+    pub is_recursive: bool,
 }
 
 /// Enum 定義
@@ -90,6 +95,8 @@ pub struct EnumVariant {
 pub struct EnumDef {
     pub name: String,
     pub variants: Vec<EnumVariant>,
+    /// この Enum が再帰的データ型か（いずれかの Variant が自身を参照するか）
+    pub is_recursive: bool,
 }
 
 // --- 2. 量子化子、精緻型、および Item の定義 ---
@@ -230,31 +237,40 @@ pub fn parse_module(source: &str) -> Vec<Item> {
     }
 
     // enum 定義: enum Name { Variant1(Type), Variant2, Variant3(Type1, Type2) }
+    // 再帰的 ADT: フィールド型に "Self" または Enum 自身の名前を記述可能
     let enum_re = Regex::new(r"(?m)^enum\s+(\w+)\s*\{([^}]*)\}").unwrap();
     for cap in enum_re.captures_iter(source) {
         let name = cap[1].to_string();
         let variants_raw = &cap[2];
+        let mut any_recursive = false;
         let variants: Vec<EnumVariant> = variants_raw
             .split(',')
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
             .map(|s| {
-                // "Circle(f64)" or "None" or "Rect(f64, f64)"
+                // "Circle(f64)" or "None" or "Cons(i64, Self)" or "Cons(i64, List)"
                 if let Some(paren_start) = s.find('(') {
                     let variant_name = s[..paren_start].trim().to_string();
                     let fields_str = &s[paren_start + 1..s.rfind(')').unwrap_or(s.len())];
                     let fields: Vec<String> = fields_str
                         .split(',')
-                        .map(|f| f.trim().to_string())
+                        .map(|f| {
+                            let f = f.trim().to_string();
+                            // "Self" を Enum 自身の名前に展開
+                            if f == "Self" { name.clone() } else { f }
+                        })
                         .filter(|f| !f.is_empty())
                         .collect();
-                    EnumVariant { name: variant_name, fields }
+                    // 再帰判定: フィールドに自身の Enum 名を含むか
+                    let is_recursive = fields.iter().any(|f| f == &name);
+                    if is_recursive { any_recursive = true; }
+                    EnumVariant { name: variant_name, fields, is_recursive }
                 } else {
-                    EnumVariant { name: s.to_string(), fields: vec![] }
+                    EnumVariant { name: s.to_string(), fields: vec![], is_recursive: false }
                 }
             })
             .collect();
-        items.push(Item::EnumDef(EnumDef { name, variants }));
+        items.push(Item::EnumDef(EnumDef { name, variants, is_recursive: any_recursive }));
     }
 
     let atom_indices: Vec<_> = atom_re.find_iter(source).map(|m| m.start()).collect();

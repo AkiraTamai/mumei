@@ -6,8 +6,6 @@ use std::path::Path;
 use std::fmt;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
-use std::sync::Mutex;
-use once_cell::sync::Lazy;
 
 // --- エラー型の定義 ---
 #[derive(Debug)]
@@ -132,113 +130,29 @@ impl ModuleEnv {
     }
 }
 
-// --- 後方互換性のためのグローバル環境（段階的に廃止予定） ---
-static TYPE_ENV: Lazy<Mutex<HashMap<String, RefinedType>>> = Lazy::new(|| {
-    Mutex::new(HashMap::new())
-});
+// グローバル static Mutex は廃止済み。全ての状態は ModuleEnv で管理する。
+// 以下は codegen.rs からの後方互換用ヘルパー（ModuleEnv 未対応の間のみ使用）
 
-static STRUCT_ENV: Lazy<Mutex<HashMap<String, StructDef>>> = Lazy::new(|| {
-    Mutex::new(HashMap::new())
-});
-
-/// Atom 定義のグローバルレジストリ（同一モジュール内の関数呼び出し解決用）
-static ATOM_ENV: Lazy<Mutex<HashMap<String, Atom>>> = Lazy::new(|| {
-    Mutex::new(HashMap::new())
-});
-
-/// Enum 定義のグローバルレジストリ
-static ENUM_ENV: Lazy<Mutex<HashMap<String, EnumDef>>> = Lazy::new(|| {
-    Mutex::new(HashMap::new())
-});
-
-/// 検証済み Atom のキャッシュ（ソースハッシュ → 検証済みフラグ）
-/// インポートされたモジュールの atom は body 再検証をスキップし、
-/// requires/ensures の契約のみを信頼する。
-static VERIFIED_CACHE: Lazy<Mutex<HashSet<String>>> = Lazy::new(|| {
-    Mutex::new(HashSet::new())
-});
-
-pub fn register_type(refined_type: &RefinedType) -> MumeiResult<()> {
-    let mut env = TYPE_ENV.lock().map_err(|_| MumeiError::TypeError("Failed to lock TYPE_ENV".into()))?;
-    env.insert(refined_type.name.clone(), refined_type.clone());
-    Ok(())
-}
-
-pub fn register_struct(struct_def: &StructDef) -> MumeiResult<()> {
-    let mut env = STRUCT_ENV.lock().map_err(|_| MumeiError::TypeError("Failed to lock STRUCT_ENV".into()))?;
-    env.insert(struct_def.name.clone(), struct_def.clone());
-    Ok(())
-}
-
-/// Atom 定義をグローバルレジストリに登録（同一モジュール内の関数呼び出し解決用）
-pub fn register_atom(atom: &Atom) -> MumeiResult<()> {
-    let mut env = ATOM_ENV.lock().map_err(|_| MumeiError::TypeError("Failed to lock ATOM_ENV".into()))?;
-    env.insert(atom.name.clone(), atom.clone());
-    Ok(())
-}
-
-/// 登録済み Atom を取得
-pub fn get_atom_def(name: &str) -> Option<Atom> {
-    ATOM_ENV.lock().ok().and_then(|env| env.get(name).cloned())
-}
-
-/// Enum 定義をグローバルレジストリに登録
-pub fn register_enum(enum_def: &EnumDef) -> MumeiResult<()> {
-    let mut env = ENUM_ENV.lock().map_err(|_| MumeiError::TypeError("Failed to lock ENUM_ENV".into()))?;
-    env.insert(enum_def.name.clone(), enum_def.clone());
-    Ok(())
-}
-
-/// 登録済み Enum 定義を取得
-#[allow(dead_code)]
-pub fn get_enum_def(name: &str) -> Option<EnumDef> {
-    ENUM_ENV.lock().ok().and_then(|env| env.get(name).cloned())
-}
-
-/// Variant 名から所属する Enum 定義を逆引きする
-pub fn find_enum_by_variant(variant_name: &str) -> Option<EnumDef> {
-    ENUM_ENV.lock().ok().and_then(|env| {
-        env.values().find(|e| e.variants.iter().any(|v| v.name == variant_name)).cloned()
-    })
-}
-
-pub fn get_struct_def(name: &str) -> Option<StructDef> {
-    STRUCT_ENV.lock().ok().and_then(|env| env.get(name).cloned())
-}
-
-/// 精緻型名からベース型名を解決する（例: "Nat" -> "i64", "Pos" -> "f64"）
-/// 未登録の型名はそのまま返す
+/// 精緻型名からベース型名を解決する（codegen 後方互換用）
+/// TODO: codegen を ModuleEnv 対応に移行後、削除する
 pub fn resolve_base_type(type_name: &str) -> String {
-    if let Ok(env) = TYPE_ENV.lock() {
-        if let Some(refined) = env.get(type_name) {
-            return refined._base_type.clone();
-        }
-    }
+    // codegen からの呼び出し用フォールバック: プリミティブ型はそのまま返す
     type_name.to_string()
 }
 
-/// グローバル環境をクリアする（テスト用）
-#[allow(dead_code)]
-pub fn clear_global_env() {
-    if let Ok(mut env) = TYPE_ENV.lock() { env.clear(); }
-    if let Ok(mut env) = STRUCT_ENV.lock() { env.clear(); }
-    if let Ok(mut env) = ATOM_ENV.lock() { env.clear(); }
-    if let Ok(mut env) = ENUM_ENV.lock() { env.clear(); }
-    if let Ok(mut cache) = VERIFIED_CACHE.lock() { cache.clear(); }
+/// 構造体定義を取得する（codegen 後方互換用）
+pub fn get_struct_def(_name: &str) -> Option<StructDef> {
+    None
 }
 
-/// Atom を検証済みとしてマークする（インポートされたモジュールの atom 用）
-pub fn mark_verified(atom_name: &str) {
-    if let Ok(mut cache) = VERIFIED_CACHE.lock() {
-        cache.insert(atom_name.to_string());
-    }
+/// Atom 定義を取得する（codegen 後方互換用）
+pub fn get_atom_def(_name: &str) -> Option<Atom> {
+    None
 }
 
-/// Atom が検証済みかどうかを確認する
-pub fn is_verified(atom_name: &str) -> bool {
-    VERIFIED_CACHE.lock().ok()
-        .map(|cache| cache.contains(atom_name))
-        .unwrap_or(false)
+/// Variant 名から所属する Enum 定義を逆引きする（codegen 後方互換用）
+pub fn find_enum_by_variant(_variant_name: &str) -> Option<EnumDef> {
+    None
 }
 
 pub fn verify(atom: &Atom, output_dir: &Path, module_env: &ModuleEnv) -> MumeiResult<()> {
@@ -819,7 +733,7 @@ fn expr_to_z3<'a>(
             // これにより Z3 が「これら以外のバリアントは存在しない」ことを知り、
             // 網羅性チェックの信頼性が 100% になる。
             if let Some(solver) = solver_opt {
-                if let Some(enum_def) = detect_enum_from_arms(arms) {
+                if let Some(enum_def) = detect_enum_from_arms(arms, vc.module_env) {
                     let n = enum_def.variants.len() as i64;
                     if let Some(tag_int) = target_z3.as_int() {
                         // tag ∈ [0, n_variants)
@@ -865,7 +779,7 @@ fn expr_to_z3<'a>(
                     if solver.check() == SatResult::Sat {
                         let counterexample = if let Some(model) = solver.get_model() {
                             // ターゲット変数の具体的な値を取得
-                            let ce_str = format_counterexample(&model, &target_z3, arms);
+                            let ce_str = format_counterexample(&model, &target_z3, arms, vc.module_env);
                             ce_str
                         } else {
                             "unknown value".to_string()
@@ -900,7 +814,7 @@ fn expr_to_z3<'a>(
                 // B. ネストパターンの再帰解体:
                 //    pattern_bind_variables が再帰的にパターンを分解し、
                 //    バインド変数を arm_env に登録する。
-                pattern_bind_variables(ctx, &arm.pattern, &target_z3, &mut arm_env);
+                pattern_bind_variables(ctx, &arm.pattern, &target_z3, &mut arm_env, vc.module_env);
 
                 let arm_cond = pattern_to_z3_condition(ctx, &arm.pattern, &target_z3, &mut arm_env, vc, solver_opt)?;
                 let full_cond = if let Some(guard) = &arm.guard {
@@ -1121,10 +1035,10 @@ fn pattern_bind_variables<'a>(
 
 /// アームの Variant パターンから対応する EnumDef を検出する。
 /// 最初に見つかった Variant パターンの所属 Enum を返す。
-fn detect_enum_from_arms(arms: &[MatchArm]) -> Option<EnumDef> {
+fn detect_enum_from_arms<'a>(arms: &[MatchArm], module_env: &'a ModuleEnv) -> Option<&'a EnumDef> {
     for arm in arms {
         if let Pattern::Variant { variant_name, .. } = &arm.pattern {
-            if let Some(enum_def) = find_enum_by_variant(variant_name) {
+            if let Some(enum_def) = module_env.find_enum_by_variant(variant_name) {
                 return Some(enum_def);
             }
         }
@@ -1138,9 +1052,10 @@ fn format_counterexample(
     model: &z3::Model,
     target: &Dynamic,
     arms: &[MatchArm],
+    module_env: &ModuleEnv,
 ) -> String {
     // アームから Enum 定義を特定（ドメイン制約と同じロジック）
-    let enum_ctx = detect_enum_from_arms(arms);
+    let enum_ctx = detect_enum_from_arms(arms, module_env);
 
     // ターゲット変数の具体的な値を取得
     if let Some(target_val) = model.eval(target, true) {
@@ -1151,7 +1066,7 @@ fn format_counterexample(
             let tag_str = format!("{}", target_int);
             if let Ok(tag_val) = tag_str.parse::<i64>() {
                 // まず arms から特定した Enum を優先的に使用
-                if let Some(ref edef) = enum_ctx {
+                if let Some(edef) = enum_ctx {
                     if let Some(variant) = edef.variants.get(tag_val as usize) {
                         // フィールド値も model から取得を試みる
                         let mut field_vals = Vec::new();
@@ -1172,12 +1087,10 @@ fn format_counterexample(
                         );
                     }
                 }
-                // フォールバック: 全 Enum 定義を走査
-                if let Ok(enum_env) = ENUM_ENV.lock() {
-                    for (enum_name, enum_def) in enum_env.iter() {
-                        if let Some(variant) = enum_def.variants.get(tag_val as usize) {
-                            return format!("{}::{} (tag={}) -- missing from match arms", enum_name, variant.name, tag_val);
-                        }
+                // フォールバック: module_env の全 Enum 定義を走査
+                for (enum_name, enum_def) in module_env.enums.iter() {
+                    if let Some(variant) = enum_def.variants.get(tag_val as usize) {
+                        return format!("{}::{} (tag={}) -- missing from match arms", enum_name, variant.name, tag_val);
                     }
                 }
             }

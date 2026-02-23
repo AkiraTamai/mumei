@@ -6,7 +6,7 @@ use inkwell::IntPredicate;
 use inkwell::FloatPredicate;
 use inkwell::AddressSpace;
 use crate::parser::{Atom, Expr, Op, parse_expression};
-use crate::verification::{resolve_base_type, get_struct_def, MumeiError, MumeiResult};
+use crate::verification::{resolve_base_type, get_struct_def, get_atom_def, MumeiError, MumeiResult};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -126,7 +126,50 @@ fn compile_expr<'a>(
                     // フォールバック: 配列が見つからない場合はダミー定数
                     Ok(context.i64_type().const_int(0, false).into())
                 },
-                _ => Err(MumeiError::CodegenError(format!("Unknown function {}", name))),
+                _ => {
+                    // ユーザー定義関数呼び出し: declare（外部宣言）+ call
+                    if let Some(callee) = get_atom_def(name) {
+                        // 呼び出し先の関数型を構築
+                        let callee_param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = callee.params.iter()
+                            .map(|p| resolve_param_type(context, p.type_name.as_deref()).into())
+                            .collect();
+
+                        // 戻り値型の推定: f64 パラメータがあれば f64、なければ i64
+                        let has_float = callee.params.iter().any(|p| {
+                            p.type_name.as_deref()
+                                .map(|t| resolve_base_type(t) == "f64")
+                                .unwrap_or(false)
+                        });
+                        let callee_fn = if has_float {
+                            let fn_type = context.f64_type().fn_type(&callee_param_types, false);
+                            module.get_function(name).unwrap_or_else(|| {
+                                module.add_function(name, fn_type, Some(inkwell::module::Linkage::External))
+                            })
+                        } else {
+                            let fn_type = context.i64_type().fn_type(&callee_param_types, false);
+                            module.get_function(name).unwrap_or_else(|| {
+                                module.add_function(name, fn_type, Some(inkwell::module::Linkage::External))
+                            })
+                        };
+
+                        // 引数を評価
+                        let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
+                        for arg in args {
+                            let val = compile_expr(context, builder, module, function, arg, variables, array_ptrs)?;
+                            arg_vals.push(val.into());
+                        }
+
+                        let call_result = llvm!(builder.build_call(callee_fn, &arg_vals, &format!("call_{}", name)));
+                        let result = call_result.as_any_value_enum();
+                        if has_float {
+                            Ok(result.into_float_value().into())
+                        } else {
+                            Ok(result.into_int_value().into())
+                        }
+                    } else {
+                        Err(MumeiError::CodegenError(format!("Unknown function {}", name)))
+                    }
+                },
             }
         },
 

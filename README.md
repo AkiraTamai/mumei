@@ -22,6 +22,8 @@ Only atoms that pass formal verification are compiled to LLVM IR and transpiled 
 | **Array Bounds Checking** | Symbolic `len_<name>` model with Z3 out-of-bounds detection |
 | **Structured Error Types** | `MumeiError::VerificationError / CodegenError / TypeError` |
 | **Multi-target Output** | LLVM IR + Rust + Go + TypeScript from a single source |
+| **Module System** | `import "path" as alias;` — multi-file builds with compositional verification |
+| **Inter-atom Calls** | Contract-based verification: caller proves `requires`, assumes `ensures` |
 
 ---
 
@@ -79,6 +81,67 @@ The `decreases` clause is optional — without it, only invariant preservation i
 
 ---
 
+## 📦 Module System
+
+Mumei supports multi-file projects with `import` declarations and compositional verification.
+
+### Import Syntax
+
+```mumei
+import "./lib/math.mm" as math;
+import "./types.mm";
+```
+
+- **Alias (`as`)**: When specified, imported symbols can be referenced via `math::add(x, y)`. Without alias, symbols are imported directly.
+- **Circular import detection**: The resolver detects and rejects circular dependencies.
+- **`.mm` auto-completion**: File extension can be omitted (`import "./lib/math"` resolves to `./lib/math.mm`).
+
+### Inter-atom Function Calls (Compositional Verification)
+
+Atoms can call other atoms within the same file or from imported modules. Verification uses **contract-based reasoning**:
+
+1. **Caller proves `requires`**: At the call site, the caller's context must satisfy the callee's precondition.
+2. **Caller assumes `ensures`**: If the precondition is proven, the callee's postcondition is added as a fact to the solver.
+3. **Body is NOT re-verified**: The callee's implementation is treated as opaque — only its contract matters.
+
+```mumei
+atom increment(n: Nat)
+requires: n >= 0;
+ensures: result >= 1;
+body: { n + 1 };
+
+atom double_increment(n: Nat)
+requires: n >= 0;
+ensures: result >= 2;
+body: {
+    let x = increment(n);
+    increment(x)
+};
+```
+
+### Multi-file Example
+
+```
+project/
+├── lib/
+│   └── math.mm          # type Nat = ...; atom add(...) ...
+└── main.mm              # import "./lib/math.mm" as math;
+```
+
+```mumei
+// main.mm
+import "./lib/math.mm" as math;
+
+atom main_calc(x: Nat)
+requires: x >= 0;
+ensures: result >= 0;
+body: {
+    add(x, x)
+};
+```
+
+---
+
 ## 📦 Standard Library
 
 | Function | Description |
@@ -91,10 +154,11 @@ The `decreases` clause is optional — without it, only invariant preservation i
 
 ## 🛠️ Forging Process
 
-1. **Polishing (Parser):** Parses `type`, `struct`, and `atom` definitions. Supports `if/else`, `let`, `while invariant decreases`, function calls, array access, struct init (`Name { field: expr }`), and field access (`v.x`).
-2. **Verification (Z3):** Verifies `requires`, `ensures`, loop invariants, termination (decreases), struct field constraints, division-by-zero, and array bounds.
-3. **Tempering (LLVM IR):** Emits a `.ll` file per atom with LLVM StructType support.
-4. **Sharpening (Transpiler):** Bundles all atoms and outputs `.rs`, `.go`, and `.ts` files with native struct syntax.
+1. **Polishing (Parser):** Parses `import`, `type`, `struct`, and `atom` definitions. Supports `if/else`, `let`, `while invariant decreases`, function calls, array access, struct init (`Name { field: expr }`), and field access (`v.x`).
+2. **Resolving (Resolver):** Recursively resolves `import` declarations, builds the dependency graph, detects circular imports, and registers imported symbols with fully qualified names (FQN).
+3. **Verification (Z3):** Verifies `requires`, `ensures`, loop invariants, termination (decreases), struct field constraints, division-by-zero, array bounds, and **inter-atom call contracts** (compositional verification).
+4. **Tempering (LLVM IR):** Emits a `.ll` file per atom with LLVM StructType support and `declare` for external atom calls.
+5. **Sharpening (Transpiler):** Bundles all atoms and outputs `.rs`, `.go`, and `.ts` files with native struct syntax.
 
 ---
 

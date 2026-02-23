@@ -4,9 +4,9 @@
 
 **Mumei (無銘)** is a formally verified language that processes source code through the pipeline:
 
-> parse → resolve (imports) → verify (Z3) → codegen (LLVM IR) → transpile (Rust / Go / TypeScript)
+> parse → resolve (imports) → monomorphize (generics) → verify (Z3) → codegen (LLVM IR) → transpile (Rust / Go / TypeScript)
 
-Only atoms that pass formal verification are compiled to LLVM IR and transpiled to multi-language source code. Every function's preconditions, postconditions, loop invariants, and termination are mathematically proven before a single line of machine code is emitted.
+Only atoms that pass formal verification are compiled to LLVM IR and transpiled to multi-language source code. Every function's preconditions, postconditions, loop invariants, termination, and trait law satisfaction are mathematically proven before a single line of machine code is emitted.
 
 ---
 
@@ -23,11 +23,16 @@ Only atoms that pass formal verification are compiled to LLVM IR and transpiled 
 | **Termination Checking** | `decreases: n - i` — ranking function proves loops terminate |
 | **Float Verification** | Sign propagation for `f64` arithmetic (pos×pos→pos, etc.) |
 | **Array Bounds Checking** | Symbolic `len_<name>` model with Z3 out-of-bounds detection |
-| **Multi-target Transpiler** | Enum/Struct/Atom → Rust enum + Go const/type + TypeScript discriminated union |
+| **Generics (Polymorphism)** | `struct Stack<T> { ... }`, `atom identity<T>(x: T)` — monomorphization at compile time |
+| **Trait Bounds** | `atom min<T: Comparable>(a: T, b: T)` — type constraints with law verification |
+| **Trait System with Laws** | `trait Comparable { fn leq(...); law reflexive: ...; }` — algebraic laws verified by Z3 |
+| **Built-in Traits** | `Eq`, `Ord`, `Numeric` — auto-implemented for `i64`, `u64`, `f64` |
+| **Multi-target Transpiler** | Enum/Struct/Atom/Trait/Impl → Rust + Go + TypeScript |
 | **Standard Library** | `std/option.mm`, `std/result.mm`, `std/list.mm` — verified core types |
 | **Module System** | `import "path" as alias;` — multi-file builds with compositional verification |
 | **Inter-atom Calls** | Contract-based verification: caller proves `requires`, assumes `ensures` |
 | **Counter-example Display** | Z3 `get_model()` shows exactly which value is uncovered on exhaustiveness failure |
+| **ModuleEnv Architecture** | Zero global state — all definitions managed via `ModuleEnv` struct (no Mutex) |
 
 ---
 
@@ -96,6 +101,70 @@ atom classify_int(x)
 - If **Sat**, Z3's `get_model()` provides a concrete counter-example showing which value is uncovered
 
 **Default arm optimization**: When a `_` arm is present, the negation of all prior arms is injected as a precondition, improving verification precision within the default body.
+
+---
+
+## 🔬 Generics & Trait Bounds
+
+### Generics (Monomorphization)
+
+Mumei supports type-parameterized definitions. At compile time, all generic usages are expanded into concrete types (Rust-style monomorphization).
+
+```mumei
+struct Pair<T, U> {
+    first: T,
+    second: U
+}
+
+enum Option<T> {
+    Some(T),
+    None
+}
+
+atom identity<T>(x: T)
+requires: true;
+ensures: true;
+body: x;
+```
+
+### Trait Definitions with Laws
+
+Traits define method signatures **and algebraic laws** that implementations must satisfy. Laws are verified by Z3 at compile time.
+
+```mumei
+trait Comparable {
+    fn leq(a: Self, b: Self) -> bool;
+    law reflexive: leq(x, x) == true;
+    law transitive: leq(a, b) && leq(b, c) => leq(a, c);
+}
+
+impl Comparable for i64 {
+    fn leq(a: i64, b: i64) -> bool { a <= b }
+}
+```
+
+### Trait Bounds on Generics
+
+Type parameters can be constrained with trait bounds using `T: Trait` syntax:
+
+```mumei
+atom min<T: Comparable>(a: T, b: T)
+requires: true;
+ensures: true;
+body: a;
+```
+
+Multiple bounds are supported: `<T: Comparable + Numeric>`.
+
+### Built-in Traits
+
+Three built-in traits are automatically registered with implementations for `i64`, `u64`, and `f64`:
+
+| Trait | Methods | Laws |
+|---|---|---|
+| **Eq** | `eq(a, b) -> bool` | reflexive, symmetric |
+| **Ord** | `leq(a, b) -> bool` | reflexive, transitive |
+| **Numeric** | `add(a, b)`, `sub(a, b)`, `mul(a, b)` | commutative_add |
 
 ---
 
@@ -213,11 +282,12 @@ All atoms in `std/` are formally verified — their `requires`/`ensures` contrac
 
 ## 🛠️ Forging Process
 
-1. **Polishing (Parser):** Parses `import`, `type`, `struct`, `enum`, and `atom` definitions. Supports `if/else`, `let`, `while invariant decreases`, `match` with guards, function calls, array access, struct init, field access, and recursive ADT (`Self`).
-2. **Resolving (Resolver):** Recursively resolves `import` declarations, builds the dependency graph, detects circular imports, and registers all symbols (types, structs, enums, atoms) with fully qualified names (FQN).
-3. **Verification (Z3):** Verifies `requires`, `ensures`, loop invariants, termination (decreases), struct field constraints, division-by-zero, array bounds, **inter-atom call contracts**, **match exhaustiveness** (SMT-based with counter-examples), and **Enum domain constraints** (`0 ≤ tag < n_variants`).
-4. **Tempering (LLVM IR):** Emits a `.ll` file per atom. Match expressions use Pattern Matrix codegen (linear if-else chain). LLVM StructType support and `declare` for external atom calls.
-5. **Sharpening (Transpiler):** Generates **Enum definitions** (Rust `enum` / Go `const+type` / TypeScript discriminated union), **Struct definitions** (Rust `struct` / Go `struct` / TypeScript `interface`), module headers, and atom bodies. Outputs `.rs`, `.go`, and `.ts` files.
+1. **Polishing (Parser):** Parses `import`, `type`, `struct`, `enum`, `trait`, `impl`, and `atom` definitions. Supports generics (`<T: Trait>`), `if/else`, `let`, `while invariant decreases`, `match` with guards, function calls, array access, struct init, field access, and recursive ADT (`Self`).
+2. **Resolving (Resolver):** Recursively resolves `import` declarations, builds the dependency graph, detects circular imports, and registers all symbols (types, structs, enums, traits, impls, atoms) into `ModuleEnv`.
+3. **Monomorphization:** Collects generic type instances (`Stack<i64>`, `Stack<f64>`) and expands them into concrete definitions. Trait bounds are validated against registered `impl`s.
+4. **Verification (Z3):** Verifies `requires`, `ensures`, loop invariants, termination (decreases), struct field constraints, division-by-zero, array bounds, **inter-atom call contracts**, **match exhaustiveness** (SMT-based with counter-examples), **Enum domain constraints**, and **trait law satisfaction** (impl laws verified by Z3).
+5. **Tempering (LLVM IR):** Emits a `.ll` file per atom. Match expressions use Pattern Matrix codegen (linear if-else chain). LLVM StructType support and `declare` for external atom calls. All definitions resolved via `ModuleEnv`.
+6. **Sharpening (Transpiler):** Generates **Enum**, **Struct**, **Trait** (Rust `trait` / Go `interface` / TypeScript `interface`), **Impl** (Rust `impl` / Go methods / TypeScript const objects), and **Atom** definitions. Outputs `.rs`, `.go`, and `.ts` files.
 
 ---
 
@@ -258,21 +328,18 @@ brew install llvm@18 z3
 ### Expected Output
 
 ```
-🗡️  Mumei: Forging the blade (Type System 2.0 enabled)...
+🗡️  Mumei: Forging the blade (Type System 2.0 + Generics enabled)...
   ✨ Registered Refined Type: 'Nat' (i64)
   ✨ Registered Refined Type: 'Pos' (f64)
-  ✨ Registered Refined Type: 'StackIdx' (i64)
   🏗️  Registered Struct: 'Point' (fields: x, y)
-  🏗️  Registered Struct: 'Circle' (fields: cx, cy, r)
+  📜 Registered Trait: 'Comparable' (methods: leq, laws: reflexive, transitive)
+  🔧 Registered Impl: Comparable for i64
+    ✅ Laws verified for impl Comparable for i64
   ✨ [1/4] Polishing Syntax: Atom 'sword_sum' identified.
   ⚖️  [2/4] Verification: Passed. Logic verified with Z3.
   ⚙️  [3/4] Tempering: Done. Compiled 'sword_sum' to LLVM IR.
   ...
-  ✨ [1/4] Polishing Syntax: Atom 'stack_clear' identified.
-  ⚖️  [2/4] Verification: Passed. Logic verified with Z3.
-  ⚙️  [3/4] Tempering: Done. Compiled 'stack_clear' to LLVM IR.
-  ...
-🎉 Blade forged successfully with 8 atoms.
+🎉 Blade forged successfully with N atoms.
 ```
 
 ---
@@ -534,16 +601,17 @@ All generated code includes:
 
 ```
 ├── src/
-│   ├── parser.rs          # AST, tokenizer, parser (enum, match, struct, recursive ADT)
+│   ├── ast.rs             # TypeRef (generics), Monomorphizer (monomorphization engine)
+│   ├── parser.rs          # AST, tokenizer, parser (enum, match, struct, trait, impl, generics)
 │   ├── resolver.rs        # Import resolution, dependency graph, circular import detection
-│   ├── verification.rs    # Z3 verification: exhaustiveness, domain constraints, projectors
+│   ├── verification.rs    # Z3 verification, ModuleEnv, built-in traits, law verification
 │   ├── codegen.rs         # LLVM IR generation (Pattern Matrix, StructType, llvm! macro)
 │   ├── transpiler/
-│   │   ├── mod.rs         # TargetLanguage dispatch + enum/struct/atom transpile
-│   │   ├── rust.rs        # Rust transpiler (enum, struct, match, mod/use)
-│   │   ├── golang.rs      # Go transpiler (const+type, struct, switch)
+│   │   ├── mod.rs         # TargetLanguage dispatch + enum/struct/trait/impl/atom transpile
+│   │   ├── rust.rs        # Rust transpiler (enum, struct, trait, impl, match, mod/use)
+│   │   ├── golang.rs      # Go transpiler (const+type, struct, interface, switch)
 │   │   └── typescript.rs  # TypeScript transpiler (const enum, interface, discriminated union)
-│   └── main.rs            # Compiler orchestrator (parse → resolve → verify → codegen → transpile)
+│   └── main.rs            # Compiler orchestrator (parse → resolve → mono → verify → codegen → transpile)
 ├── std/
 │   ├── option.mm          # Option { None, Some(i64) } — verified
 │   ├── result.mm          # Result { Ok(i64), Err(i64) } — verified

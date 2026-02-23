@@ -14,3 +14,9 @@ visualizer/report.json
 /*.rs
 error.log
 dist/
+
+# Mumei 検証キャッシュ
+.mumei_cache
+
+# テスト用一時ファイル
+sword_test.mm

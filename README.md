@@ -158,7 +158,7 @@ body: {
 2. **Resolving (Resolver):** Recursively resolves `import` declarations, builds the dependency graph, detects circular imports, and registers imported symbols with fully qualified names (FQN).
 3. **Verification (Z3):** Verifies `requires`, `ensures`, loop invariants, termination (decreases), struct field constraints, division-by-zero, array bounds, and **inter-atom call contracts** (compositional verification).
 4. **Tempering (LLVM IR):** Emits a `.ll` file per atom with LLVM StructType support and `declare` for external atom calls.
-5. **Sharpening (Transpiler):** Bundles all atoms and outputs `.rs`, `.go`, and `.ts` files with native struct syntax.
+5. **Sharpening (Transpiler):** Generates module headers (`mod`/`use`, `package`/`import`, `import`/`export`) from import declarations, then bundles all atoms and outputs `.rs`, `.go`, and `.ts` files with native struct syntax.
 
 ---
 
@@ -288,6 +288,81 @@ body: {
 
 ---
 
+## 📄 Inter-atom Call Test (`examples/call_test.mm`)
+
+Demonstrates contract-based verification across atom calls:
+
+```mumei
+type Nat = i64 where v >= 0;
+
+// Base atom: guaranteed to return >= 1
+atom increment(n: Nat)
+requires: n >= 0;
+ensures: result >= 1;
+body: { n + 1 };
+
+// Calls increment twice — verifier proves result >= 2
+// without re-verifying increment's body
+atom double_increment(n: Nat)
+requires: n >= 0;
+ensures: result >= 2;
+body: {
+    let x = increment(n);
+    increment(x)
+};
+
+// Calls increment in a safe_div context
+atom safe_add_one(a: Nat, b: Nat)
+requires: a >= 0 && b >= 0;
+ensures: result >= 1;
+body: {
+    increment(a + b)
+};
+```
+
+## 📄 Multi-file Import Test (`examples/import_test/`)
+
+Demonstrates the module system with separate files:
+
+```
+examples/import_test/
+├── lib/
+│   └── math_utils.mm    # Reusable verified atoms
+└── main.mm              # Imports and uses math_utils
+```
+
+**`lib/math_utils.mm`:**
+```mumei
+type Nat = i64 where v >= 0;
+
+atom safe_add(a: Nat, b: Nat)
+requires: a >= 0 && b >= 0;
+ensures: result >= 0;
+body: { a + b };
+
+atom safe_double(n: Nat)
+requires: n >= 0;
+ensures: result >= 0;
+body: { n + n };
+```
+
+**`main.mm`:**
+```mumei
+import "./lib/math_utils.mm" as math;
+
+type Nat = i64 where v >= 0;
+
+atom compute(x: Nat)
+requires: x >= 0;
+ensures: result >= 0;
+body: {
+    let doubled = safe_double(x);
+    safe_add(doubled, x)
+};
+```
+
+---
+
 ## 📦 Outputs
 
 With `--output dist/katana`:
@@ -310,10 +385,10 @@ src/
 ├── verification.rs    # Z3 verification, ModuleEnv, inter-atom call contracts
 ├── codegen.rs         # LLVM IR generation (StructType, declare + call, llvm! macro)
 ├── transpiler/
-│   ├── mod.rs         # TargetLanguage dispatch
-│   ├── rust.rs        # Rust transpiler
-│   ├── golang.rs      # Go transpiler
-│   └── typescript.rs  # TypeScript transpiler
+│   ├── mod.rs         # TargetLanguage dispatch + module header generation
+│   ├── rust.rs        # Rust transpiler (mod/use header)
+│   ├── golang.rs      # Go transpiler (package/import header)
+│   └── typescript.rs  # TypeScript transpiler (import/export header)
 └── main.rs            # Compiler orchestrator (parse → resolve → verify → codegen → transpile)
 ```
 
@@ -339,6 +414,9 @@ src/
 - [x] Inter-atom function calls with contract-based verification (compositional verification)
 - [x] LLVM IR `declare` + `call` for user-defined atom calls
 - [x] `ModuleEnv` structure for future per-module environment isolation
+- [x] Verification cache (`.mumei_cache`) with SHA-256 hash-based invalidation
+- [x] Imported atom body re-verification skip (contract-trusted)
+- [x] Transpiler module headers (`mod`/`use` for Rust, `package`/`import` for Go, `import` for TypeScript)
 - [ ] Fully qualified name (FQN) dot-notation in source code (`math.add(x, y)`)
 - [ ] Incremental build (re-verify only changed modules)
 - [ ] Struct method definitions (`atom` attached to struct)

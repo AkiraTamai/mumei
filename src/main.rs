@@ -98,6 +98,16 @@ fn main() {
                 }
             }
 
+            // --- Enum 定義の登録 ---
+            Item::EnumDef(enum_def) => {
+                let variant_names: Vec<&str> = enum_def.variants.iter().map(|v| v.name.as_str()).collect();
+                println!("  🔷 Registered Enum: '{}' (variants: {})", enum_def.name, variant_names.join(", "));
+                if let Err(e) = verification::register_enum(&enum_def) {
+                    eprintln!("  ❌ Enum Registration Failed: {}", e);
+                    std::process::exit(1);
+                }
+            }
+
             // --- Atom の処理 ---
             Item::Atom(atom) => {
                 atom_count += 1;

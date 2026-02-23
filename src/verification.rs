@@ -1,6 +1,6 @@
 use z3::ast::{Ast, Int, Bool, Array, Dynamic, Float};
 use z3::{Config, Context, Solver, SatResult};
-use crate::parser::{Atom, QuantifierType, Expr, Op, parse_expression, RefinedType, StructDef};
+use crate::parser::{Atom, QuantifierType, Expr, Op, parse_expression, RefinedType, StructDef, EnumDef, Pattern, MatchArm};
 use std::fs;
 use std::path::Path;
 use std::fmt;
@@ -123,6 +123,11 @@ static ATOM_ENV: Lazy<Mutex<HashMap<String, Atom>>> = Lazy::new(|| {
     Mutex::new(HashMap::new())
 });
 
+/// Enum 定義のグローバルレジストリ
+static ENUM_ENV: Lazy<Mutex<HashMap<String, EnumDef>>> = Lazy::new(|| {
+    Mutex::new(HashMap::new())
+});
+
 /// 検証済み Atom のキャッシュ（ソースハッシュ → 検証済みフラグ）
 /// インポートされたモジュールの atom は body 再検証をスキップし、
 /// requires/ensures の契約のみを信頼する。
@@ -154,6 +159,25 @@ pub fn get_atom_def(name: &str) -> Option<Atom> {
     ATOM_ENV.lock().ok().and_then(|env| env.get(name).cloned())
 }
 
+/// Enum 定義をグローバルレジストリに登録
+pub fn register_enum(enum_def: &EnumDef) -> MumeiResult<()> {
+    let mut env = ENUM_ENV.lock().map_err(|_| MumeiError::TypeError("Failed to lock ENUM_ENV".into()))?;
+    env.insert(enum_def.name.clone(), enum_def.clone());
+    Ok(())
+}
+
+/// 登録済み Enum 定義を取得
+pub fn get_enum_def(name: &str) -> Option<EnumDef> {
+    ENUM_ENV.lock().ok().and_then(|env| env.get(name).cloned())
+}
+
+/// Variant 名から所属する Enum 定義を逆引きする
+pub fn find_enum_by_variant(variant_name: &str) -> Option<EnumDef> {
+    ENUM_ENV.lock().ok().and_then(|env| {
+        env.values().find(|e| e.variants.iter().any(|v| v.name == variant_name)).cloned()
+    })
+}
+
 pub fn get_struct_def(name: &str) -> Option<StructDef> {
     STRUCT_ENV.lock().ok().and_then(|env| env.get(name).cloned())
 }
@@ -175,6 +199,7 @@ pub fn clear_global_env() {
     if let Ok(mut env) = TYPE_ENV.lock() { env.clear(); }
     if let Ok(mut env) = STRUCT_ENV.lock() { env.clear(); }
     if let Ok(mut env) = ATOM_ENV.lock() { env.clear(); }
+    if let Ok(mut env) = ENUM_ENV.lock() { env.clear(); }
     if let Ok(mut cache) = VERIFIED_CACHE.lock() { cache.clear(); }
 }
 
@@ -768,6 +793,100 @@ fn expr_to_z3<'a>(
             }
             Ok(last)
         },
+        Expr::Match { target, arms } => {
+            let target_z3 = expr_to_z3(vc, target, env, solver_opt)?;
+
+            // ========================================================
+            // Z3 網羅性チェック (Exhaustiveness Check)
+            // ========================================================
+            // 各アームの条件 P_i を構築し、¬(P_1 ∨ P_2 ∨ ... ∨ P_n) が
+            // Unsat であることを証明する。Sat なら網羅性欠如エラー。
+            if let Some(solver) = solver_opt {
+                let mut arm_conditions: Vec<Bool> = Vec::new();
+                for arm in arms {
+                    let cond = pattern_to_z3_condition(ctx, &arm.pattern, &target_z3, env, vc, solver_opt)?;
+                    // ガード条件がある場合は AND で結合
+                    let full_cond = if let Some(guard) = &arm.guard {
+                        let guard_z3 = expr_to_z3(vc, guard, env, None)?
+                            .as_bool().ok_or(MumeiError::TypeError("Guard must be boolean".into()))?;
+                        Bool::and(ctx, &[&cond, &guard_z3])
+                    } else {
+                        cond
+                    };
+                    arm_conditions.push(full_cond);
+                }
+
+                // 網羅性: ¬(P_1 ∨ ... ∨ P_n) が Unsat か？
+                let arm_refs: Vec<&Bool> = arm_conditions.iter().collect();
+                let coverage = Bool::or(ctx, &arm_refs);
+                solver.push();
+                solver.assert(&coverage.not());
+                let exhaustive = solver.check() == SatResult::Unsat;
+                solver.pop(1);
+
+                if !exhaustive {
+                    return Err(MumeiError::VerificationError(
+                        "Match is not exhaustive: there exist values not covered by any arm.".into()
+                    ));
+                }
+            }
+
+            // ========================================================
+            // Match 式の値の構築（if-then-else チェーンとして Z3 式を構築）
+            // ========================================================
+            // A. デフォルトアーム最適化:
+            //    _ アームの body 評価時に、先行アームの否定を事前条件として
+            //    env/solver に追加し、デフォルトアーム内の検証精度を向上させる。
+            let mut accumulated_negations: Vec<Bool> = Vec::new();
+            let mut result: Option<Dynamic> = None;
+
+            for arm in arms.iter().rev() {
+                let mut arm_env = env.clone();
+
+                // B. ネストパターンの再帰解体:
+                //    pattern_bind_variables が再帰的にパターンを分解し、
+                //    バインド変数を arm_env に登録する。
+                pattern_bind_variables(ctx, &arm.pattern, &target_z3, &mut arm_env);
+
+                let arm_cond = pattern_to_z3_condition(ctx, &arm.pattern, &target_z3, &mut arm_env, vc, solver_opt)?;
+                let full_cond = if let Some(guard) = &arm.guard {
+                    let guard_z3 = expr_to_z3(vc, guard, &mut arm_env, None)?
+                        .as_bool().ok_or(MumeiError::TypeError("Guard must be boolean".into()))?;
+                    Bool::and(ctx, &[&arm_cond, &guard_z3])
+                } else {
+                    arm_cond
+                };
+
+                // A. デフォルトアーム最適化: Wildcard/Variable パターンの場合、
+                //    先行アームの否定条件を solver に追加して body を検証
+                if let Some(solver) = solver_opt {
+                    if matches!(arm.pattern, Pattern::Wildcard | Pattern::Variable(_)) && !accumulated_negations.is_empty() {
+                        let neg_refs: Vec<&Bool> = accumulated_negations.iter().collect();
+                        let prior_negation = Bool::and(ctx, &neg_refs);
+                        solver.push();
+                        solver.assert(&prior_negation);
+                        let body_val = expr_to_z3(vc, &arm.body, &mut arm_env, solver_opt)?;
+                        solver.pop(1);
+                        result = Some(match result {
+                            Some(else_val) => full_cond.ite(&body_val, &else_val),
+                            None => body_val,
+                        });
+                        accumulated_negations.push(full_cond.not());
+                        continue;
+                    }
+                }
+
+                let body_val = expr_to_z3(vc, &arm.body, &mut arm_env, solver_opt)?;
+                result = Some(match result {
+                    Some(else_val) => full_cond.ite(&body_val, &else_val),
+                    None => body_val,
+                });
+                accumulated_negations.push(full_cond.not());
+            }
+
+            result.ok_or_else(|| MumeiError::VerificationError("Match expression has no arms".into()))
+        },
+
         Expr::FieldAccess(expr, field_name) => {
             // v.x → env から __struct_TypeName_x を探す、または v_x として探す
             if let Expr::Variable(var_name) = expr.as_ref() {

@@ -685,6 +685,26 @@ fn parse_block_or_expr(tokens: &[String], pos: &mut usize) -> Expr {
     }
 }
 
+/// match アームの body 専用パーサー。
+/// `{...}` ブロックの場合は通常通りパース。
+/// それ以外の場合は `parse_logical_or` を使い、`=>` を含意演算子として消費しない。
+/// これにより `0 => match x { 0 => 1, _ => 2 }, 1 => ...` のネストが正しく動作する。
+fn parse_match_arm_body(tokens: &[String], pos: &mut usize) -> Expr {
+    if *pos < tokens.len() && tokens[*pos] == "{" {
+        // ブロック式: 通常通りパース（内部の `=>` は match パーサーが処理する）
+        parse_block_or_expr(tokens, pos)
+    } else if *pos < tokens.len() && tokens[*pos] == "match" {
+        // ネストした match 式: match パーサーに委譲（parse_primary 経由）
+        parse_implies(tokens, pos)
+    } else if *pos < tokens.len() && tokens[*pos] == "if" {
+        // if-then-else 式
+        parse_implies(tokens, pos)
+    } else {
+        // それ以外: `=>` を消費しないレベルでパース
+        parse_logical_or(tokens, pos)
+    }
+}
+
 fn parse_statement(tokens: &[String], pos: &mut usize) -> Expr {
     if *pos < tokens.len() && tokens[*pos] == "let" {
         *pos += 1;
@@ -827,9 +847,11 @@ fn parse_primary(tokens: &[String], pos: &mut usize) -> Expr {
         while *pos < tokens.len() && tokens[*pos] != "}" {
             let pattern = parse_pattern(tokens, pos);
             // オプション: ガード条件 "if cond"
+            // parse_logical_or を使い、`=>` を含意演算子として消費しない。
+            // これにより `Pattern if cond => body` の `=>` がアーム区切りとして正しく処理される。
             let guard = if *pos < tokens.len() && tokens[*pos] == "if" {
                 *pos += 1;
-                Some(Box::new(parse_implies(tokens, pos)))
+                Some(Box::new(parse_logical_or(tokens, pos)))
             } else {
                 None
             };
@@ -842,7 +864,10 @@ fn parse_primary(tokens: &[String], pos: &mut usize) -> Expr {
             } else if *pos < tokens.len() && tokens[*pos] == "=>" {
                 *pos += 1;
             }
-            let body = parse_block_or_expr(tokens, pos);
+            // アーム body のパース:
+            // `=>` を含意演算子として消費しないよう parse_match_arm_body を使用。
+            // これにより `0 => match x { ... }, 1 => ...` のネストが正しく解析される。
+            let body = parse_match_arm_body(tokens, pos);
             arms.push(MatchArm { pattern, guard, body: Box::new(body) });
             // アーム間の "," をスキップ
             if *pos < tokens.len() && tokens[*pos] == "," { *pos += 1; }

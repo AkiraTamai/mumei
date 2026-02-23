@@ -211,22 +211,88 @@ fn register_imported_items(items: &[Item], alias: Option<&str>, module_env: &mut
 }
 /// インポートパスを絶対パスに解決する。
 /// 拡張子 .mm が省略されている場合は自動補完する。
+///
+/// 解決順序:
+/// 1. base_dir（インポート元ファイルのディレクトリ）からの相対パス
+/// 2. 標準ライブラリパス（コンパイラバイナリの隣の `std/`、または実行ディレクトリの `std/`）
+/// 3. MUMEI_STD_PATH 環境変数で指定されたパス
+///
+/// これにより `import "std/option";` のようなインポートが、
+/// プロジェクト内に `std/` ディレクトリがなくても解決できる。
 fn resolve_path(import_path: &str, base_dir: &Path) -> MumeiResult<PathBuf> {
     let mut path = PathBuf::from(import_path);
     if path.extension().is_none() {
         path.set_extension("mm");
     }
-    let resolved = if path.is_relative() {
-        base_dir.join(&path)
+
+    // 1. base_dir からの相対パス解決を試行
+    if path.is_relative() {
+        let candidate = base_dir.join(&path);
+        if let Ok(canonical) = candidate.canonicalize() {
+            return Ok(canonical);
+        }
     } else {
-        path
-    };
-    let canonical = resolved.canonicalize().map_err(|e| {
-        MumeiError::VerificationError(
-            format!("Cannot resolve import path '{}' (base: '{}'): {}", import_path, base_dir.display(), e)
+        // 絶対パスの場合はそのまま解決
+        if let Ok(canonical) = path.canonicalize() {
+            return Ok(canonical);
+        }
+    }
+
+    // 2. "std/" プレフィックスの場合、標準ライブラリディレクトリから解決
+    let import_str = import_path.trim_start_matches("./");
+    if import_str.starts_with("std/") || import_str.starts_with("std\\") {
+        // 2a. コンパイラバイナリの隣の std/ を探す
+        if let Ok(exe_path) = std::env::current_exe() {
+            if let Some(exe_dir) = exe_path.parent() {
+                let std_candidate = exe_dir.join(&path);
+                if let Ok(canonical) = std_candidate.canonicalize() {
+                    return Ok(canonical);
+                }
+            }
+        }
+
+        // 2b. カレントディレクトリの std/ を探す
+        if let Ok(cwd) = std::env::current_dir() {
+            let std_candidate = cwd.join(&path);
+            if let Ok(canonical) = std_candidate.canonicalize() {
+                return Ok(canonical);
+            }
+        }
+
+        // 2c. Cargo マニフェストディレクトリ（開発時用）
+        if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+            let std_candidate = Path::new(&manifest_dir).join(&path);
+            if let Ok(canonical) = std_candidate.canonicalize() {
+                return Ok(canonical);
+            }
+        }
+    }
+
+    // 3. MUMEI_STD_PATH 環境変数からの解決
+    if let Ok(std_path) = std::env::var("MUMEI_STD_PATH") {
+        let std_base = Path::new(&std_path);
+        // "std/option" → std_base/option.mm として解決
+        let relative = import_str.strip_prefix("std/")
+            .or_else(|| import_str.strip_prefix("std\\"))
+            .unwrap_or(import_str);
+        let mut rel_path = PathBuf::from(relative);
+        if rel_path.extension().is_none() {
+            rel_path.set_extension("mm");
+        }
+        let std_candidate = std_base.join(&rel_path);
+        if let Ok(canonical) = std_candidate.canonicalize() {
+            return Ok(canonical);
+        }
+    }
+
+    // すべて失敗した場合はエラー
+    Err(MumeiError::VerificationError(
+        format!(
+            "Cannot resolve import path '{}'\n  Searched:\n    - {}\n    - compiler binary directory\n    - current working directory\n    - MUMEI_STD_PATH environment variable",
+            import_path,
+            base_dir.join(&path).display()
         )
-    })?;
-    Ok(canonical)
+    ))
 }
 
 // =============================================================================

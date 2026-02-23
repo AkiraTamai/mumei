@@ -39,195 +39,104 @@ if ! cargo build --release; then
     exit 1
 fi
 
-# --- 4. テスト用ソースコードの生成 ---
-echo "📝 Creating sword_test.mm (Comprehensive Verification Suite)..."
-cat <<'EOF' > sword_test.mm
-// ============================================================
-// Mumei Verification Suite: Comprehensive Feature Demonstration
-// Includes: Refinement Types, Structs, Generics, Traits, Laws
-// ============================================================
+# --- 4. テスト用ソースコードの準備 ---
+# 以前はここで sword_test.mm を生成していたが、
+# 現在はリポジトリ管理下の sword_test.mm をそのまま使用する。
+#
+# これにより std/ の更新やテスト内容の変更がスクリプトに埋め込まれず、
+# README / examples / tests と整合した形で実行できる。
+if [ ! -f "sword_test.mm" ]; then
+    echo "❌ Error: sword_test.mm not found in repository root"
+    exit 1
+fi
 
-// --- Refinement Types ---
-type Nat = i64 where v >= 0;
-type Pos = f64 where v > 0.0;
-
-// --- Struct: Geometric Point ---
-struct Point {
-    x: f64 where v >= 0.0,
-    y: f64 where v >= 0.0
-}
-
-// --- Generics: Pair<T, U> ---
-struct Pair<T, U> {
-    first: T,
-    second: U
-}
-
-// --- Generics: Option<T> ---
-enum Option<T> {
-    Some(T),
-    None
-}
-
-// --- Trait with Laws ---
-trait Comparable {
-    fn leq(a: Self, b: Self) -> bool;
-    law reflexive: leq(x, x) == true;
-}
-
-impl Comparable for i64 {
-    fn leq(a: i64, b: i64) -> bool { a <= b }
-}
-
-// ============================================================
-// Atom 1: Loop Invariant + Termination (Plan A: Stack-like sum)
-// ============================================================
-atom sword_sum(n: Nat)
-requires:
-    n >= 0;
-ensures:
-    result >= 0;
-body: {
-    let s = 0;
-    let i = 0;
-    while i < n
-    invariant: s >= 0 && i <= n
-    decreases: n - i
-    {
-        s = s + i;
-        i = i + 1;
-    };
-    s
-};
-
-// ============================================================
-// Atom 2: Float Refinement (Plan B: Scaling)
-// ============================================================
-atom scale(x: Pos)
-requires:
-    x > 0.0;
-ensures:
-    result > 0.0;
-body: {
-    x * 2.0
-};
-
-// ============================================================
-// Atom 3: Stack Push Guard (Plan A: Overflow Prevention)
-// Proves: top < max => after push, top+1 <= max
-// ============================================================
-atom stack_push(top: Nat, max: Nat)
-requires:
-    top >= 0 && max >= 0 && top < max;
-ensures:
-    result >= 0 && result <= max;
-body: {
-    top + 1
-};
-
-// ============================================================
-// Atom 4: Stack Pop Guard (Plan A: Underflow Prevention)
-// Proves: top > 0 => after pop, top-1 >= 0
-// ============================================================
-atom stack_pop(top: Nat)
-requires:
-    top > 0;
-ensures:
-    result >= 0;
-body: {
-    top - 1
-};
-
-// ============================================================
-// Atom 5: Circle Area (Plan B: Geometric Invariant)
-// Proves: positive radius => positive area
-// ============================================================
-atom circle_area(r: Pos)
-requires:
-    r > 0.0;
-ensures:
-    result > 0.0;
-body: {
-    r * r * 3.14159
-};
-
-// ============================================================
-// Atom 6: Robust Stack - Bounded Push (Final Trial)
-// Proves: push onto non-full stack preserves 0 <= top' <= max
-// Combined with capacity check: top < max is precondition
-// ============================================================
-atom robust_push(top: Nat, max: Nat, val: Nat)
-requires:
-    top >= 0 && max > 0 && top < max && val >= 0;
-ensures:
-    result >= 0 && result <= max;
-body: {
-    top + 1
-};
-
-// ============================================================
-// Atom 7: Robust Stack - Clear All (Final Trial)
-// Proves: loop terminates AND invariant preserved
-// Uses decreases clause to prove termination: i decreases to 0
-// ============================================================
-atom stack_clear(top: Nat)
-requires:
-    top >= 0;
-ensures:
-    result >= 0;
-body: {
-    let i = top;
-    while i > 0
-    invariant: i >= 0
-    decreases: i
-    {
-        i = i - 1;
-    };
-    i
-};
-
-// ============================================================
-// Atom 8: Distance Squared (Plan B: Geometric Safety)
-// Proves: squared distance is always non-negative
-// No sqrt needed — avoids NaN by design
-// ============================================================
-atom dist_squared(dx: Nat, dy: Nat)
-requires:
-    dx >= 0 && dy >= 0;
-ensures:
-    result >= 0;
-body: {
-    dx * dx + dy * dy
-};
-EOF
-
-# --- 5. コンパイル実行 ---
+# --- 5. メイン検証スイート実行 ---
+MUMEI=./target/release/mumei
 echo "🚀 Running Mumei Verification Suite..."
-echo "   Features: Refinement Types, Structs, Generics, Traits, Laws, Loop Invariants, Termination"
+echo "   sword_test.mm: Refinement Types, Structs, Generics, Traits, Laws, Termination"
 echo ""
 mkdir -p dist
 rm -f dist/katana* # 古い成果物を削除
 
-if ! ./target/release/mumei sword_test.mm --output dist/katana; then
-    echo "❌ Error: Mumei execution failed."
+if ! $MUMEI build sword_test.mm -o dist/katana; then
+    echo "❌ Error: Mumei verification failed on sword_test.mm"
     exit 1
 fi
 
 echo ""
-echo "=== Verification Results ==="
+echo "=== Main Suite Results ==="
 echo "📍 LLVM IR  : $(ls dist/katana_*.ll 2>/dev/null | tr '\n' ' ')"
 echo "📍 Rust     : dist/katana.rs"
 echo "📍 Go       : dist/katana.go"
 echo "📍 TS       : dist/katana.ts"
 echo ""
 
-# --- 6. 生成された Rust コードの構文チェック (オプション) ---
+# --- 6. Example テスト ---
+echo "🧪 Running example tests..."
+EXAMPLES_PASSED=0
+EXAMPLES_FAILED=0
+
+# 6a. Inter-atom call test
+echo -n "  call_test.mm ... "
+if $MUMEI build examples/call_test.mm -o dist/call_test 2>/dev/null; then
+    echo "✅"
+    EXAMPLES_PASSED=$((EXAMPLES_PASSED + 1))
+else
+    echo "❌"
+    EXAMPLES_FAILED=$((EXAMPLES_FAILED + 1))
+fi
+
+# 6b. ATM state machine (enum + match + guards)
+echo -n "  match_atm.mm ... "
+if $MUMEI build examples/match_atm.mm -o dist/match_atm 2>/dev/null; then
+    echo "✅"
+    EXAMPLES_PASSED=$((EXAMPLES_PASSED + 1))
+else
+    echo "❌"
+    EXAMPLES_FAILED=$((EXAMPLES_FAILED + 1))
+fi
+
+# 6c. Expression evaluator (zero-division detection)
+echo -n "  match_evaluator.mm ... "
+if $MUMEI build examples/match_evaluator.mm -o dist/match_evaluator 2>/dev/null; then
+    echo "✅"
+    EXAMPLES_PASSED=$((EXAMPLES_PASSED + 1))
+else
+    echo "❌"
+    EXAMPLES_FAILED=$((EXAMPLES_FAILED + 1))
+fi
+
+# 6d. Multi-file import test
+echo -n "  import_test/main.mm ... "
+if $MUMEI build examples/import_test/main.mm -o dist/import_test 2>/dev/null; then
+    echo "✅"
+    EXAMPLES_PASSED=$((EXAMPLES_PASSED + 1))
+else
+    echo "❌"
+    EXAMPLES_FAILED=$((EXAMPLES_FAILED + 1))
+fi
+
+# 6e. Std library import test
+echo -n "  test_std_import.mm ... "
+if $MUMEI build tests/test_std_import.mm -o dist/test_std 2>/dev/null; then
+    echo "✅"
+    EXAMPLES_PASSED=$((EXAMPLES_PASSED + 1))
+else
+    echo "❌"
+    EXAMPLES_FAILED=$((EXAMPLES_FAILED + 1))
+fi
+
+echo ""
+echo "  Examples: $EXAMPLES_PASSED passed, $EXAMPLES_FAILED failed"
+
+# --- 7. 生成された Rust コードの構文チェック (オプション) ---
 if command -v rustc >/dev/null 2>&1; then
+    echo ""
     echo "🦀 Checking generated Rust syntax..."
     if rustc --crate-type lib dist/katana.rs --out-dir dist/ 2>/dev/null; then
-        echo "✅ Rust syntax is valid."
+        echo "  ✅ Rust syntax is valid."
     else
-        echo "⚠️  Rust syntax check failed (non-critical for struct types)."
+        echo "  ⚠️  Rust syntax check failed (non-critical)."
     fi
 fi
 
@@ -242,9 +151,14 @@ echo "  ✅ Atom 'robust_push'  : Bounded stack push (0 <= top' <= max)"
 echo "  ✅ Atom 'stack_clear'  : Loop termination (decreases: i) + invariant"
 echo "  ✅ Atom 'dist_squared' : Non-negative distance (dx²+dy² >= 0)"
 echo "  ✅ Struct 'Point'      : Field constraints (x >= 0.0, y >= 0.0)"
-echo "  ✅ Generic 'Pair<T,U>' : Polymorphic struct (monomorphized at compile time)"
-echo "  ✅ Generic 'Option<T>' : Polymorphic enum (monomorphized at compile time)"
-echo "  ✅ Trait 'Comparable'  : Law 'reflexive' verified by Z3 for i64 impl"
-echo "  ✅ Built-in: Eq, Ord, Numeric auto-implemented for i64/u64/f64"
+echo "  ✅ Generic 'Pair<T,U>' : Polymorphic struct (monomorphization)"
+echo "  ✅ Generic 'Option<T>' : Polymorphic enum (monomorphization)"
+echo "  ✅ Trait 'Comparable'  : Law 'reflexive' verified by Z3"
+echo "  ✅ Std Library         : std/option, std/stack, std/result, std/list"
+echo "  ✅ Built-in Traits     : Eq, Ord, Numeric for i64/u64/f64"
 echo ""
-echo "🎉 All atoms verified. Generics + Traits + Laws operational. The blade is forged."
+if [ "$EXAMPLES_FAILED" -gt 0 ]; then
+    echo "⚠️  $EXAMPLES_FAILED example(s) failed. Check output above."
+    exit 1
+fi
+echo "🎉 All verified. The blade is forged."

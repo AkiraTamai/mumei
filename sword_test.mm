@@ -1,27 +1,51 @@
 // ============================================================
 // Mumei Verification Suite: Comprehensive Feature Demonstration
 // ============================================================
+// Covers: Refinement Types, Structs, Generics, Traits, Laws,
+//         Loop Invariants, Termination, Float Verification,
+//         Stack Safety, Geometric Invariants, Std Library
+//
+// Standard Library (also available via import):
+//   import "std/option" as option;
+//   import "std/stack" as stack;
+//   import "std/result" as result;
+//   import "std/list" as list;
 
 // --- Refinement Types ---
 type Nat = i64 where v >= 0;
 type Pos = f64 where v > 0.0;
-type StackIdx = i64 where v >= 0;
 
-// --- Struct: Geometric Point (Plan B) ---
+// --- Struct: Geometric Point ---
 struct Point {
     x: f64 where v >= 0.0,
     y: f64 where v >= 0.0
 }
 
-// --- Struct: Circle with positive radius (Plan B) ---
-struct Circle {
-    cx: f64 where v >= 0.0,
-    cy: f64 where v >= 0.0,
-    r: f64 where v > 0.0
+// --- Generics: Pair<T, U> ---
+struct Pair<T, U> {
+    first: T,
+    second: U
+}
+
+// --- Generics: Option<T> (std/option) ---
+enum Option<T> {
+    Some(T),
+    None
+}
+
+// --- Trait with Laws ---
+trait Comparable {
+    fn leq(a: Self, b: Self) -> bool;
+    law reflexive: leq(x, x) == true;
+}
+
+impl Comparable for i64 {
+    fn leq(a: i64, b: i64) -> bool { a <= b }
 }
 
 // ============================================================
-// Atom 1: Loop Invariant + Termination (Plan A: Stack-like sum)
+// Atom 1: Loop Invariant + Termination
+// Proves: sum accumulation with invariant s >= 0, i <= n
 // ============================================================
 atom sword_sum(n: Nat)
 requires:
@@ -42,7 +66,8 @@ body: {
 };
 
 // ============================================================
-// Atom 2: Float Refinement (Plan B: Scaling)
+// Atom 2: Float Refinement
+// Proves: Pos > 0.0 => result > 0.0
 // ============================================================
 atom scale(x: Pos)
 requires:
@@ -54,8 +79,8 @@ body: {
 };
 
 // ============================================================
-// Atom 3: Stack Push Guard (Plan A: Overflow Prevention)
-// Proves: top < max => after push, top+1 <= max
+// Atom 3: Stack Push Guard (Overflow Prevention)
+// Proves: top < max => top+1 <= max
 // ============================================================
 atom stack_push(top: Nat, max: Nat)
 requires:
@@ -67,8 +92,8 @@ body: {
 };
 
 // ============================================================
-// Atom 4: Stack Pop Guard (Plan A: Underflow Prevention)
-// Proves: top > 0 => after pop, top-1 >= 0
+// Atom 4: Stack Pop Guard (Underflow Prevention)
+// Proves: top > 0 => top-1 >= 0
 // ============================================================
 atom stack_pop(top: Nat)
 requires:
@@ -80,8 +105,8 @@ body: {
 };
 
 // ============================================================
-// Atom 5: Circle Area (Plan B: Geometric Invariant)
-// Proves: positive radius => positive area
+// Atom 5: Circle Area (Geometric Invariant)
+// Proves: r > 0 => area > 0
 // ============================================================
 atom circle_area(r: Pos)
 requires:
@@ -93,9 +118,8 @@ body: {
 };
 
 // ============================================================
-// Atom 6: Robust Stack - Bounded Push (Final Trial)
+// Atom 6: Robust Stack - Bounded Push
 // Proves: push onto non-full stack preserves 0 <= top' <= max
-// Combined with capacity check: top < max is precondition
 // ============================================================
 atom robust_push(top: Nat, max: Nat, val: Nat)
 requires:
@@ -107,9 +131,8 @@ body: {
 };
 
 // ============================================================
-// Atom 7: Robust Stack - Clear All (Final Trial)
-// Proves: loop terminates AND invariant preserved
-// Uses decreases clause to prove termination: i decreases to 0
+// Atom 7: Stack Clear with Termination Proof
+// Proves: loop terminates (decreases: i) AND invariant preserved
 // ============================================================
 atom stack_clear(top: Nat)
 requires:
@@ -128,9 +151,8 @@ body: {
 };
 
 // ============================================================
-// Atom 8: Distance Squared (Plan B: Geometric Safety)
-// Proves: squared distance is always non-negative
-// No sqrt needed — avoids NaN by design
+// Atom 8: Distance Squared (Non-negative Guarantee)
+// Proves: dx^2 + dy^2 >= 0
 // ============================================================
 atom dist_squared(dx: Nat, dy: Nat)
 requires:

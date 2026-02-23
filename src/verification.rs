@@ -168,19 +168,19 @@ pub fn verify(atom: &Atom, output_dir: &Path) -> MumeiResult<()> {
 }
 
 fn apply_refinement_constraint<'a>(
-    ctx: &'a Context,
-    arr: &Array<'a>,
+    vc: &VCtx<'a>,
     solver: &Solver<'a>,
     var_name: &str,
     refined: &RefinedType,
-    global_env: &mut HashMap<String, Dynamic<'a>>
-) -> Result<(), String> {
+    global_env: &mut Env<'a>
+) -> MumeiResult<()> {
+    let ctx = vc.ctx;
     // Type System 2.0: ベース型に基づいて変数を生成
     let var_z3: Dynamic = match refined._base_type.as_str() {
         "f64" => Float::new_const(ctx, var_name, 11, 53).into(),
         "u64" => {
             let v = Int::new_const(ctx, var_name);
-            solver.assert(&v.ge(&Int::from_i64(ctx, 0))); // u64 の基本制約: v >= 0
+            solver.assert(&v.ge(&Int::from_i64(ctx, 0)));
             v.into()
         },
         _ => Int::new_const(ctx, var_name).into(),
@@ -192,20 +192,21 @@ fn apply_refinement_constraint<'a>(
     local_env.insert(refined.operand.clone(), var_z3);
 
     let predicate_ast = parse_expression(&refined.predicate_raw);
-    let predicate_z3 = expr_to_z3(ctx, arr, &predicate_ast, &mut local_env, None)?
-        .as_bool().ok_or(format!("Predicate for {} must be boolean", refined.name))?;
+    let predicate_z3 = expr_to_z3(vc, &predicate_ast, &mut local_env, None)?
+        .as_bool().ok_or(MumeiError::TypeError(format!("Predicate for {} must be boolean", refined.name)))?;
 
     solver.assert(&predicate_z3);
     Ok(())
 }
 
 fn expr_to_z3<'a>(
-    ctx: &'a Context,
-    arr: &Array<'a>,
+    vc: &VCtx<'a>,
     expr: &Expr,
-    env: &mut HashMap<String, Dynamic<'a>>,
+    env: &mut Env<'a>,
     solver_opt: Option<&Solver<'a>>
-) -> Result<Dynamic<'a>, String> {
+) -> DynResult<'a> {
+    let ctx = vc.ctx;
+    let arr = vc.arr;
     match expr {
         Expr::Number(n) => Ok(Int::from_i64(ctx, *n).into()),
         Expr::Float(f) => Ok(Float::from_f64(ctx, *f).into()),
@@ -231,7 +232,7 @@ fn expr_to_z3<'a>(
                 "sqrt" => {
                     // Z3 0.12 の Float には sqrt メソッドがないため、
                     // シンボリック変数として扱い、sqrt(x) >= 0 の制約を付与
-                    let _val = expr_to_z3(ctx, arr, &args[0], env, solver_opt)?;
+                    let _val = expr_to_z3(vc, &args[0], env, solver_opt)?;
                     let result = Float::new_const(ctx, "sqrt_result", 11, 53);
                     if let Some(solver) = solver_opt {
                         let zero = Float::from_f64(ctx, 0.0);
@@ -241,15 +242,15 @@ fn expr_to_z3<'a>(
                 },
                 "cast_to_int" => {
                     // Z3 0.12 では Float->Int 直接変換がないため、シンボリック整数を返す
-                    let _val = expr_to_z3(ctx, arr, &args[0], env, solver_opt)?;
+                    let _val = expr_to_z3(vc, &args[0], env, solver_opt)?;
                     Ok(Int::new_const(ctx, "cast_result").into())
                 }
                 _ => Err(format!("Unknown function: {}", name)),
             }
         },
         Expr::ArrayAccess(name, index_expr) => {
-            let idx = expr_to_z3(ctx, arr, index_expr, env, solver_opt)?
-                .as_int().ok_or("Index must be integer")?;
+            let idx = expr_to_z3(vc, index_expr, env, solver_opt)?
+                .as_int().ok_or(MumeiError::TypeError("Index must be integer".into()))?;
 
             // 配列名に紐づく長さシンボルを使った境界チェック
             if let Some(solver) = solver_opt {
@@ -274,8 +275,8 @@ fn expr_to_z3<'a>(
             Ok(arr.select(&idx).into())
         },
         Expr::BinaryOp(left, op, right) => {
-            let l = expr_to_z3(ctx, arr, left, env, solver_opt)?;
-            let r = expr_to_z3(ctx, arr, right, env, solver_opt)?;
+            let l = expr_to_z3(vc, left, env, solver_opt)?;
+            let r = expr_to_z3(vc, right, env, solver_opt)?;
 
             // 浮動小数点か整数かで Z3 の AST メソッドを使い分ける
             if l.as_float().is_some() || r.as_float().is_some() {
@@ -358,7 +359,7 @@ fn expr_to_z3<'a>(
                             solver.assert(&ri._eq(&Int::from_i64(ctx, 0)));
                             if solver.check() == SatResult::Sat {
                                 solver.pop(1);
-                                return Err("Verification Error: Potential division by zero.".into());
+                                return Err(MumeiError::VerificationError("Potential division by zero.".into()));
                             }
                             solver.pop(1);
                         }
@@ -375,55 +376,68 @@ fn expr_to_z3<'a>(
             }
         },
         Expr::IfThenElse { cond, then_branch, else_branch } => {
-            let c = expr_to_z3(ctx, arr, cond, env, solver_opt)?.as_bool().unwrap();
-            let t = expr_to_z3(ctx, arr, then_branch, env, solver_opt)?;
-            let e = expr_to_z3(ctx, arr, else_branch, env, solver_opt)?;
+            let c = expr_to_z3(vc, cond, env, solver_opt)?
+                .as_bool().ok_or(MumeiError::TypeError("If condition must be boolean".into()))?;
+            let t = expr_to_z3(vc, then_branch, env, solver_opt)?;
+            let e = expr_to_z3(vc, else_branch, env, solver_opt)?;
             Ok(c.ite(&t, &e))
         },
         Expr::Let { var, value } => {
             // Block 内の逐次実行では変数を env に残す（スコープ管理は Block 側で行う）
-            let val = expr_to_z3(ctx, arr, value, env, solver_opt)?;
+            let val = expr_to_z3(vc, value, env, solver_opt)?;
             env.insert(var.clone(), val.clone());
             Ok(val)
         },
         Expr::Assign { var, value } => {
-            let val = expr_to_z3(ctx, arr, value, env, solver_opt)?;
+            let val = expr_to_z3(vc, value, env, solver_opt)?;
             env.insert(var.clone(), val.clone());
             Ok(val)
         },
         Expr::Block(stmts) => {
             let mut last = Int::from_i64(ctx, 0).into();
-            for stmt in stmts { last = expr_to_z3(ctx, arr, stmt, env, solver_opt)?; }
+            for stmt in stmts { last = expr_to_z3(vc, stmt, env, solver_opt)?; }
             Ok(last)
         },
         Expr::While { cond, invariant, body } => {
             // Loop Invariant 検証ロジック
             if let Some(solver) = solver_opt {
-                let inv = expr_to_z3(ctx, arr, invariant, env, None)?.as_bool().unwrap();
+                let inv = expr_to_z3(vc, invariant, env, None)?
+                    .as_bool().ok_or(MumeiError::TypeError("Invariant must be boolean".into()))?;
+
                 // Base case: 現在の env（let で初期化済み）で invariant が成立するか
                 solver.push();
                 solver.assert(&inv.not());
                 if solver.check() == SatResult::Sat {
                     solver.pop(1);
-                    return Err("Invariant fails initially".into());
+                    return Err(MumeiError::VerificationError("Invariant fails initially".into()));
                 }
                 solver.pop(1);
+
                 // Inductive step: invariant && cond のもとで body 実行後も invariant が保たれるか
-                let c = expr_to_z3(ctx, arr, cond, env, None)?.as_bool().unwrap();
+                let c = expr_to_z3(vc, cond, env, None)?
+                    .as_bool().ok_or(MumeiError::TypeError("While condition must be boolean".into()))?;
+
                 solver.push();
                 solver.assert(&inv);
                 solver.assert(&c);
-                expr_to_z3(ctx, arr, body, env, Some(solver))?;
-                let inv_after = expr_to_z3(ctx, arr, invariant, env, None)?.as_bool().unwrap();
+                expr_to_z3(vc, body, env, Some(solver))?;
+
+                let inv_after = expr_to_z3(vc, invariant, env, None)?
+                    .as_bool().ok_or(MumeiError::TypeError("Invariant must be boolean".into()))?;
+
                 solver.assert(&inv_after.not());
                 if solver.check() == SatResult::Sat {
                     solver.pop(1);
-                    return Err("Invariant not preserved".into());
+                    return Err(MumeiError::VerificationError("Invariant not preserved".into()));
                 }
                 solver.pop(1);
             }
-            let inv = expr_to_z3(ctx, arr, invariant, env, None)?.as_bool().unwrap();
-            let c_not = expr_to_z3(ctx, arr, cond, env, None)?.as_bool().unwrap().not();
+
+            let inv = expr_to_z3(vc, invariant, env, None)?
+                .as_bool().ok_or(MumeiError::TypeError("Invariant must be boolean".into()))?;
+            let c_not = expr_to_z3(vc, cond, env, None)?
+                .as_bool().ok_or(MumeiError::TypeError("While condition must be boolean".into()))?
+                .not();
             Ok(Bool::and(ctx, &[&inv, &c_not]).into())
         },
     }

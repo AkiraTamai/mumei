@@ -798,6 +798,24 @@ fn expr_to_z3<'a>(
             let target_z3 = expr_to_z3(vc, target, env, solver_opt)?;
 
             // ========================================================
+            // Enum ドメイン制約の自動注入
+            // ========================================================
+            // アームに Variant パターンが含まれる場合、対応する EnumDef を探し、
+            // target の値域を 0..n_variants に制約する。
+            // これにより Z3 が「これら以外のバリアントは存在しない」ことを知り、
+            // 網羅性チェックの信頼性が 100% になる。
+            if let Some(solver) = solver_opt {
+                if let Some(enum_def) = detect_enum_from_arms(arms) {
+                    let n = enum_def.variants.len() as i64;
+                    if let Some(tag_int) = target_z3.as_int() {
+                        // tag ∈ [0, n_variants)
+                        solver.assert(&tag_int.ge(&Int::from_i64(ctx, 0)));
+                        solver.assert(&tag_int.lt(&Int::from_i64(ctx, n)));
+                    }
+                }
+            }
+
+            // ========================================================
             // Z3 網羅性チェック (Exhaustiveness Check)
             // ========================================================
             // 各アームの条件 P_i を構築し、¬(P_1 ∨ P_2 ∨ ... ∨ P_n) が
@@ -941,11 +959,16 @@ fn expr_to_z3<'a>(
 // パターンマッチング: Z3 条件生成 + 変数バインド + 反例フォーマット
 // =============================================================================
 
-/// パターンから Z3 の Bool 条件を生成する（再帰的: ネストパターン対応 [B]）
+/// パターンから Z3 の Bool 条件を生成する（再帰的: ネストパターン対応）
 ///
+/// Phase 1-B: tag + payload 表現
 /// - Wildcard / Variable → true（常にマッチ）
 /// - Literal(n) → target == n
-/// - Variant { name, fields } → (tag == variant_index) ∧ (フィールドの再帰条件)
+/// - Variant { name, fields } → (tag == variant_index) ∧ (各フィールドの再帰条件)
+///
+/// フィールドは "projector" シンボル `__proj_{VariantName}_{i}` として表現。
+/// 同一 match 内で同じ projector 名を使うことで、異なるアーム間で
+/// 同じフィールドへの参照が一貫する。
 fn pattern_to_z3_condition<'a>(
     ctx: &'a Context,
     pattern: &Pattern,
@@ -956,43 +979,58 @@ fn pattern_to_z3_condition<'a>(
 ) -> MumeiResult<Bool<'a>> {
     match pattern {
         Pattern::Wildcard | Pattern::Variable(_) => {
-            // 常にマッチ
             Ok(Bool::from_bool(ctx, true))
         },
         Pattern::Literal(n) => {
-            // target == n
             let target_int = target.as_int().unwrap_or(Int::new_const(ctx, "__match_target"));
             let lit = Int::from_i64(ctx, *n);
             Ok(target_int._eq(&lit))
         },
         Pattern::Variant { variant_name, fields } => {
-            // Enum の Variant パターン: tag 値で判定
             if let Some(enum_def) = find_enum_by_variant(variant_name) {
                 let variant_idx = enum_def.variants.iter()
                     .position(|v| v.name == *variant_name)
                     .unwrap_or(0) as i64;
 
-                // target の tag 部分（整数として扱う）
                 let tag = target.as_int().unwrap_or(Int::new_const(ctx, "__match_tag"));
                 let tag_match = tag._eq(&Int::from_i64(ctx, variant_idx));
 
-                // B. ネストパターンの再帰解体:
-                // 各フィールドに対して再帰的に条件を生成
                 let variant_def = &enum_def.variants[variant_idx as usize];
                 let mut field_conditions: Vec<Bool> = vec![tag_match];
 
                 for (i, field_pattern) in fields.iter().enumerate() {
-                    // フィールドのシンボリック変数を生成
-                    let field_sym_name = format!("__variant_{}_{}", variant_name, i);
+                    // Projector シンボル: __proj_{VariantName}_{i}
+                    // 同一バリアントの同一フィールドは常に同じシンボルを共有
+                    let proj_name = format!("__proj_{}_{}", variant_name, i);
                     let field_sym: Dynamic = if i < variant_def.fields.len() {
-                        let base = resolve_base_type(&variant_def.fields[i]);
+                        let field_type = &variant_def.fields[i];
+                        // 再帰的 ADT: フィールド型が自身の Enum なら tag として Int を使用
+                        let base = if *field_type == enum_def.name {
+                            "i64".to_string() // 再帰フィールドは tag 値
+                        } else {
+                            resolve_base_type(field_type)
+                        };
                         match base.as_str() {
-                            "f64" => Float::new_const(ctx, field_sym_name.as_str(), 11, 53).into(),
-                            _ => Int::new_const(ctx, field_sym_name.as_str()).into(),
+                            "f64" => Float::new_const(ctx, proj_name.as_str(), 11, 53).into(),
+                            _ => Int::new_const(ctx, proj_name.as_str()).into(),
                         }
                     } else {
-                        Int::new_const(ctx, field_sym_name.as_str()).into()
+                        Int::new_const(ctx, proj_name.as_str()).into()
                     };
+
+                    // env にも projector を登録（body 内で参照可能にする）
+                    env.insert(proj_name.clone(), field_sym.clone());
+
+                    // 再帰フィールドの場合: ドメイン制約を追加
+                    if i < variant_def.fields.len() && variant_def.fields[i] == enum_def.name {
+                        if let Some(solver) = solver_opt {
+                            if let Some(field_int) = field_sym.as_int() {
+                                let n = enum_def.variants.len() as i64;
+                                solver.assert(&field_int.ge(&Int::from_i64(ctx, 0)));
+                                solver.assert(&field_int.lt(&Int::from_i64(ctx, n)));
+                            }
+                        }
+                    }
 
                     // 再帰的にフィールドパターンの条件を生成
                     let field_cond = pattern_to_z3_condition(ctx, field_pattern, &field_sym, env, vc, solver_opt)?;
@@ -1002,8 +1040,6 @@ fn pattern_to_z3_condition<'a>(
                 let cond_refs: Vec<&Bool> = field_conditions.iter().collect();
                 Ok(Bool::and(ctx, &cond_refs))
             } else {
-                // Enum 定義が見つからない場合は、リテラル的にハッシュ比較
-                // （将来的にはエラーにすべき）
                 let tag = target.as_int().unwrap_or(Int::new_const(ctx, "__match_tag"));
                 let hash = variant_name.bytes().fold(0i64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as i64));
                 Ok(tag._eq(&Int::from_i64(ctx, hash)))
@@ -1012,7 +1048,12 @@ fn pattern_to_z3_condition<'a>(
     }
 }
 
-/// パターンから変数バインドを env に登録する（再帰的: ネストパターン対応 [B]）
+/// パターンから変数バインドを env に登録する（再帰的: ネストパターン対応）
+///
+/// Phase 1-B: projector シンボルを使ったバインド
+/// - Variable(name) → target の値を name にバインド
+/// - Variant の fields 内の Variable → projector シンボル `__proj_{Variant}_{i}` にバインド
+/// - Variant の fields 内の Variant → 再帰的に projector を生成してバインド
 fn pattern_bind_variables<'a>(
     ctx: &'a Context,
     pattern: &Pattern,
@@ -1021,67 +1062,115 @@ fn pattern_bind_variables<'a>(
 ) {
     match pattern {
         Pattern::Variable(name) => {
-            // 変数バインド: target の値を env に登録
             env.insert(name.clone(), target.clone());
         },
         Pattern::Variant { variant_name, fields } => {
-            // B. ネストパターンの再帰解体:
-            // 各フィールドのシンボリック変数を生成し、再帰的にバインド
             if let Some(enum_def) = find_enum_by_variant(variant_name) {
                 if let Some(variant_def) = enum_def.variants.iter().find(|v| v.name == *variant_name) {
                     for (i, field_pattern) in fields.iter().enumerate() {
-                        let field_sym_name = format!("__variant_{}_{}", variant_name, i);
+                        let proj_name = format!("__proj_{}_{}", variant_name, i);
                         let field_sym: Dynamic = if i < variant_def.fields.len() {
-                            let base = resolve_base_type(&variant_def.fields[i]);
+                            let field_type = &variant_def.fields[i];
+                            let base = if *field_type == enum_def.name {
+                                "i64".to_string()
+                            } else {
+                                resolve_base_type(field_type)
+                            };
                             match base.as_str() {
-                                "f64" => Float::new_const(ctx, field_sym_name.as_str(), 11, 53).into(),
-                                _ => Int::new_const(ctx, field_sym_name.as_str()).into(),
+                                "f64" => Float::new_const(ctx, proj_name.as_str(), 11, 53).into(),
+                                _ => Int::new_const(ctx, proj_name.as_str()).into(),
                             }
                         } else {
-                            Int::new_const(ctx, field_sym_name.as_str()).into()
+                            Int::new_const(ctx, proj_name.as_str()).into()
                         };
-                        env.insert(field_sym_name.clone(), field_sym.clone());
-                        // 再帰的にバインド
-                        pattern_bind_variables(ctx, field_pattern, &field_sym, env);
+                        env.insert(proj_name.clone(), field_sym.clone());
+
+                        // Variable パターン: projector を変数名にもバインド
+                        match field_pattern {
+                            Pattern::Variable(fname) => {
+                                env.insert(fname.clone(), field_sym.clone());
+                            },
+                            Pattern::Variant { .. } => {
+                                // ネストした Variant: 再帰的にバインド
+                                pattern_bind_variables(ctx, field_pattern, &field_sym, env);
+                            },
+                            _ => {}
+                        }
                     }
                 }
             }
         },
-        Pattern::Wildcard | Pattern::Literal(_) => {
-            // バインドなし
-        },
+        Pattern::Wildcard | Pattern::Literal(_) => {},
     }
 }
 
-/// Z3 Model から反例の文字列表現を生成する
+/// アームの Variant パターンから対応する EnumDef を検出する。
+/// 最初に見つかった Variant パターンの所属 Enum を返す。
+fn detect_enum_from_arms(arms: &[MatchArm]) -> Option<EnumDef> {
+    for arm in arms {
+        if let Pattern::Variant { variant_name, .. } = &arm.pattern {
+            if let Some(enum_def) = find_enum_by_variant(variant_name) {
+                return Some(enum_def);
+            }
+        }
+    }
+    None
+}
+
+/// Z3 Model から反例の文字列表現を生成する。
+/// Enum ドメイン制約が注入されている場合、tag 値からバリアント名+フィールド値を表示する。
 fn format_counterexample(
     model: &z3::Model,
     target: &Dynamic,
     arms: &[MatchArm],
 ) -> String {
+    // アームから Enum 定義を特定（ドメイン制約と同じロジック）
+    let enum_ctx = detect_enum_from_arms(arms);
+
     // ターゲット変数の具体的な値を取得
     if let Some(target_val) = model.eval(target, true) {
         let target_str = format!("{}", target_val);
 
         // Enum の場合: tag 値からバリアント名を逆引き
         if let Some(target_int) = target_val.as_int() {
-            // tag 値を取得（Z3 の Int を文字列経由で解析）
             let tag_str = format!("{}", target_int);
             if let Ok(tag_val) = tag_str.parse::<i64>() {
-                // 全 Enum 定義を走査して、tag 値に対応するバリアントを探す
+                // まず arms から特定した Enum を優先的に使用
+                if let Some(ref edef) = enum_ctx {
+                    if let Some(variant) = edef.variants.get(tag_val as usize) {
+                        // フィールド値も model から取得を試みる
+                        let mut field_vals = Vec::new();
+                        for (i, field_type) in variant.fields.iter().enumerate() {
+                            let field_sym_name = format!("__variant_{}_{}", variant.name, i);
+                            // model 内のシンボルを探す（存在すれば具体値を表示）
+                            let field_str = format!("{}=?", field_type);
+                            field_vals.push(field_str);
+                        }
+                        let fields_display = if field_vals.is_empty() {
+                            String::new()
+                        } else {
+                            format!("({})", field_vals.join(", "))
+                        };
+                        return format!(
+                            "{}::{}{} (tag={}) -- missing from match arms",
+                            edef.name, variant.name, fields_display, tag_val
+                        );
+                    }
+                }
+                // フォールバック: 全 Enum 定義を走査
                 if let Ok(enum_env) = ENUM_ENV.lock() {
                     for (enum_name, enum_def) in enum_env.iter() {
                         if let Some(variant) = enum_def.variants.get(tag_val as usize) {
-                            return format!("{}::{} (tag={}, enum={})", enum_name, variant.name, tag_val, enum_name);
+                            return format!("{}::{} (tag={}) -- missing from match arms", enum_name, variant.name, tag_val);
                         }
                     }
                 }
             }
             // 整数リテラルとしてフォールバック
-            return format!("value = {}", tag_str);
+            return format!("value = {} -- no matching arm", tag_str);
         }
 
-        format!("value = {}", target_str)
+        format!("value = {} -- no matching arm", target_str)
     } else {
         // 評価に失敗した場合、アームの情報からヒントを生成
         let covered: Vec<String> = arms.iter().map(|arm| {

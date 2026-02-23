@@ -479,6 +479,10 @@ With `--output dist/katana`:
 - [x] Counter-example display on exhaustiveness failure (Z3 `get_model()`)
 - [x] Pattern Matrix codegen: linear if-else chain with clean CFG (no post-hoc switch insertion)
 - [x] Recursive ADT support in parser (`Self` / self-referencing Enum fields)
+- [x] Z3 Enum domain constraints: `0 <= tag < n_variants` auto-injected for Variant patterns
+- [x] Projector-based field binding: `__proj_{Variant}_{i}` symbols shared across match arms
+- [x] Recursive ADT bounded verification: recursive fields get domain constraints automatically
+- [x] Enhanced counter-example display: Enum variant name + field types on exhaustiveness failure
 - [ ] Equality ensures propagation (`ensures: result == n + 1` for chained call verification)
 - [ ] Fully qualified name (FQN) dot-notation in source code (`math.add(x, y)`)
 - [ ] Incremental build (re-verify only changed modules)

@@ -1,23 +1,38 @@
 // ============================================================
 // Mumei Verification Suite: Comprehensive Feature Demonstration
+// Includes: Refinement Types, Structs, Generics, Traits, Laws
 // ============================================================
 
 // --- Refinement Types ---
 type Nat = i64 where v >= 0;
 type Pos = f64 where v > 0.0;
-type StackIdx = i64 where v >= 0;
 
-// --- Struct: Geometric Point (Plan B) ---
+// --- Struct: Geometric Point ---
 struct Point {
     x: f64 where v >= 0.0,
     y: f64 where v >= 0.0
 }
 
-// --- Struct: Circle with positive radius (Plan B) ---
-struct Circle {
-    cx: f64 where v >= 0.0,
-    cy: f64 where v >= 0.0,
-    r: f64 where v > 0.0
+// --- Generics: Pair<T, U> ---
+struct Pair<T, U> {
+    first: T,
+    second: U
+}
+
+// --- Generics: Option<T> ---
+enum Option<T> {
+    Some(T),
+    None
+}
+
+// --- Trait with Laws ---
+trait Comparable {
+    fn leq(a: Self, b: Self) -> bool;
+    law reflexive: leq(x, x) == true;
+}
+
+impl Comparable for i64 {
+    fn leq(a: i64, b: i64) -> bool { a <= b }
 }
 
 // ============================================================

@@ -46,6 +46,12 @@ cat <<EOF > sword_test.mm
 type Nat = i64 where v >= 0;
 type Pos = f64 where v > 0.0;
 
+// Struct: フィールド精緻型付き構造体
+struct Point {
+    x: f64 where v >= 0.0,
+    y: f64 where v >= 0.0
+}
+
 // Atom 1: i64 ループ（loop invariant 検証）
 atom sword_sum(n: Nat)
 requires:

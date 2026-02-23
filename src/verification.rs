@@ -131,7 +131,42 @@ pub fn verify(atom: &Atom, output_dir: &Path) -> MumeiResult<()> {
         }
     }
 
-    // 2b. 全パラメータに対して配列長シンボルを事前生成
+    // 2b. 引数（params）に対する構造体フィールド制約の自動適用
+    {
+        let struct_defs = STRUCT_ENV.lock().map_err(|_| MumeiError::TypeError("Failed to lock STRUCT_ENV".into()))?;
+        for param in &atom.params {
+            if let Some(type_name) = &param.type_name {
+                if let Some(sdef) = struct_defs.get(type_name) {
+                    // 構造体の各フィールドをシンボリック変数として env に登録し、制約を適用
+                    for field in &sdef.fields {
+                        let field_var_name = format!("{}_{}", param.name, field.name);
+                        let base = resolve_base_type(&field.type_name);
+                        let field_z3: Dynamic = match base.as_str() {
+                            "f64" => Float::new_const(&ctx, field_var_name.as_str(), 11, 53).into(),
+                            _ => Int::new_const(&ctx, field_var_name.as_str()).into(),
+                        };
+                        env.insert(field_var_name.clone(), field_z3.clone());
+                        // qualified name も登録
+                        let qualified = format!("__struct_{}_{}", param.name, field.name);
+                        env.insert(qualified, field_z3.clone());
+
+                        // フィールド制約を solver に assert
+                        if let Some(constraint_raw) = &field.constraint {
+                            let mut local_env = env.clone();
+                            local_env.insert("v".to_string(), field_z3);
+                            let constraint_ast = parse_expression(constraint_raw);
+                            let constraint_z3 = expr_to_z3(&vc, &constraint_ast, &mut local_env, None)?;
+                            if let Some(constraint_bool) = constraint_z3.as_bool() {
+                                solver.assert(&constraint_bool);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 2c. 全パラメータに対して配列長シンボルを事前生成
     for param in &atom.params {
         let len_name = format!("len_{}", param.name);
         if !env.contains_key(&len_name) {
@@ -455,14 +490,40 @@ fn expr_to_z3<'a>(
             Ok(Bool::and(ctx, &[&inv, &c_not]).into())
         },
         Expr::StructInit { type_name, fields } => {
-            // 構造体の各フィールドを検証し、最初のフィールドの値を代表として返す
-            // Z3 上では各フィールドを個別のシンボリック変数として env に登録
+            // 構造体の各フィールドを検証し、env に登録
+            // フィールドに精緻型制約がある場合は solver で検証する
             let mut last: Dynamic = Int::from_i64(ctx, 0).into();
             for (field_name, field_expr) in fields {
                 let val = expr_to_z3(vc, field_expr, env, solver_opt)?;
                 let qualified_name = format!("__struct_{}_{}", type_name, field_name);
                 env.insert(qualified_name, val.clone());
-                last = val;
+                last = val.clone();
+
+                // フィールド制約の検証: 構造体定義から constraint を取得
+                if let Some(sdef) = get_struct_def(type_name) {
+                    if let Some(sfield) = sdef.fields.iter().find(|f| f.name == *field_name) {
+                        if let Some(constraint_raw) = &sfield.constraint {
+                            // constraint 内の "v" をフィールド値に置き換えて検証
+                            let mut local_env = env.clone();
+                            local_env.insert("v".to_string(), val.clone());
+                            let constraint_ast = parse_expression(constraint_raw);
+                            let constraint_z3 = expr_to_z3(vc, &constraint_ast, &mut local_env, None)?;
+                            if let Some(constraint_bool) = constraint_z3.as_bool() {
+                                if let Some(solver) = solver_opt {
+                                    solver.push();
+                                    solver.assert(&constraint_bool.not());
+                                    if solver.check() == SatResult::Sat {
+                                        solver.pop(1);
+                                        return Err(MumeiError::VerificationError(
+                                            format!("Struct '{}' field '{}' constraint violated: {}", type_name, field_name, constraint_raw)
+                                        ));
+                                    }
+                                    solver.pop(1);
+                                }
+                            }
+                        }
+                    }
+                }
             }
             Ok(last)
         },

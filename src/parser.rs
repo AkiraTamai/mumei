@@ -86,11 +86,13 @@ pub struct Atom {
     pub body_expr: String,
 }
 
-/// 構造体フィールド定義
+/// 構造体フィールド定義（オプションで精緻型制約を保持）
 #[derive(Debug, Clone)]
 pub struct StructField {
     pub name: String,
     pub type_name: String,
+    /// フィールドの精緻型制約（例: "v >= 0"）。None なら制約なし
+    pub constraint: Option<String>,
 }
 
 /// 構造体定義
@@ -137,10 +139,17 @@ pub fn parse_module(source: &str) -> Vec<Item> {
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
             .map(|s| {
-                let parts: Vec<&str> = s.splitn(2, ':').collect();
+                // "x: f64 where v >= 0.0" → name="x", type="f64", constraint=Some("v >= 0.0")
+                let (field_part, constraint) = if let Some(idx) = s.find("where") {
+                    (s[..idx].trim(), Some(s[idx + 5..].trim().to_string()))
+                } else {
+                    (s.trim(), None)
+                };
+                let parts: Vec<&str> = field_part.splitn(2, ':').collect();
                 StructField {
                     name: parts[0].trim().to_string(),
                     type_name: parts.get(1).map(|t| t.trim().to_string()).unwrap_or_else(|| "i64".to_string()),
+                    constraint,
                 }
             })
             .collect();

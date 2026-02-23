@@ -791,3 +791,176 @@ fn parse_pattern(tokens: &[String], pos: &mut usize) -> Pattern {
     *pos += 1;
     Pattern::Wildcard
 }
+
+// =============================================================================
+// Generics テスト
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::TypeRef;
+
+    #[test]
+    fn test_parse_type_ref_simple() {
+        let tr = parse_type_ref("i64");
+        assert_eq!(tr.name, "i64");
+        assert!(tr.type_args.is_empty());
+    }
+
+    #[test]
+    fn test_parse_type_ref_generic() {
+        let tr = parse_type_ref("Stack<i64>");
+        assert_eq!(tr.name, "Stack");
+        assert_eq!(tr.type_args.len(), 1);
+        assert_eq!(tr.type_args[0].name, "i64");
+    }
+
+    #[test]
+    fn test_parse_type_ref_nested() {
+        let tr = parse_type_ref("Map<String, List<i64>>");
+        assert_eq!(tr.name, "Map");
+        assert_eq!(tr.type_args.len(), 2);
+        assert_eq!(tr.type_args[0].name, "String");
+        assert_eq!(tr.type_args[1].name, "List");
+        assert_eq!(tr.type_args[1].type_args[0].name, "i64");
+    }
+
+    #[test]
+    fn test_parse_type_ref_display() {
+        let tr = parse_type_ref("Stack<i64>");
+        assert_eq!(tr.display_name(), "Stack<i64>");
+
+        let tr2 = parse_type_ref("Map<String, List<i64>>");
+        assert_eq!(tr2.display_name(), "Map<String, List<i64>>");
+    }
+
+    #[test]
+    fn test_type_ref_substitute() {
+        use std::collections::HashMap;
+        let mut map = HashMap::new();
+        map.insert("T".to_string(), TypeRef::simple("i64"));
+
+        let tr = TypeRef::simple("T");
+        let result = tr.substitute(&map);
+        assert_eq!(result.name, "i64");
+
+        let tr2 = TypeRef::generic("Stack", vec![TypeRef::simple("T")]);
+        let result2 = tr2.substitute(&map);
+        assert_eq!(result2.display_name(), "Stack<i64>");
+    }
+
+    #[test]
+    fn test_parse_generic_struct() {
+        let source = r#"
+struct Pair<T, U> {
+    first: T,
+    second: U
+}
+"#;
+        let items = parse_module(source);
+        let struct_items: Vec<_> = items.iter().filter_map(|i| {
+            if let Item::StructDef(s) = i { Some(s) } else { None }
+        }).collect();
+
+        assert_eq!(struct_items.len(), 1);
+        let s = &struct_items[0];
+        assert_eq!(s.name, "Pair");
+        assert_eq!(s.type_params, vec!["T", "U"]);
+        assert_eq!(s.fields.len(), 2);
+        assert_eq!(s.fields[0].name, "first");
+        assert_eq!(s.fields[0].type_ref.name, "T");
+        assert_eq!(s.fields[1].name, "second");
+        assert_eq!(s.fields[1].type_ref.name, "U");
+    }
+
+    #[test]
+    fn test_parse_generic_enum() {
+        let source = r#"
+enum Option<T> {
+    Some(T),
+    None
+}
+"#;
+        let items = parse_module(source);
+        let enum_items: Vec<_> = items.iter().filter_map(|i| {
+            if let Item::EnumDef(e) = i { Some(e) } else { None }
+        }).collect();
+
+        assert_eq!(enum_items.len(), 1);
+        let e = &enum_items[0];
+        assert_eq!(e.name, "Option");
+        assert_eq!(e.type_params, vec!["T"]);
+        assert_eq!(e.variants.len(), 2);
+        assert_eq!(e.variants[0].name, "Some");
+        assert_eq!(e.variants[0].field_types[0].name, "T");
+        assert_eq!(e.variants[1].name, "None");
+        assert!(e.variants[1].fields.is_empty());
+    }
+
+    #[test]
+    fn test_parse_generic_atom() {
+        let source = r#"
+atom identity<T>(x: T)
+requires: true;
+ensures: true;
+body: x;
+"#;
+        let items = parse_module(source);
+        let atom_items: Vec<_> = items.iter().filter_map(|i| {
+            if let Item::Atom(a) = i { Some(a) } else { None }
+        }).collect();
+
+        assert_eq!(atom_items.len(), 1);
+        let a = &atom_items[0];
+        assert_eq!(a.name, "identity");
+        assert_eq!(a.type_params, vec!["T"]);
+        assert_eq!(a.params.len(), 1);
+        assert_eq!(a.params[0].name, "x");
+        assert_eq!(a.params[0].type_ref.as_ref().unwrap().name, "T");
+    }
+
+    #[test]
+    fn test_parse_non_generic_backward_compat() {
+        // 非ジェネリック定義が引き続き正しくパースされることを確認
+        let source = r#"
+struct Point {
+    x: f64,
+    y: f64
+}
+
+enum Color {
+    Red,
+    Green,
+    Blue
+}
+
+atom add(a: i64, b: i64)
+requires: true;
+ensures: true;
+body: a + b;
+"#;
+        let items = parse_module(source);
+
+        let structs: Vec<_> = items.iter().filter_map(|i| {
+            if let Item::StructDef(s) = i { Some(s) } else { None }
+        }).collect();
+        assert_eq!(structs.len(), 1);
+        assert_eq!(structs[0].name, "Point");
+        assert!(structs[0].type_params.is_empty());
+
+        let enums: Vec<_> = items.iter().filter_map(|i| {
+            if let Item::EnumDef(e) = i { Some(e) } else { None }
+        }).collect();
+        assert_eq!(enums.len(), 1);
+        assert_eq!(enums[0].name, "Color");
+        assert!(enums[0].type_params.is_empty());
+
+        let atoms: Vec<_> = items.iter().filter_map(|i| {
+            if let Item::Atom(a) = i { Some(a) } else { None }
+        }).collect();
+        assert_eq!(atoms.len(), 1);
+        assert_eq!(atoms[0].name, "add");
+        assert!(atoms[0].type_params.is_empty());
+    }
+}

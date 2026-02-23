@@ -45,11 +45,20 @@ pub fn transpile_enum_go(enum_def: &EnumDef) -> String {
     lines.join("\n")
 }
 
-/// Struct 定義を Go の struct に変換する
+/// Struct 定義を Go の struct に変換する（Go 1.18+ Generics 対応）
 pub fn transpile_struct_go(struct_def: &StructDef) -> String {
     let mut lines = Vec::new();
     lines.push(format!("// Verified Struct: {}", struct_def.name));
-    lines.push(format!("type {} struct {{", struct_def.name));
+    // Generics: 型パラメータがある場合は [T any, U any] を付与（Go 1.18+）
+    let type_params_str = if struct_def.type_params.is_empty() {
+        String::new()
+    } else {
+        let params: Vec<String> = struct_def.type_params.iter()
+            .map(|p| format!("{} any", p))
+            .collect();
+        format!("[{}]", params.join(", "))
+    };
+    lines.push(format!("type {}{} struct {{", struct_def.name, type_params_str));
     for field in &struct_def.fields {
         let go_type = map_type_go(Some(field.type_name.as_str()));
         if let Some(constraint) = &field.constraint {

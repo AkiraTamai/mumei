@@ -35,10 +35,16 @@ fn map_type_ts(type_name: Option<&str>) -> String {
     }
 }
 
-/// Enum 定義を TypeScript の const enum + discriminated union に変換する
+/// Enum 定義を TypeScript の const enum + discriminated union に変換する（Generics 対応）
 pub fn transpile_enum_ts(enum_def: &EnumDef) -> String {
     let mut lines = Vec::new();
     lines.push(format!("/** Verified Enum: {} */", enum_def.name));
+    // Generics: 型パラメータがある場合は discriminated union の型に <T> を付与
+    let type_params_str = if enum_def.type_params.is_empty() {
+        String::new()
+    } else {
+        format!("<{}>", enum_def.type_params.join(", "))
+    };
     lines.push(format!("export const enum {}Tag {{", enum_def.name));
     for variant in &enum_def.variants {
         lines.push(format!("    {},", variant.name));
@@ -61,15 +67,21 @@ pub fn transpile_enum_ts(enum_def: &EnumDef) -> String {
         }
         let _ = i;
     }
-    lines.push(format!("export type {} = {};", enum_def.name, union_members.join(" | ")));
+    lines.push(format!("export type {}{} = {};", enum_def.name, type_params_str, union_members.join(" | ")));
     lines.join("\n")
 }
 
-/// Struct 定義を TypeScript の interface に変換する
+/// Struct 定義を TypeScript の interface に変換する（Generics 対応）
 pub fn transpile_struct_ts(struct_def: &StructDef) -> String {
     let mut lines = Vec::new();
     lines.push(format!("/** Verified Struct: {} */", struct_def.name));
-    lines.push(format!("export interface {} {{", struct_def.name));
+    // Generics: 型パラメータがある場合は <T, U> を付与
+    let type_params_str = if struct_def.type_params.is_empty() {
+        String::new()
+    } else {
+        format!("<{}>", struct_def.type_params.join(", "))
+    };
+    lines.push(format!("export interface {}{} {{", struct_def.name, type_params_str));
     for field in &struct_def.fields {
         let ts_type = map_type_ts(Some(field.type_name.as_str()));
         if let Some(constraint) = &field.constraint {

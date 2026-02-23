@@ -3,24 +3,50 @@ use z3::{Config, Context, Solver, SatResult};
 use crate::parser::{Atom, QuantifierType, Expr, Op, parse_expression, RefinedType};
 use std::fs;
 use std::path::Path;
+use std::fmt;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use once_cell::sync::Lazy;
 
-pub type MumeiResult<T> = Result<T, String>;
+// --- エラー型の定義 ---
+#[derive(Debug)]
+pub enum MumeiError {
+    VerificationError(String),
+    CodegenError(String),
+    TypeError(String),
+}
+
+impl fmt::Display for MumeiError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MumeiError::VerificationError(msg) => write!(f, "Verification Error: {}", msg),
+            MumeiError::CodegenError(msg) => write!(f, "Codegen Error: {}", msg),
+            MumeiError::TypeError(msg) => write!(f, "Type Error: {}", msg),
+        }
+    }
+}
+
+impl From<String> for MumeiError {
+    fn from(s: String) -> Self {
+        MumeiError::VerificationError(s)
+    }
+}
+
+impl From<&str> for MumeiError {
+    fn from(s: &str) -> Self {
+        MumeiError::VerificationError(s.to_string())
+    }
+}
+
+pub type MumeiResult<T> = Result<T, MumeiError>;
 type Env<'a> = HashMap<String, Dynamic<'a>>;
 type DynResult<'a> = MumeiResult<Dynamic<'a>>;
 
-struct VerificationContext<'a> {
+/// 検証時に共有するコンテキスト（ctx, arr を束ねて引数を削減）
+struct VCtx<'a> {
     ctx: &'a Context,
     arr: &'a Array<'a>,
-}
-
-impl<'a> VerificationContext<'a> {
-    fn new(ctx: &'a Context, arr: &'a Array<'a>) -> Self {
-        Self { ctx, arr }
-    }
 }
 
 // --- 型環境のグローバル管理 ---
@@ -29,7 +55,7 @@ static TYPE_ENV: Lazy<Mutex<HashMap<String, RefinedType>>> = Lazy::new(|| {
 });
 
 pub fn register_type(refined_type: &RefinedType) -> MumeiResult<()> {
-    let mut env = TYPE_ENV.lock().map_err(|_| "Failed to lock TYPE_ENV")?;
+    let mut env = TYPE_ENV.lock().map_err(|_| MumeiError::TypeError("Failed to lock TYPE_ENV".into()))?;
     env.insert(refined_type.name.clone(), refined_type.clone());
     Ok(())
 }
@@ -52,11 +78,10 @@ pub fn verify(atom: &Atom, output_dir: &Path) -> MumeiResult<()> {
     let solver = Solver::new(&ctx);
 
     let int_sort = z3::Sort::int(&ctx);
-    // 配列のモデル（簡易版: i64 -> i64）。将来的に型ごとに Array Sort を分ける拡張が可能
     let arr = Array::new_const(&ctx, "arr", &int_sort, &int_sort);
+    let vc = VCtx { ctx: &ctx, arr: &arr };
 
     let mut env: Env = HashMap::new();
-    let vctx = VerificationContext::new(&ctx, &arr);
 
     // 1. 量子化制約の処理
     for q in &atom.forall_constraints {
@@ -70,8 +95,8 @@ pub fn verify(atom: &Atom, output_dir: &Path) -> MumeiResult<()> {
 
         let range_cond = Bool::and(&ctx, &[&i.ge(&start), &i.lt(&end)]);
         let expr_ast = parse_expression(&q.condition);
-        let condition_z3 = expr_to_z3(&vctx, &expr_ast, &mut env, None)?
-            .as_bool().ok_or("Condition must be boolean")?;
+        let condition_z3 = expr_to_z3(&vc, &expr_ast, &mut env, None)?
+            .as_bool().ok_or(MumeiError::VerificationError("Condition must be boolean".into()))?;
 
         let quantifier_expr = match q.q_type {
             QuantifierType::ForAll => z3::ast::forall_const(&ctx, &[&i], &[], &range_cond.implies(&condition_z3)),
@@ -82,18 +107,17 @@ pub fn verify(atom: &Atom, output_dir: &Path) -> MumeiResult<()> {
 
     // 2. 引数（params）に対する精緻型制約の自動適用
     {
-        let type_defs = TYPE_ENV.lock().map_err(|_| "Failed to lock TYPE_ENV")?;
+        let type_defs = TYPE_ENV.lock().map_err(|_| MumeiError::TypeError("Failed to lock TYPE_ENV".into()))?;
         for param in &atom.params {
             if let Some(type_name) = &param.type_name {
                 if let Some(refined) = type_defs.get(type_name) {
-                    apply_refinement_constraint(&vctx, &solver, &param.name, refined, &mut env)?;
+                    apply_refinement_constraint(&vc, &solver, &param.name, refined, &mut env)?;
                 }
             }
         }
     }
 
     // 2b. 全パラメータに対して配列長シンボルを事前生成
-    // パラメータ名が配列として使われる可能性があるため、len_<name> >= 0 を暗黙的に生成
     for param in &atom.params {
         let len_name = format!("len_{}", param.name);
         if !env.contains_key(&len_name) {
@@ -106,7 +130,7 @@ pub fn verify(atom: &Atom, output_dir: &Path) -> MumeiResult<()> {
     // 3. 前提条件 (requires)
     if atom.requires.trim() != "true" {
         let req_ast = parse_expression(&atom.requires);
-        let req_z3 = expr_to_z3(&ctx, &arr, &req_ast, &mut env, None)?;
+        let req_z3 = expr_to_z3(&vc, &req_ast, &mut env, None)?;
         if let Some(req_bool) = req_z3.as_bool() {
             solver.assert(&req_bool);
         }
@@ -114,20 +138,20 @@ pub fn verify(atom: &Atom, output_dir: &Path) -> MumeiResult<()> {
 
     // 4. ボディの検証
     let body_ast = parse_expression(&atom.body_expr);
-    let body_result = expr_to_z3(&ctx, &arr, &body_ast, &mut env, Some(&solver))?;
+    let body_result = expr_to_z3(&vc, &body_ast, &mut env, Some(&solver))?;
 
     // 5. 事後条件 (ensures)
     if atom.ensures.trim() != "true" {
         env.insert("result".to_string(), body_result);
         let ens_ast = parse_expression(&atom.ensures);
-        let ens_z3 = expr_to_z3(&ctx, &arr, &ens_ast, &mut env, None)?;
+        let ens_z3 = expr_to_z3(&vc, &ens_ast, &mut env, None)?;
         if let Some(ens_bool) = ens_z3.as_bool() {
             solver.push();
             solver.assert(&ens_bool.not());
             if solver.check() == SatResult::Sat {
                 solver.pop(1);
                 save_visualizer_report(output_dir, "failed", &atom.name, "N/A", "N/A", "Postcondition violated.");
-                return Err("Verification Error: Postcondition (ensures) is not satisfied.".into());
+                return Err(MumeiError::VerificationError("Postcondition (ensures) is not satisfied.".into()));
             }
             solver.pop(1);
         }
@@ -136,7 +160,7 @@ pub fn verify(atom: &Atom, output_dir: &Path) -> MumeiResult<()> {
 
     if solver.check() == SatResult::Unsat {
         save_visualizer_report(output_dir, "failed", &atom.name, "N/A", "N/A", "Logic contradiction.");
-        return Err("Verification failed: Contradiction found.".into());
+        return Err(MumeiError::VerificationError("Contradiction found.".into()));
     }
 
     save_visualizer_report(output_dir, "success", &atom.name, "N/A", "N/A", "Verified safe.");

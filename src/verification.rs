@@ -313,10 +313,36 @@ pub fn verify_impl(impl_def: &ImplDef, module_env: &ModuleEnv) -> MumeiResult<()
                     solver.push();
                     solver.assert(&law_bool.not());
                     if solver.check() == SatResult::Sat {
+                        // 反例（Counter-example）を Z3 model から取得
+                        let counterexample = if let Some(model) = solver.get_model() {
+                            let var_names = ["a", "b", "c", "x", "y", "z"];
+                            let mut ce_parts = Vec::new();
+                            for var_name in &var_names {
+                                if let Some(var_z3) = env.get(*var_name) {
+                                    if let Some(val) = model.eval(var_z3, true) {
+                                        let val_str = format!("{}", val);
+                                        // 変数が law 式に含まれている場合のみ表示
+                                        if law_expr.contains(*var_name) {
+                                            ce_parts.push(format!("{} = {}", var_name, val_str));
+                                        }
+                                    }
+                                }
+                            }
+                            if ce_parts.is_empty() {
+                                "  (no concrete values available)".to_string()
+                            } else {
+                                format!("  Counter-example: {}", ce_parts.join(", "))
+                            }
+                        } else {
+                            "  (could not retrieve model)".to_string()
+                        };
                         solver.pop(1);
                         return Err(MumeiError::VerificationError(
-                            format!("impl {} for {}: law '{}' is not satisfied\n  Law: {}",
-                                impl_def.trait_name, impl_def.target_type, law_name, law_expr)
+                            format!(
+                                "impl {} for {}: law '{}' is not satisfied\n  Law: {}\n{}",
+                                impl_def.trait_name, impl_def.target_type,
+                                law_name, law_expr, counterexample
+                            )
                         ));
                     }
                     solver.pop(1);

@@ -1,4 +1,5 @@
-use crate::parser::{Expr, Op, Atom, ImportDecl, parse_expression};
+use crate::parser::{Expr, Op, Atom, ImportDecl, EnumDef, StructDef, parse_expression};
+use crate::verification::resolve_base_type;
 
 /// import 宣言から TypeScript のモジュールヘッダーを生成する
 /// 例: import { add } from "./lib/math";
@@ -18,6 +19,65 @@ pub fn transpile_module_header_ts(imports: &[ImportDecl]) -> String {
     if !lines.is_empty() {
         lines.push(String::new()); // 空行で区切り
     }
+    lines.join("\n")
+}
+
+fn map_type_ts(type_name: Option<&str>) -> String {
+    match type_name {
+        Some(name) => {
+            let base = resolve_base_type(name);
+            match base.as_str() {
+                "f64" | "i64" | "u64" => "number".to_string(),
+                _ => "number".to_string(),
+            }
+        },
+        None => "number".to_string(),
+    }
+}
+
+/// Enum 定義を TypeScript の const enum + discriminated union に変換する
+pub fn transpile_enum_ts(enum_def: &EnumDef) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!("/** Verified Enum: {} */", enum_def.name));
+    lines.push(format!("export const enum {}Tag {{", enum_def.name));
+    for variant in &enum_def.variants {
+        lines.push(format!("    {},", variant.name));
+    }
+    lines.push("}".to_string());
+
+    // Discriminated union 型も生成
+    let mut union_members = Vec::new();
+    for (i, variant) in enum_def.variants.iter().enumerate() {
+        if variant.fields.is_empty() {
+            union_members.push(format!("{{ tag: {}Tag.{} }}", enum_def.name, variant.name));
+        } else {
+            let field_types: Vec<String> = variant.fields.iter().enumerate()
+                .map(|(fi, f)| format!("field_{}: {}", fi, map_type_ts(Some(f.as_str()))))
+                .collect();
+            union_members.push(format!(
+                "{{ tag: {}Tag.{}; {} }}",
+                enum_def.name, variant.name, field_types.join("; ")
+            ));
+        }
+        let _ = i;
+    }
+    lines.push(format!("export type {} = {};", enum_def.name, union_members.join(" | ")));
+    lines.join("\n")
+}
+
+/// Struct 定義を TypeScript の interface に変換する
+pub fn transpile_struct_ts(struct_def: &StructDef) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!("/** Verified Struct: {} */", struct_def.name));
+    lines.push(format!("export interface {} {{", struct_def.name));
+    for field in &struct_def.fields {
+        let ts_type = map_type_ts(Some(field.type_name.as_str()));
+        if let Some(constraint) = &field.constraint {
+            lines.push(format!("    /** where {} */", constraint));
+        }
+        lines.push(format!("    {}: {};", field.name, ts_type));
+    }
+    lines.push("}".to_string());
     lines.join("\n")
 }
 

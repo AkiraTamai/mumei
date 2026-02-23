@@ -483,6 +483,9 @@ With `--output dist/katana`:
 - [x] Projector-based field binding: `__proj_{Variant}_{i}` symbols shared across match arms
 - [x] Recursive ADT bounded verification: recursive fields get domain constraints automatically
 - [x] Enhanced counter-example display: Enum variant name + field types on exhaustiveness failure
+- [x] Transpiler: Enum definitions → Rust enum / Go const+type / TypeScript const enum + discriminated union
+- [x] Transpiler: Struct definitions → Rust struct / Go struct / TypeScript interface
+- [x] Verified standard library: `std/option.mm`, `std/result.mm`, `std/list.mm`
 - [ ] Equality ensures propagation (`ensures: result == n + 1` for chained call verification)
 - [ ] Fully qualified name (FQN) dot-notation in source code (`math.add(x, y)`)
 - [ ] Incremental build (re-verify only changed modules)

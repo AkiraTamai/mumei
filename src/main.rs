@@ -7,7 +7,7 @@ mod resolver;
 use clap::Parser;
 use std::fs;
 use std::path::Path;
-use crate::transpiler::{TargetLanguage, transpile, transpile_module_header};
+use crate::transpiler::{TargetLanguage, transpile, transpile_enum, transpile_struct, transpile_module_header};
 use crate::parser::{Item, ImportDecl};
 
 #[derive(Parser)]
@@ -88,7 +88,7 @@ fn main() {
                 }
             }
 
-            // --- 構造体定義の登録 ---
+            // --- 構造体定義の登録 + トランスパイル ---
             Item::StructDef(struct_def) => {
                 let field_names: Vec<&str> = struct_def.fields.iter().map(|f| f.name.as_str()).collect();
                 println!("  🏗️  Registered Struct: '{}' (fields: {})", struct_def.name, field_names.join(", "));
@@ -96,9 +96,16 @@ fn main() {
                     eprintln!("  ❌ Struct Registration Failed: {}", e);
                     std::process::exit(1);
                 }
+                // 構造体定義をトランスパイル出力に含める
+                rust_bundle.push_str(&transpile_struct(&struct_def, TargetLanguage::Rust));
+                rust_bundle.push_str("\n\n");
+                go_bundle.push_str(&transpile_struct(&struct_def, TargetLanguage::Go));
+                go_bundle.push_str("\n\n");
+                ts_bundle.push_str(&transpile_struct(&struct_def, TargetLanguage::TypeScript));
+                ts_bundle.push_str("\n\n");
             }
 
-            // --- Enum 定義の登録 ---
+            // --- Enum 定義の登録 + トランスパイル ---
             Item::EnumDef(enum_def) => {
                 let variant_names: Vec<&str> = enum_def.variants.iter().map(|v| v.name.as_str()).collect();
                 println!("  🔷 Registered Enum: '{}' (variants: {})", enum_def.name, variant_names.join(", "));
@@ -106,6 +113,13 @@ fn main() {
                     eprintln!("  ❌ Enum Registration Failed: {}", e);
                     std::process::exit(1);
                 }
+                // Enum 定義をトランスパイル出力に含める
+                rust_bundle.push_str(&transpile_enum(&enum_def, TargetLanguage::Rust));
+                rust_bundle.push_str("\n\n");
+                go_bundle.push_str(&transpile_enum(&enum_def, TargetLanguage::Go));
+                go_bundle.push_str("\n\n");
+                ts_bundle.push_str(&transpile_enum(&enum_def, TargetLanguage::TypeScript));
+                ts_bundle.push_str("\n\n");
             }
 
             // --- Atom の処理 ---

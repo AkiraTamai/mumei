@@ -1,6 +1,6 @@
 use z3::ast::{Ast, Int, Bool, Array, Dynamic, Float};
 use z3::{Config, Context, Solver, SatResult};
-use crate::parser::{Atom, QuantifierType, Expr, Op, parse_expression, RefinedType};
+use crate::parser::{Atom, QuantifierType, Expr, Op, parse_expression, RefinedType, StructDef};
 use std::fs;
 use std::path::Path;
 use std::fmt;
@@ -54,10 +54,24 @@ static TYPE_ENV: Lazy<Mutex<HashMap<String, RefinedType>>> = Lazy::new(|| {
     Mutex::new(HashMap::new())
 });
 
+static STRUCT_ENV: Lazy<Mutex<HashMap<String, StructDef>>> = Lazy::new(|| {
+    Mutex::new(HashMap::new())
+});
+
 pub fn register_type(refined_type: &RefinedType) -> MumeiResult<()> {
     let mut env = TYPE_ENV.lock().map_err(|_| MumeiError::TypeError("Failed to lock TYPE_ENV".into()))?;
     env.insert(refined_type.name.clone(), refined_type.clone());
     Ok(())
+}
+
+pub fn register_struct(struct_def: &StructDef) -> MumeiResult<()> {
+    let mut env = STRUCT_ENV.lock().map_err(|_| MumeiError::TypeError("Failed to lock STRUCT_ENV".into()))?;
+    env.insert(struct_def.name.clone(), struct_def.clone());
+    Ok(())
+}
+
+pub fn get_struct_def(name: &str) -> Option<StructDef> {
+    STRUCT_ENV.lock().ok().and_then(|env| env.get(name).cloned())
 }
 
 /// 精緻型名からベース型名を解決する（例: "Nat" -> "i64", "Pos" -> "f64"）
@@ -439,6 +453,43 @@ fn expr_to_z3<'a>(
                 .as_bool().ok_or(MumeiError::TypeError("While condition must be boolean".into()))?
                 .not();
             Ok(Bool::and(ctx, &[&inv, &c_not]).into())
+        },
+        Expr::StructInit { type_name, fields } => {
+            // 構造体の各フィールドを検証し、最初のフィールドの値を代表として返す
+            // Z3 上では各フィールドを個別のシンボリック変数として env に登録
+            let mut last: Dynamic = Int::from_i64(ctx, 0).into();
+            for (field_name, field_expr) in fields {
+                let val = expr_to_z3(vc, field_expr, env, solver_opt)?;
+                let qualified_name = format!("__struct_{}_{}", type_name, field_name);
+                env.insert(qualified_name, val.clone());
+                last = val;
+            }
+            Ok(last)
+        },
+        Expr::FieldAccess(expr, field_name) => {
+            // v.x → env から __struct_TypeName_x を探す、または v_x として探す
+            if let Expr::Variable(var_name) = expr.as_ref() {
+                // まず qualified name で探す
+                let candidates = [
+                    format!("__struct_{}_{}", var_name, field_name),
+                    format!("{}_{}", var_name, field_name),
+                ];
+                for candidate in &candidates {
+                    if let Some(val) = env.get(candidate) {
+                        return Ok(val.clone());
+                    }
+                }
+                // 見つからなければシンボリック変数を生成
+                let sym_name = format!("{}_{}", var_name, field_name);
+                let sym = Int::new_const(ctx, sym_name.as_str());
+                env.insert(sym_name, sym.clone().into());
+                Ok(sym.into())
+            } else {
+                // ネストされたフィールドアクセスはシンボリック変数で近似
+                let _base = expr_to_z3(vc, expr, env, solver_opt)?;
+                let sym = Int::new_const(ctx, format!("field_{}", field_name));
+                Ok(sym.into())
+            }
         },
     }
 }

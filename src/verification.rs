@@ -825,6 +825,27 @@ fn expr_to_z3<'a>(
                 solver.pop(1);
 
                 if !exhaustive {
+                    // 反例（Counter-example）の取得と表示
+                    // solver はまだ Sat 状態なので、再度チェックして model を取得
+                    solver.push();
+                    solver.assert(&coverage.not());
+                    if solver.check() == SatResult::Sat {
+                        let counterexample = if let Some(model) = solver.get_model() {
+                            // ターゲット変数の具体的な値を取得
+                            let ce_str = format_counterexample(&model, &target_z3, arms);
+                            ce_str
+                        } else {
+                            "unknown value".to_string()
+                        };
+                        solver.pop(1);
+                        return Err(MumeiError::VerificationError(
+                            format!(
+                                "Match is not exhaustive: the following value is not covered by any arm:\n  Counter-example: {}",
+                                counterexample
+                            )
+                        ));
+                    }
+                    solver.pop(1);
                     return Err(MumeiError::VerificationError(
                         "Match is not exhaustive: there exist values not covered by any arm.".into()
                     ));
@@ -912,6 +933,165 @@ fn expr_to_z3<'a>(
                 Ok(sym.into())
             }
         },
+    }
+}
+
+// =============================================================================
+// パターンマッチング: Z3 条件生成 + 変数バインド + 反例フォーマット
+// =============================================================================
+
+/// パターンから Z3 の Bool 条件を生成する（再帰的: ネストパターン対応 [B]）
+///
+/// - Wildcard / Variable → true（常にマッチ）
+/// - Literal(n) → target == n
+/// - Variant { name, fields } → (tag == variant_index) ∧ (フィールドの再帰条件)
+fn pattern_to_z3_condition<'a>(
+    ctx: &'a Context,
+    pattern: &Pattern,
+    target: &Dynamic<'a>,
+    env: &mut Env<'a>,
+    vc: &VCtx<'a>,
+    solver_opt: Option<&Solver<'a>>,
+) -> MumeiResult<Bool<'a>> {
+    match pattern {
+        Pattern::Wildcard | Pattern::Variable(_) => {
+            // 常にマッチ
+            Ok(Bool::from_bool(ctx, true))
+        },
+        Pattern::Literal(n) => {
+            // target == n
+            let target_int = target.as_int().unwrap_or(Int::new_const(ctx, "__match_target"));
+            let lit = Int::from_i64(ctx, *n);
+            Ok(target_int._eq(&lit))
+        },
+        Pattern::Variant { variant_name, fields } => {
+            // Enum の Variant パターン: tag 値で判定
+            if let Some(enum_def) = find_enum_by_variant(variant_name) {
+                let variant_idx = enum_def.variants.iter()
+                    .position(|v| v.name == *variant_name)
+                    .unwrap_or(0) as i64;
+
+                // target の tag 部分（整数として扱う）
+                let tag = target.as_int().unwrap_or(Int::new_const(ctx, "__match_tag"));
+                let tag_match = tag._eq(&Int::from_i64(ctx, variant_idx));
+
+                // B. ネストパターンの再帰解体:
+                // 各フィールドに対して再帰的に条件を生成
+                let variant_def = &enum_def.variants[variant_idx as usize];
+                let mut field_conditions: Vec<Bool> = vec![tag_match];
+
+                for (i, field_pattern) in fields.iter().enumerate() {
+                    // フィールドのシンボリック変数を生成
+                    let field_sym_name = format!("__variant_{}_{}", variant_name, i);
+                    let field_sym: Dynamic = if i < variant_def.fields.len() {
+                        let base = resolve_base_type(&variant_def.fields[i]);
+                        match base.as_str() {
+                            "f64" => Float::new_const(ctx, field_sym_name.as_str(), 11, 53).into(),
+                            _ => Int::new_const(ctx, field_sym_name.as_str()).into(),
+                        }
+                    } else {
+                        Int::new_const(ctx, field_sym_name.as_str()).into()
+                    };
+
+                    // 再帰的にフィールドパターンの条件を生成
+                    let field_cond = pattern_to_z3_condition(ctx, field_pattern, &field_sym, env, vc, solver_opt)?;
+                    field_conditions.push(field_cond);
+                }
+
+                let cond_refs: Vec<&Bool> = field_conditions.iter().collect();
+                Ok(Bool::and(ctx, &cond_refs))
+            } else {
+                // Enum 定義が見つからない場合は、リテラル的にハッシュ比較
+                // （将来的にはエラーにすべき）
+                let tag = target.as_int().unwrap_or(Int::new_const(ctx, "__match_tag"));
+                let hash = variant_name.bytes().fold(0i64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as i64));
+                Ok(tag._eq(&Int::from_i64(ctx, hash)))
+            }
+        },
+    }
+}
+
+/// パターンから変数バインドを env に登録する（再帰的: ネストパターン対応 [B]）
+fn pattern_bind_variables<'a>(
+    ctx: &'a Context,
+    pattern: &Pattern,
+    target: &Dynamic<'a>,
+    env: &mut Env<'a>,
+) {
+    match pattern {
+        Pattern::Variable(name) => {
+            // 変数バインド: target の値を env に登録
+            env.insert(name.clone(), target.clone());
+        },
+        Pattern::Variant { variant_name, fields } => {
+            // B. ネストパターンの再帰解体:
+            // 各フィールドのシンボリック変数を生成し、再帰的にバインド
+            if let Some(enum_def) = find_enum_by_variant(variant_name) {
+                if let Some(variant_def) = enum_def.variants.iter().find(|v| v.name == *variant_name) {
+                    for (i, field_pattern) in fields.iter().enumerate() {
+                        let field_sym_name = format!("__variant_{}_{}", variant_name, i);
+                        let field_sym: Dynamic = if i < variant_def.fields.len() {
+                            let base = resolve_base_type(&variant_def.fields[i]);
+                            match base.as_str() {
+                                "f64" => Float::new_const(ctx, field_sym_name.as_str(), 11, 53).into(),
+                                _ => Int::new_const(ctx, field_sym_name.as_str()).into(),
+                            }
+                        } else {
+                            Int::new_const(ctx, field_sym_name.as_str()).into()
+                        };
+                        env.insert(field_sym_name.clone(), field_sym.clone());
+                        // 再帰的にバインド
+                        pattern_bind_variables(ctx, field_pattern, &field_sym, env);
+                    }
+                }
+            }
+        },
+        Pattern::Wildcard | Pattern::Literal(_) => {
+            // バインドなし
+        },
+    }
+}
+
+/// Z3 Model から反例の文字列表現を生成する
+fn format_counterexample(
+    model: &z3::Model,
+    target: &Dynamic,
+    arms: &[MatchArm],
+) -> String {
+    // ターゲット変数の具体的な値を取得
+    if let Some(target_val) = model.eval(target, true) {
+        let target_str = format!("{}", target_val);
+
+        // Enum の場合: tag 値からバリアント名を逆引き
+        if let Some(target_int) = target_val.as_int() {
+            // tag 値を取得（Z3 の Int を文字列経由で解析）
+            let tag_str = format!("{}", target_int);
+            if let Ok(tag_val) = tag_str.parse::<i64>() {
+                // 全 Enum 定義を走査して、tag 値に対応するバリアントを探す
+                if let Ok(enum_env) = ENUM_ENV.lock() {
+                    for (enum_name, enum_def) in enum_env.iter() {
+                        if let Some(variant) = enum_def.variants.get(tag_val as usize) {
+                            return format!("{}::{} (tag={}, enum={})", enum_name, variant.name, tag_val, enum_name);
+                        }
+                    }
+                }
+            }
+            // 整数リテラルとしてフォールバック
+            return format!("value = {}", tag_str);
+        }
+
+        format!("value = {}", target_str)
+    } else {
+        // 評価に失敗した場合、アームの情報からヒントを生成
+        let covered: Vec<String> = arms.iter().map(|arm| {
+            match &arm.pattern {
+                Pattern::Literal(n) => format!("{}", n),
+                Pattern::Variant { variant_name, .. } => variant_name.clone(),
+                Pattern::Variable(name) => format!("_{} (bind)", name),
+                Pattern::Wildcard => "_".to_string(),
+            }
+        }).collect();
+        format!("(could not evaluate; covered patterns: [{}])", covered.join(", "))
     }
 }
 

@@ -33,6 +33,8 @@ pub enum Expr {
     While {
         cond: Box<Expr>,
         invariant: Box<Expr>,
+        /// 停止性証明用の減少式（Ranking Function）。None なら停止性チェックをスキップ
+        decreases: Option<Box<Expr>>,
         body: Box<Expr>,
     },
     Call(String, Vec<Expr>),
@@ -362,8 +364,15 @@ fn parse_primary(tokens: &[String], pos: &mut usize) -> Expr {
         if *pos < tokens.len() && tokens[*pos] == "invariant" {
             *pos += 1;
             let inv = parse_implies(tokens, pos);
+            // オプション: decreases 句（停止性証明用の減少式）
+            let decreases = if *pos < tokens.len() && tokens[*pos] == "decreases" {
+                *pos += 1;
+                Some(Box::new(parse_implies(tokens, pos)))
+            } else {
+                None
+            };
             let body = parse_block_or_expr(tokens, pos);
-            return Expr::While { cond: Box::new(cond), invariant: Box::new(inv), body: Box::new(body) };
+            return Expr::While { cond: Box::new(cond), invariant: Box::new(inv), decreases, body: Box::new(body) };
         }
         panic!("Mumei loops require an 'invariant'.");
     }

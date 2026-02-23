@@ -104,11 +104,15 @@ fn format_expr_rust(expr: &Expr) -> String {
             )
         },
 
-        Expr::While { cond, invariant, body } => {
+        Expr::While { cond, invariant, decreases, body } => {
             let cond_str = format_expr_rust(cond);
+            let dec_comment = decreases.as_ref()
+                .map(|d| format!(" decreases: {}", format_expr_rust(d)))
+                .unwrap_or_default();
             format!(
-                "{{ // invariant: {}\n        while {} {{ {} }} \n    }}",
+                "{{ // invariant: {}{}\n        while {} {{ {} }} \n    }}",
                 format_expr_rust(invariant),
+                dec_comment,
                 strip_parens(&cond_str),
                 format_expr_rust(body)
             )

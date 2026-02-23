@@ -249,7 +249,7 @@ fn compile_expr<'a>(
             Ok(phi.as_basic_value())
         },
 
-        Expr::While { cond, invariant: _, body } => {
+        Expr::While { cond, invariant: _, decreases: _, body } => {
             let header_block = context.append_basic_block(*function, "loop.header");
             let body_block = context.append_basic_block(*function, "loop.body");
             let after_block = context.append_basic_block(*function, "loop.after");

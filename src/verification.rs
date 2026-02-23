@@ -447,7 +447,7 @@ fn expr_to_z3<'a>(
             for stmt in stmts { last = expr_to_z3(vc, stmt, env, solver_opt)?; }
             Ok(last)
         },
-        Expr::While { cond, invariant, body } => {
+        Expr::While { cond, invariant, decreases, body } => {
             // Loop Invariant 検証ロジック
             if let Some(solver) = solver_opt {
                 let inv = expr_to_z3(vc, invariant, env, None)?
@@ -466,20 +466,78 @@ fn expr_to_z3<'a>(
                 let c = expr_to_z3(vc, cond, env, None)?
                     .as_bool().ok_or(MumeiError::TypeError("While condition must be boolean".into()))?;
 
-                solver.push();
-                solver.assert(&inv);
-                solver.assert(&c);
-                expr_to_z3(vc, body, env, Some(solver))?;
+                // Termination Check: decreases 句が指定されている場合、停止性を検証
+                if let Some(dec_expr) = decreases {
+                    // V_before: ループ本体実行前の減少式の値
+                    let v_before = expr_to_z3(vc, dec_expr, env, None)?
+                        .as_int().ok_or(MumeiError::TypeError("decreases expression must be integer".into()))?;
 
-                let inv_after = expr_to_z3(vc, invariant, env, None)?
-                    .as_bool().ok_or(MumeiError::TypeError("Invariant must be boolean".into()))?;
-
-                solver.assert(&inv_after.not());
-                if solver.check() == SatResult::Sat {
+                    // A. 下界の証明: invariant && cond => V >= 0
+                    solver.push();
+                    solver.assert(&inv);
+                    solver.assert(&c);
+                    solver.assert(&v_before.lt(&Int::from_i64(ctx, 0)));
+                    if solver.check() == SatResult::Sat {
+                        solver.pop(1);
+                        return Err(MumeiError::VerificationError(
+                            "Termination check failed: decreases expression may be negative".into()
+                        ));
+                    }
                     solver.pop(1);
-                    return Err(MumeiError::VerificationError("Invariant not preserved".into()));
+
+                    // body を実行して env を更新
+                    solver.push();
+                    solver.assert(&inv);
+                    solver.assert(&c);
+                    expr_to_z3(vc, body, env, Some(solver))?;
+
+                    // V_after: ループ本体実行後の減少式の値
+                    let v_after = expr_to_z3(vc, dec_expr, env, None)?
+                        .as_int().ok_or(MumeiError::TypeError("decreases expression must be integer".into()))?;
+
+                    // B. 厳密な減少の証明: V' < V が成り立たない反例があるか
+                    solver.assert(&v_after.ge(&v_before));
+                    if solver.check() == SatResult::Sat {
+                        solver.pop(1);
+                        return Err(MumeiError::VerificationError(
+                            "Termination check failed: decreases expression does not strictly decrease".into()
+                        ));
+                    }
+                    solver.pop(1);
+
+                    // Invariant preservation も改めて検証
+                    let inv_after = expr_to_z3(vc, invariant, env, None)?
+                        .as_bool().ok_or(MumeiError::TypeError("Invariant must be boolean".into()))?;
+                    solver.push();
+                    solver.assert(&inv);
+                    solver.assert(&c);
+                    expr_to_z3(vc, body, env, Some(solver))?;
+                    let inv_after2 = expr_to_z3(vc, invariant, env, None)?
+                        .as_bool().ok_or(MumeiError::TypeError("Invariant must be boolean".into()))?;
+                    solver.assert(&inv_after2.not());
+                    if solver.check() == SatResult::Sat {
+                        solver.pop(1);
+                        return Err(MumeiError::VerificationError("Invariant not preserved".into()));
+                    }
+                    solver.pop(1);
+                    let _ = inv_after; // suppress unused warning
+                } else {
+                    // decreases なし: 従来の invariant preservation のみ
+                    solver.push();
+                    solver.assert(&inv);
+                    solver.assert(&c);
+                    expr_to_z3(vc, body, env, Some(solver))?;
+
+                    let inv_after = expr_to_z3(vc, invariant, env, None)?
+                        .as_bool().ok_or(MumeiError::TypeError("Invariant must be boolean".into()))?;
+
+                    solver.assert(&inv_after.not());
+                    if solver.check() == SatResult::Sat {
+                        solver.pop(1);
+                        return Err(MumeiError::VerificationError("Invariant not preserved".into()));
+                    }
+                    solver.pop(1);
                 }
-                solver.pop(1);
             }
 
             let inv = expr_to_z3(vc, invariant, env, None)?

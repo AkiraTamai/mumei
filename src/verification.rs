@@ -8,12 +8,27 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use once_cell::sync::Lazy;
 
+pub type MumeiResult<T> = Result<T, String>;
+type Env<'a> = HashMap<String, Dynamic<'a>>;
+type DynResult<'a> = MumeiResult<Dynamic<'a>>;
+
+struct VerificationContext<'a> {
+    ctx: &'a Context,
+    arr: &'a Array<'a>,
+}
+
+impl<'a> VerificationContext<'a> {
+    fn new(ctx: &'a Context, arr: &'a Array<'a>) -> Self {
+        Self { ctx, arr }
+    }
+}
+
 // --- 型環境のグローバル管理 ---
 static TYPE_ENV: Lazy<Mutex<HashMap<String, RefinedType>>> = Lazy::new(|| {
     Mutex::new(HashMap::new())
 });
 
-pub fn register_type(refined_type: &RefinedType) -> Result<(), String> {
+pub fn register_type(refined_type: &RefinedType) -> MumeiResult<()> {
     let mut env = TYPE_ENV.lock().map_err(|_| "Failed to lock TYPE_ENV")?;
     env.insert(refined_type.name.clone(), refined_type.clone());
     Ok(())
@@ -30,7 +45,7 @@ pub fn resolve_base_type(type_name: &str) -> String {
     type_name.to_string()
 }
 
-pub fn verify(atom: &Atom, output_dir: &Path) -> Result<(), String> {
+pub fn verify(atom: &Atom, output_dir: &Path) -> MumeiResult<()> {
     let mut cfg = Config::new();
     cfg.set_timeout_msec(10000);
     let ctx = Context::new(&cfg);
@@ -40,7 +55,8 @@ pub fn verify(atom: &Atom, output_dir: &Path) -> Result<(), String> {
     // 配列のモデル（簡易版: i64 -> i64）。将来的に型ごとに Array Sort を分ける拡張が可能
     let arr = Array::new_const(&ctx, "arr", &int_sort, &int_sort);
 
-    let mut env: HashMap<String, Dynamic> = HashMap::new();
+    let mut env: Env = HashMap::new();
+    let vctx = VerificationContext::new(&ctx, &arr);
 
     // 1. 量子化制約の処理
     for q in &atom.forall_constraints {
@@ -54,7 +70,7 @@ pub fn verify(atom: &Atom, output_dir: &Path) -> Result<(), String> {
 
         let range_cond = Bool::and(&ctx, &[&i.ge(&start), &i.lt(&end)]);
         let expr_ast = parse_expression(&q.condition);
-        let condition_z3 = expr_to_z3(&ctx, &arr, &expr_ast, &mut env, None)?
+        let condition_z3 = expr_to_z3(&vctx, &expr_ast, &mut env, None)?
             .as_bool().ok_or("Condition must be boolean")?;
 
         let quantifier_expr = match q.q_type {
@@ -70,7 +86,7 @@ pub fn verify(atom: &Atom, output_dir: &Path) -> Result<(), String> {
         for param in &atom.params {
             if let Some(type_name) = &param.type_name {
                 if let Some(refined) = type_defs.get(type_name) {
-                    apply_refinement_constraint(&ctx, &arr, &solver, &param.name, refined, &mut env)?;
+                    apply_refinement_constraint(&vctx, &solver, &param.name, refined, &mut env)?;
                 }
             }
         }

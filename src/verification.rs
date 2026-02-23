@@ -70,6 +70,7 @@ pub struct ModuleEnv {
     pub verified: bool,
 }
 
+#[allow(dead_code)]
 impl ModuleEnv {
     pub fn new() -> Self {
         Self::default()

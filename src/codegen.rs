@@ -6,7 +6,7 @@ use inkwell::IntPredicate;
 use inkwell::FloatPredicate;
 use inkwell::AddressSpace;
 use crate::parser::{Atom, Expr, Op, parse_expression};
-use crate::verification::{resolve_base_type, MumeiError, MumeiResult};
+use crate::verification::{resolve_base_type, get_struct_def, MumeiError, MumeiResult};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -305,6 +305,98 @@ fn compile_expr<'a>(
             Ok(val)
         },
 
+        Expr::StructInit { type_name, fields } => {
+            // 構造体の各フィールドを評価し、フラットな変数として variables に登録
+            // LLVM 上では各フィールドを独立した値として扱う（値渡しセマンティクス）
+            let mut last_val: BasicValueEnum = context.i64_type().const_int(0, false).into();
+            if let Some(sdef) = get_struct_def(type_name) {
+                // 構造体定義に基づいてフィールド型を解決
+                for (field_name, field_expr) in fields {
+                    let val = compile_expr(context, builder, module, function, field_expr, variables, array_ptrs)?;
+                    let qualified = format!("__struct_{}_{}", type_name, field_name);
+                    variables.insert(qualified, val);
+                    last_val = val;
+                }
+                // 構造体定義のフィールド順で LLVM StructType を構築
+                let field_types: Vec<inkwell::types::BasicTypeEnum> = sdef.fields.iter().map(|f| {
+                    let base = resolve_base_type(&f.type_name);
+                    match base.as_str() {
+                        "f64" => context.f64_type().into(),
+                        _ => context.i64_type().into(),
+                    }
+                }).collect();
+                let struct_type = context.struct_type(
+                    &field_types.iter().map(|t| (*t).into()).collect::<Vec<_>>(), false
+                );
+                let mut struct_val = struct_type.get_undef();
+                for (i, (field_name, _)) in fields.iter().enumerate() {
+                    let qualified = format!("__struct_{}_{}", type_name, field_name);
+                    if let Some(val) = variables.get(&qualified) {
+                        struct_val = llvm!(builder.build_insert_value(struct_val, *val, i as u32, &format!("struct_{}", field_name)))
+                            .into_struct_value();
+                    }
+                }
+                last_val = struct_val.into();
+            } else {
+                // 構造体定義が見つからない場合はフィールドだけ登録
+                for (field_name, field_expr) in fields {
+                    let val = compile_expr(context, builder, module, function, field_expr, variables, array_ptrs)?;
+                    let qualified = format!("__struct_{}_{}", type_name, field_name);
+                    variables.insert(qualified, val);
+                    last_val = val;
+                }
+            }
+            Ok(last_val)
+        },
 
+        Expr::FieldAccess(expr, field_name) => {
+            if let Expr::Variable(var_name) = expr.as_ref() {
+                // フラット変数として探す
+                let candidates = [
+                    format!("__struct_{}_{}", var_name, field_name),
+                    format!("{}_{}", var_name, field_name),
+                ];
+                for candidate in &candidates {
+                    if let Some(val) = variables.get(candidate) {
+                        return Ok(*val);
+                    }
+                }
+                // 構造体値から extract_value で取得を試みる
+                if let Some(struct_val) = variables.get(var_name) {
+                    if struct_val.is_struct_value() {
+                        // フィールドインデックスを型定義から解決
+                        // 簡易実装: 全登録済み構造体から探す
+                        let sv = struct_val.into_struct_value();
+                        // フィールド名からインデックスを推定（構造体定義を参照）
+                        if let Some(idx) = find_field_index(var_name, field_name) {
+                            let extracted = llvm!(builder.build_extract_value(sv, idx, &format!("{}.{}", var_name, field_name)));
+                            return Ok(extracted);
+                        }
+                    }
+                }
+                Err(MumeiError::CodegenError(format!("Field '{}' not found on '{}'", field_name, var_name)))
+            } else {
+                let base_val = compile_expr(context, builder, module, function, expr, variables, array_ptrs)?;
+                if base_val.is_struct_value() {
+                    // インデックス 0 をフォールバック
+                    let sv = base_val.into_struct_value();
+                    let extracted = llvm!(builder.build_extract_value(sv, 0, &format!("field_{}", field_name)));
+                    Ok(extracted)
+                } else {
+                    Err(MumeiError::CodegenError(format!("Cannot access field '{}' on non-struct value", field_name)))
+                }
+            }
+        },
     }
+}
+
+/// 構造体定義からフィールド名のインデックスを検索
+fn find_field_index(type_or_var_name: &str, field_name: &str) -> Option<u32> {
+    // STRUCT_ENV に登録された全構造体を探索
+    // var_name が構造体型名と一致する場合、または型名を推定
+    if let Some(sdef) = get_struct_def(type_or_var_name) {
+        return sdef.fields.iter().position(|f| f.name == field_name).map(|i| i as u32);
+    }
+    // フォールバック: 全構造体定義を走査してフィールド名が一致するものを探す
+    None
 }

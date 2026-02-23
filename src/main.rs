@@ -56,6 +56,16 @@ fn main() {
                 }
             }
 
+            // --- 構造体定義の登録 ---
+            Item::StructDef(struct_def) => {
+                let field_names: Vec<&str> = struct_def.fields.iter().map(|f| f.name.as_str()).collect();
+                println!("  🏗️  Registered Struct: '{}' (fields: {})", struct_def.name, field_names.join(", "));
+                if let Err(e) = verification::register_struct(&struct_def) {
+                    eprintln!("  ❌ Struct Registration Failed: {}", e);
+                    std::process::exit(1);
+                }
+            }
+
             // --- Atom の処理 ---
             Item::Atom(atom) => {
                 atom_count += 1;

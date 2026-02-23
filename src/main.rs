@@ -98,12 +98,19 @@ fn main() {
                 println!("  ✨ [1/4] Polishing Syntax: Atom '{}' identified.", atom.name);
 
                 // --- 2. Verification (形式検証: Z3 + StdLib) ---
-                // 配列境界チェックや浮動小数点演算の検証を含む
-                match verification::verify(&atom, output_dir) {
-                    Ok(_) => println!("  ⚖️  [2/4] Verification: Passed. Logic verified with Z3."),
-                    Err(e) => {
-                        eprintln!("  ❌ [2/4] Verification: Failed! Flaw detected: {}", e);
-                        std::process::exit(1);
+                // インポートされた atom は検証済み（契約のみ信頼）なのでスキップ
+                if verification::is_verified(&atom.name) {
+                    println!("  ⚖️  [2/4] Verification: Skipped (imported, contract-trusted).");
+                } else {
+                    match verification::verify(&atom, output_dir) {
+                        Ok(_) => {
+                            println!("  ⚖️  [2/4] Verification: Passed. Logic verified with Z3.");
+                            verification::mark_verified(&atom.name);
+                        },
+                        Err(e) => {
+                            eprintln!("  ❌ [2/4] Verification: Failed! Flaw detected: {}", e);
+                            std::process::exit(1);
+                        }
                     }
                 }
 

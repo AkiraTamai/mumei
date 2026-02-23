@@ -74,6 +74,7 @@ fn resolve_imports_recursive(
     items: &[Item],
     base_dir: &Path,
     ctx: &mut ResolverContext,
+    cache: &mut VerificationCache,
 ) -> MumeiResult<()> {
     for item in items {
         if let Item::Import(import_decl) = item {
@@ -96,13 +97,57 @@ fn resolve_imports_recursive(
                     format!("Failed to read imported module '{}': {}", import_decl.path, e)
                 )
             })?;
+
+            let path_key = resolved_path.to_string_lossy().to_string();
+            let source_hash = compute_hash(&source);
+
+            // キャッシュヒット判定: ソースハッシュが一致すれば再パース不要
+            if let Some(entry) = cache.entries.get(&path_key) {
+                if entry.source_hash == source_hash {
+                    // キャッシュから atom を検証済みとしてマーク（body 再検証スキップ）
+                    // ただし型・構造体・atom の登録は必要なので、パースは行う
+                }
+            }
+
             let imported_items = parser::parse_module(&source);
             let import_base_dir = resolved_path.parent().unwrap_or(Path::new("."));
             // 再帰的にインポートを解決（インポートされたモジュール内の import も処理）
-            resolve_imports_recursive(&imported_items, import_base_dir, ctx)?;
+            resolve_imports_recursive(&imported_items, import_base_dir, ctx, cache)?;
             // インポートされたモジュールの定義をグローバル環境に登録
             let alias_prefix = import_decl.alias.as_deref();
             register_imported_items(&imported_items, alias_prefix)?;
+
+            // インポートされた atom を検証済みとしてマーク
+            // → main.rs で verify() をスキップし、契約のみ信頼する
+            let mut verified_atoms = Vec::new();
+            let mut type_names = Vec::new();
+            let mut struct_names = Vec::new();
+            for imported_item in &imported_items {
+                match imported_item {
+                    Item::Atom(atom) => {
+                        verification::mark_verified(&atom.name);
+                        verified_atoms.push(atom.name.clone());
+                        // FQN でもマーク
+                        if let Some(prefix) = alias_prefix {
+                            let fqn = format!("{}::{}", prefix, atom.name);
+                            verification::mark_verified(&fqn);
+                            verified_atoms.push(fqn);
+                        }
+                    }
+                    Item::TypeDef(t) => type_names.push(t.name.clone()),
+                    Item::StructDef(s) => struct_names.push(s.name.clone()),
+                    Item::Import(_) => {}
+                }
+            }
+
+            // キャッシュを更新
+            cache.entries.insert(path_key, CacheEntry {
+                source_hash,
+                verified_atoms,
+                type_names,
+                struct_names,
+            });
+
             // ロード完了
             ctx.loading.remove(&resolved_path);
             ctx.loaded.insert(resolved_path, imported_items);
@@ -164,4 +209,30 @@ fn resolve_path(import_path: &str, base_dir: &Path) -> MumeiResult<PathBuf> {
         )
     })?;
     Ok(canonical)
+}
+
+// =============================================================================
+// 検証キャッシュの永続化
+// =============================================================================
+
+/// ソースコードの SHA-256 ハッシュを計算する
+fn compute_hash(source: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(source.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+/// キャッシュファイルを読み込む。存在しない場合は空のキャッシュを返す。
+fn load_cache(cache_path: &Path) -> VerificationCache {
+    fs::read_to_string(cache_path)
+        .ok()
+        .and_then(|content| serde_json::from_str(&content).ok())
+        .unwrap_or_default()
+}
+
+/// キャッシュファイルに書き込む。書き込み失敗は無視する（キャッシュは最適化であり必須ではない）。
+fn save_cache(cache_path: &Path, cache: &VerificationCache) {
+    if let Ok(json) = serde_json::to_string_pretty(cache) {
+        let _ = fs::write(cache_path, json);
+    }
 }

@@ -308,32 +308,76 @@ xcode-select --install
 brew install llvm@18 z3
 ```
 
-### 2) Build & Run
+### 2) Build & Install
 
 ```bash
 ./build_and_run.sh
 
 # Clean build if needed
 ./build_and_run.sh --clean
+
+# Or install globally via cargo
+cargo install --path .
 ```
 
-### 3) Run Example Tests
+### 3) CLI Commands
+
+```bash
+# Full pipeline: verify + codegen (LLVM IR) + transpile (Rust/Go/TypeScript)
+mumei build input.mm -o dist/katana
+
+# Z3 formal verification only (no codegen, no transpile)
+mumei verify input.mm
+
+# Fast syntax check: parse + resolve + monomorphize (no Z3)
+mumei check input.mm
+
+# Generate a new project template
+mumei init my_project
+
+# Backward compatible (same as `mumei build`)
+mumei input.mm -o dist/katana
+```
+
+### 4) Run Example Tests
 
 ```bash
 # Inter-atom call test (compositional verification)
-./target/release/mumei examples/call_test.mm --output dist/call_test
+mumei build examples/call_test.mm -o dist/call_test
 
 # Multi-file import test
-./target/release/mumei examples/import_test/main.mm --output dist/import_test
+mumei build examples/import_test/main.mm -o dist/import_test
 
 # Pattern matching: ATM state machine (enum + match + guards)
-./target/release/mumei examples/match_atm.mm --output dist/match_atm
+mumei build examples/match_atm.mm -o dist/match_atm
 
 # Pattern matching: Safe expression evaluator (zero-division detection)
-./target/release/mumei examples/match_evaluator.mm --output dist/match_evaluator
+mumei build examples/match_evaluator.mm -o dist/match_evaluator
 
 # Standard library import test
-./target/release/mumei tests/test_std_import.mm --output dist/test_std
+mumei build tests/test_std_import.mm -o dist/test_std
+
+# Verify only (no output files)
+mumei verify sword_test.mm
+
+# Quick syntax check
+mumei check sword_test.mm
+```
+
+### 5) Create a New Project
+
+```bash
+mumei init my_app
+cd my_app
+mumei build src/main.mm -o dist/output
+```
+
+Generated structure:
+```
+my_app/
+├── mumei.toml        # Package manifest
+└── src/
+    └── main.mm       # Entry point with std import example
 ```
 
 ### Expected Output
@@ -658,6 +702,9 @@ All generated code includes:
 - [x] **Built-in traits**: `Eq` (reflexive, symmetric), `Ord` (reflexive, transitive), `Numeric` (commutative_add) — auto-implemented for i64/u64/f64
 - [x] **Transpiler: Trait/Impl**: Rust `trait`/`impl` / Go `interface`/methods / TypeScript `interface`/const objects
 - [x] **codegen ModuleEnv**: LLVM IR codegen uses `ModuleEnv` for all type/atom/struct/enum resolution
+- [x] **CLI subcommands**: `mumei build` / `mumei verify` / `mumei check` / `mumei init`
+- [x] **Project scaffolding**: `mumei init my_project` generates `mumei.toml` + `src/main.mm`
+- [x] **Backward compatibility**: `mumei input.mm -o dist/katana` works as `mumei build`
 - [ ] `std/prelude.mm`: Generic standard types (`Option<T>`, `Result<T, E>`, `List<T>`, `Pair<T, U>`)
 - [ ] `Vector<T>` / `HashMap<K, V>` standard library with verified invariants
 - [ ] Equality ensures propagation (`ensures: result == n + 1` for chained call verification)

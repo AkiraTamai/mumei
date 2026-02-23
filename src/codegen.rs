@@ -268,7 +268,7 @@ fn compile_expr<'a>(
         },
 
         Expr::IfThenElse { cond, then_branch, else_branch } => {
-            let cond_val = compile_expr(context, builder, module, function, cond, variables, array_ptrs)?.into_int_value();
+            let cond_val = compile_expr(context, builder, module, function, cond, variables, array_ptrs, module_env)?.into_int_value();
             let cond_bool = llvm!(builder.build_int_compare(IntPredicate::NE, cond_val, context.i64_type().const_int(0, false), "if_cond"));
 
             let then_block = context.append_basic_block(*function, "then");
@@ -278,12 +278,12 @@ fn compile_expr<'a>(
             llvm!(builder.build_conditional_branch(cond_bool, then_block, else_block));
 
             builder.position_at_end(then_block);
-            let then_val = compile_expr(context, builder, module, function, then_branch, variables, array_ptrs)?;
+            let then_val = compile_expr(context, builder, module, function, then_branch, variables, array_ptrs, module_env)?;
             let then_end_block = builder.get_insert_block().unwrap();
             llvm!(builder.build_unconditional_branch(merge_block));
 
             builder.position_at_end(else_block);
-            let else_val = compile_expr(context, builder, module, function, else_branch, variables, array_ptrs)?;
+            let else_val = compile_expr(context, builder, module, function, else_branch, variables, array_ptrs, module_env)?;
             let else_end_block = builder.get_insert_block().unwrap();
             llvm!(builder.build_unconditional_branch(merge_block));
 
@@ -312,12 +312,12 @@ fn compile_expr<'a>(
                 variables.insert(name.clone(), phi.as_basic_value());
             }
 
-            let cond_val = compile_expr(context, builder, module, function, cond, variables, array_ptrs)?.into_int_value();
+            let cond_val = compile_expr(context, builder, module, function, cond, variables, array_ptrs, module_env)?.into_int_value();
             let cond_bool = llvm!(builder.build_int_compare(IntPredicate::NE, cond_val, context.i64_type().const_int(0, false), "loop_cond"));
             llvm!(builder.build_conditional_branch(cond_bool, body_block, after_block));
 
             builder.position_at_end(body_block);
-            compile_expr(context, builder, module, function, body, variables, array_ptrs)?;
+            compile_expr(context, builder, module, function, body, variables, array_ptrs, module_env)?;
             let body_end_block = builder.get_insert_block().unwrap();
 
             for (name, phi) in &phi_nodes {
@@ -338,13 +338,13 @@ fn compile_expr<'a>(
         Expr::Block(stmts) => {
             let mut last_val = context.i64_type().const_int(0, false).into();
             for stmt in stmts {
-                last_val = compile_expr(context, builder, module, function, stmt, variables, array_ptrs)?;
+                last_val = compile_expr(context, builder, module, function, stmt, variables, array_ptrs, module_env)?;
             }
             Ok(last_val)
         },
 
         Expr::Let { var, value } | Expr::Assign { var, value } => {
-            let val = compile_expr(context, builder, module, function, value, variables, array_ptrs)?;
+            let val = compile_expr(context, builder, module, function, value, variables, array_ptrs, module_env)?;
             variables.insert(var.clone(), val);
             Ok(val)
         },
@@ -353,16 +353,16 @@ fn compile_expr<'a>(
             // 構造体の各フィールドを評価し、フラットな変数として variables に登録
             // LLVM 上では各フィールドを独立した値として扱う（値渡しセマンティクス）
             let mut last_val: BasicValueEnum = context.i64_type().const_int(0, false).into();
-            if let Some(sdef) = get_struct_def(type_name) {
+            if let Some(sdef) = module_env.get_struct(type_name) {
                 // 構造体定義に基づいてフィールド型を解決
                 for (field_name, field_expr) in fields {
-                    let val = compile_expr(context, builder, module, function, field_expr, variables, array_ptrs)?;
+                    let val = compile_expr(context, builder, module, function, field_expr, variables, array_ptrs, module_env)?;
                     let qualified = format!("__struct_{}_{}", type_name, field_name);
                     variables.insert(qualified, val);
                 }
                 // 構造体定義のフィールド順で LLVM StructType を構築
                 let field_types: Vec<inkwell::types::BasicTypeEnum> = sdef.fields.iter().map(|f| {
-                    let base = resolve_base_type(&f.type_name);
+                    let base = module_env.resolve_base_type(&f.type_name);
                     match base.as_str() {
                         "f64" => context.f64_type().into(),
                         _ => context.i64_type().into(),
@@ -383,7 +383,7 @@ fn compile_expr<'a>(
             } else {
                 // 構造体定義が見つからない場合はフィールドだけ登録
                 for (field_name, field_expr) in fields {
-                    let val = compile_expr(context, builder, module, function, field_expr, variables, array_ptrs)?;
+                    let val = compile_expr(context, builder, module, function, field_expr, variables, array_ptrs, module_env)?;
                     let qualified = format!("__struct_{}_{}", type_name, field_name);
                     variables.insert(qualified, val);
                     last_val = val;
@@ -408,7 +408,7 @@ fn compile_expr<'a>(
             // ネストパターンは再帰的に条件を AND 結合する。
             // これにより CFG が線形な if-else チェーンになり、
             // switch_block の後付け挿入問題を完全に解消する。
-            let target_val = compile_expr(context, builder, module, function, target, variables, array_ptrs)?;
+            let target_val = compile_expr(context, builder, module, function, target, variables, array_ptrs, module_env)?;
 
             let merge_block = context.append_basic_block(*function, "match.merge");
             let unreachable_block = context.append_basic_block(*function, "match.unreachable");
@@ -441,7 +441,7 @@ fn compile_expr<'a>(
 
                 // --- Step 1: パターン条件の生成（再帰的） ---
                 let pattern_matches = compile_pattern_test(
-                    context, builder, &arm.pattern, target_val, variables,
+                    context, builder, &arm.pattern, target_val, variables, module_env,
                 )?;
 
                 // --- Step 2: ガード条件 ---
@@ -449,7 +449,7 @@ fn compile_expr<'a>(
                     // ガード評価のためにパターン変数を一時バインド
                     let mut guard_vars = variables.clone();
                     bind_pattern_variables(&arm.pattern, target_val, &mut guard_vars);
-                    let guard_val = compile_expr(context, builder, module, function, guard, &mut guard_vars, array_ptrs)?.into_int_value();
+                    let guard_val = compile_expr(context, builder, module, function, guard, &mut guard_vars, array_ptrs, module_env)?.into_int_value();
                     let guard_bool = llvm!(builder.build_int_compare(
                         IntPredicate::NE, guard_val,
                         context.i64_type().const_int(0, false), "guard_cond"
@@ -468,7 +468,7 @@ fn compile_expr<'a>(
                 let mut arm_vars = variables.clone();
                 bind_pattern_variables(&arm.pattern, target_val, &mut arm_vars);
 
-                let body_val = compile_expr(context, builder, module, function, &arm.body, &mut arm_vars, array_ptrs)?;
+                let body_val = compile_expr(context, builder, module, function, &arm.body, &mut arm_vars, array_ptrs, module_env)?;
                 let body_end = builder.get_insert_block().unwrap();
                 llvm!(builder.build_unconditional_branch(merge_block));
                 incoming.push((body_val, body_end));

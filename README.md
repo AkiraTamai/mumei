@@ -300,28 +300,27 @@ body: {
 
 ## 📄 Inter-atom Call Test (`examples/call_test.mm`)
 
-Demonstrates contract-based verification across atom calls:
+Demonstrates contract-based verification across atom calls. The verifier proves each caller's postcondition using only the callee's `ensures` contract — without re-verifying the callee's body:
 
 ```mumei
 type Nat = i64 where v >= 0;
 
-// Base atom: guaranteed to return >= 1
 atom increment(n: Nat)
 requires: n >= 0;
 ensures: result >= 1;
 body: { n + 1 };
 
-// Calls increment twice — verifier proves result >= 2
-// without re-verifying increment's body
+// Calls increment twice — verifier uses increment's
+// ensures (result >= 1) to prove this postcondition
 atom double_increment(n: Nat)
 requires: n >= 0;
-ensures: result >= 2;
+ensures: result >= 1;
 body: {
     let x = increment(n);
     increment(x)
 };
 
-// Calls increment in a safe_div context
+// Calls increment on a sum
 atom safe_add_one(a: Nat, b: Nat)
 requires: a >= 0 && b >= 0;
 ensures: result >= 1;

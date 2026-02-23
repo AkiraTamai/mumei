@@ -1,4 +1,4 @@
-use crate::parser::{Expr, Op, Atom, ImportDecl, parse_expression};
+use crate::parser::{Expr, Op, Atom, ImportDecl, EnumDef, StructDef, parse_expression};
 use crate::verification::resolve_base_type;
 
 /// import 宣言から Rust のモジュールヘッダーを生成する
@@ -18,6 +18,43 @@ pub fn transpile_module_header_rust(imports: &[ImportDecl], _module_name: &str) 
     if !lines.is_empty() {
         lines.push(String::new()); // 空行で区切り
     }
+    lines.join("\n")
+}
+
+/// Enum 定義を Rust の enum に変換する
+pub fn transpile_enum_rust(enum_def: &EnumDef) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!("/// Verified Enum: {}", enum_def.name));
+    lines.push(format!("#[derive(Debug, Clone, Copy, PartialEq)]"));
+    lines.push(format!("pub enum {} {{", enum_def.name));
+    for variant in &enum_def.variants {
+        if variant.fields.is_empty() {
+            lines.push(format!("    {},", variant.name));
+        } else {
+            let field_types: Vec<String> = variant.fields.iter()
+                .map(|f| map_type_rust(Some(f.as_str())))
+                .collect();
+            lines.push(format!("    {}({}),", variant.name, field_types.join(", ")));
+        }
+    }
+    lines.push("}".to_string());
+    lines.join("\n")
+}
+
+/// Struct 定義を Rust の struct に変換する
+pub fn transpile_struct_rust(struct_def: &StructDef) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!("/// Verified Struct: {}", struct_def.name));
+    lines.push(format!("#[derive(Debug, Clone)]"));
+    lines.push(format!("pub struct {} {{", struct_def.name));
+    for field in &struct_def.fields {
+        let rust_type = map_type_rust(Some(field.type_name.as_str()));
+        if let Some(constraint) = &field.constraint {
+            lines.push(format!("    /// where {}", constraint));
+        }
+        lines.push(format!("    pub {}: {},", field.name, rust_type));
+    }
+    lines.push("}".to_string());
     lines.join("\n")
 }
 

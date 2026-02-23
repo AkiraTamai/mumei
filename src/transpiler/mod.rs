@@ -2,7 +2,7 @@ pub mod rust;
 pub mod golang;
 pub mod typescript;
 
-use crate::parser::{Atom, ImportDecl};
+use crate::parser::{Atom, ImportDecl, EnumDef, StructDef};
 
 #[derive(Copy, Clone)]
 pub enum TargetLanguage {
@@ -16,6 +16,24 @@ pub fn transpile(atom: &Atom, lang: TargetLanguage) -> String {
         TargetLanguage::TypeScript => typescript::transpile_to_ts(atom),
         TargetLanguage::Rust => rust::transpile_to_rust(atom),
         TargetLanguage::Go => golang::transpile_to_go(atom),
+    }
+}
+
+/// Enum 定義を各言語の型定義に変換する
+pub fn transpile_enum(enum_def: &EnumDef, lang: TargetLanguage) -> String {
+    match lang {
+        TargetLanguage::Rust => rust::transpile_enum_rust(enum_def),
+        TargetLanguage::Go => golang::transpile_enum_go(enum_def),
+        TargetLanguage::TypeScript => typescript::transpile_enum_ts(enum_def),
+    }
+}
+
+/// Struct 定義を各言語の型定義に変換する
+pub fn transpile_struct(struct_def: &StructDef, lang: TargetLanguage) -> String {
+    match lang {
+        TargetLanguage::Rust => rust::transpile_struct_rust(struct_def),
+        TargetLanguage::Go => golang::transpile_struct_go(struct_def),
+        TargetLanguage::TypeScript => typescript::transpile_struct_ts(struct_def),
     }
 }
 

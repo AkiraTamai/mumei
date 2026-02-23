@@ -847,9 +847,11 @@ fn parse_primary(tokens: &[String], pos: &mut usize) -> Expr {
         while *pos < tokens.len() && tokens[*pos] != "}" {
             let pattern = parse_pattern(tokens, pos);
             // オプション: ガード条件 "if cond"
+            // parse_logical_or を使い、`=>` を含意演算子として消費しない。
+            // これにより `Pattern if cond => body` の `=>` がアーム区切りとして正しく処理される。
             let guard = if *pos < tokens.len() && tokens[*pos] == "if" {
                 *pos += 1;
-                Some(Box::new(parse_implies(tokens, pos)))
+                Some(Box::new(parse_logical_or(tokens, pos)))
             } else {
                 None
             };

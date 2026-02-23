@@ -163,7 +163,20 @@ fn expr_to_z3<'a>(
         },
         Expr::Call(name, args) => {
             match name.as_str() {
-                "len" => Ok(Int::new_const(ctx, "arr_len").into()),
+                "len" => {
+                    // len(arr_name) → 配列名に紐づくシンボリック長を返す
+                    // len_<name> >= 0 の制約を自動付与
+                    let arr_name = if !args.is_empty() {
+                        if let Expr::Variable(name) = &args[0] { name.clone() } else { "arr".to_string() }
+                    } else { "arr".to_string() };
+                    let len_name = format!("len_{}", arr_name);
+                    let len_var = Int::new_const(ctx, len_name.as_str());
+                    if let Some(solver) = solver_opt {
+                        solver.assert(&len_var.ge(&Int::from_i64(ctx, 0)));
+                    }
+                    env.insert(len_name, len_var.clone().into());
+                    Ok(len_var.into())
+                },
                 "sqrt" => {
                     // Z3 0.12 の Float には sqrt メソッドがないため、
                     // シンボリック変数として扱い、sqrt(x) >= 0 の制約を付与
@@ -187,15 +200,23 @@ fn expr_to_z3<'a>(
             let idx = expr_to_z3(ctx, arr, index_expr, env, solver_opt)?
                 .as_int().ok_or("Index must be integer")?;
 
-            // Standard Library: 境界チェックの自動挿入
+            // 配列名に紐づく長さシンボルを使った境界チェック
             if let Some(solver) = solver_opt {
-                let len = Int::new_const(ctx, "arr_len");
+                let len_name = format!("len_{}", name);
+                let len = if let Some(existing) = env.get(&len_name) {
+                    existing.as_int().unwrap_or(Int::new_const(ctx, len_name.as_str()))
+                } else {
+                    let l = Int::new_const(ctx, len_name.as_str());
+                    solver.assert(&l.ge(&Int::from_i64(ctx, 0)));
+                    env.insert(len_name.clone(), l.clone().into());
+                    l
+                };
                 let safe = Bool::and(ctx, &[&idx.ge(&Int::from_i64(ctx, 0)), &idx.lt(&len)]);
                 solver.push();
                 solver.assert(&safe.not());
                 if solver.check() == SatResult::Sat {
                     solver.pop(1);
-                    return Err(format!("Verification Error: Potential Out-of-Bounds on '{}'", name));
+                    return Err(format!("Verification Error: Potential Out-of-Bounds on '{}' (index may be < 0 or >= len_{})", name, name));
                 }
                 solver.pop(1);
             }
@@ -228,13 +249,29 @@ fn expr_to_z3<'a>(
                         if let Some(solver) = solver_opt {
                             match op {
                                 Op::Mul => {
-                                    // pos * pos => pos, neg * neg => pos
+                                    // pos * pos => pos
                                     let both_pos = Bool::and(ctx, &[&lf.gt(&zero), &rf.gt(&zero)]);
                                     solver.assert(&both_pos.implies(&result.gt(&zero)));
+                                    // neg * neg => pos
+                                    let both_neg = Bool::and(ctx, &[&lf.lt(&zero), &rf.lt(&zero)]);
+                                    solver.assert(&both_neg.implies(&result.gt(&zero)));
                                 },
                                 Op::Add => {
-                                    // pos + pos => pos
+                                    // pos + non-neg => pos
                                     let both_pos = Bool::and(ctx, &[&lf.gt(&zero), &rf.ge(&zero)]);
+                                    solver.assert(&both_pos.implies(&result.gt(&zero)));
+                                    // non-neg + pos => pos
+                                    let both_pos2 = Bool::and(ctx, &[&lf.ge(&zero), &rf.gt(&zero)]);
+                                    solver.assert(&both_pos2.implies(&result.gt(&zero)));
+                                },
+                                Op::Sub => {
+                                    // a > b >= 0 => a - b >= 0
+                                    let a_gt_b = Bool::and(ctx, &[&lf.gt(&rf), &rf.ge(&zero)]);
+                                    solver.assert(&a_gt_b.implies(&result.ge(&zero)));
+                                },
+                                Op::Div => {
+                                    // pos / pos => pos
+                                    let both_pos = Bool::and(ctx, &[&lf.gt(&zero), &rf.gt(&zero)]);
                                     solver.assert(&both_pos.implies(&result.gt(&zero)));
                                 },
                                 _ => {}

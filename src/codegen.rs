@@ -6,13 +6,13 @@ use inkwell::IntPredicate;
 use inkwell::FloatPredicate;
 use inkwell::AddressSpace;
 use crate::parser::{Atom, Expr, Op, parse_expression};
-use crate::verification::resolve_base_type;
+use crate::verification::{resolve_base_type, MumeiError, MumeiResult};
 use std::collections::HashMap;
 use std::path::Path;
 
 /// LLVM Builder の Result を簡潔にアンラップするマクロ
 macro_rules! llvm {
-    ($e:expr) => { $e.map_err(|e| e.to_string())? }
+    ($e:expr) => { $e.map_err(|e| MumeiError::CodegenError(e.to_string()))? }
 }
 
 /// Fat Pointer 配列の構造体型 { i64, i64* } を生成するヘルパー
@@ -38,7 +38,7 @@ fn resolve_param_type<'a>(context: &'a Context, type_name: Option<&str>) -> inkw
     }
 }
 
-pub fn compile(atom: &Atom, output_path: &Path) -> Result<(), String> {
+pub fn compile(atom: &Atom, output_path: &Path) -> MumeiResult<()> {
     let context = Context::create();
     let module = context.create_module(&atom.name);
     let builder = context.create_builder();
@@ -78,7 +78,7 @@ pub fn compile(atom: &Atom, output_path: &Path) -> Result<(), String> {
     llvm!(builder.build_return(Some(&result_val)));
 
     let path_with_ext = output_path.with_extension("ll");
-    module.print_to_file(&path_with_ext).map_err(|e| e.to_string())?;
+    module.print_to_file(&path_with_ext).map_err(|e| MumeiError::CodegenError(e.to_string()))?;
 
     Ok(())
 }
@@ -91,7 +91,7 @@ fn compile_expr<'a>(
     expr: &Expr,
     variables: &mut HashMap<String, BasicValueEnum<'a>>,
     array_ptrs: &HashMap<String, (BasicValueEnum<'a>, BasicValueEnum<'a>)>,
-) -> Result<BasicValueEnum<'a>, String> {
+) -> MumeiResult<BasicValueEnum<'a>> {
     match expr {
         Expr::Number(n) => Ok(context.i64_type().const_int(*n as u64, true).into()),
 
@@ -99,7 +99,7 @@ fn compile_expr<'a>(
 
         Expr::Variable(name) => variables.get(name)
             .cloned()
-            .ok_or_else(|| format!("Undefined variable: {}", name)),
+            .ok_or_else(|| MumeiError::CodegenError(format!("Undefined variable: {}", name))),
 
         Expr::Call(name, args) => {
             match name.as_str() {
@@ -126,7 +126,7 @@ fn compile_expr<'a>(
                     // フォールバック: 配列が見つからない場合はダミー定数
                     Ok(context.i64_type().const_int(0, false).into())
                 },
-                _ => Err(format!("LLVM Codegen: Unknown function {}", name)),
+                _ => Err(MumeiError::CodegenError(format!("Unknown function {}", name))),
             }
         },
 
@@ -170,7 +170,7 @@ fn compile_expr<'a>(
                 Ok(phi.as_basic_value())
             } else {
                 // 配列が Fat Pointer として登録されていない場合はエラー
-                Err(format!("LLVM Codegen: Array '{}' not found as fat pointer parameter", name))
+                Err(MumeiError::CodegenError(format!("Array '{}' not found as fat pointer parameter", name)))
             }
         },
 
@@ -198,7 +198,7 @@ fn compile_expr<'a>(
                         let cmp = llvm!(builder.build_float_compare(FloatPredicate::OEQ, l, r, "fcmp_tmp"));
                         Ok(llvm!(builder.build_int_z_extend(cmp, context.i64_type(), "fbool_tmp")).into())
                     },
-                    _ => Err(format!("LLVM Codegen: Unsupported float operator {:?}", op)),
+                    _ => Err(MumeiError::CodegenError(format!("Unsupported float operator {:?}", op))),
                 }
             } else {
                 let l = lhs.into_int_value();
@@ -218,7 +218,7 @@ fn compile_expr<'a>(
                         let cmp = llvm!(builder.build_int_compare(pred, l, r, "cmp_tmp"));
                         Ok(llvm!(builder.build_int_z_extend(cmp, context.i64_type(), "bool_tmp")).into())
                     },
-                    _ => Err(format!("LLVM Codegen: Unsupported int operator {:?}", op)),
+                    _ => Err(MumeiError::CodegenError(format!("Unsupported int operator {:?}", op))),
                 }
             }
         },

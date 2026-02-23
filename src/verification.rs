@@ -49,12 +49,74 @@ struct VCtx<'a> {
     arr: &'a Array<'a>,
 }
 
-// --- 型環境のグローバル管理 ---
+// =============================================================================
+// モジュール環境: グローバル static Mutex から構造体ベースの管理に移行
+// =============================================================================
+
+/// モジュール単位の環境。型定義・構造体定義・atom 定義を保持する。
+/// モジュールシステム導入時は、モジュールごとに独立した ModuleEnv を持ち、
+/// Resolver が完全修飾名（FQN）でフラット化して VerificationContext に渡す。
+#[derive(Debug, Clone, Default)]
+pub struct ModuleEnv {
+    /// 精緻型定義（FQN キー: 例 "math::Nat" or 自モジュールなら "Nat"）
+    pub types: HashMap<String, RefinedType>,
+    /// 構造体定義（FQN キー）
+    pub structs: HashMap<String, StructDef>,
+    /// Atom 定義（FQN キー）。契約による検証で requires/ensures のみ参照する。
+    pub atoms: HashMap<String, Atom>,
+    /// 検証済みフラグ（モジュール単位）
+    pub verified: bool,
+}
+
+impl ModuleEnv {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn register_type(&mut self, refined_type: &RefinedType) {
+        self.types.insert(refined_type.name.clone(), refined_type.clone());
+    }
+
+    pub fn register_struct(&mut self, struct_def: &StructDef) {
+        self.structs.insert(struct_def.name.clone(), struct_def.clone());
+    }
+
+    pub fn register_atom(&mut self, atom: &Atom) {
+        self.atoms.insert(atom.name.clone(), atom.clone());
+    }
+
+    pub fn get_type(&self, name: &str) -> Option<&RefinedType> {
+        self.types.get(name)
+    }
+
+    pub fn get_struct(&self, name: &str) -> Option<&StructDef> {
+        self.structs.get(name)
+    }
+
+    pub fn get_atom(&self, name: &str) -> Option<&Atom> {
+        self.atoms.get(name)
+    }
+
+    /// 精緻型名からベース型名を解決する（例: "Nat" -> "i64", "Pos" -> "f64"）
+    pub fn resolve_base_type(&self, type_name: &str) -> String {
+        if let Some(refined) = self.types.get(type_name) {
+            return refined._base_type.clone();
+        }
+        type_name.to_string()
+    }
+}
+
+// --- 後方互換性のためのグローバル環境（段階的に廃止予定） ---
 static TYPE_ENV: Lazy<Mutex<HashMap<String, RefinedType>>> = Lazy::new(|| {
     Mutex::new(HashMap::new())
 });
 
 static STRUCT_ENV: Lazy<Mutex<HashMap<String, StructDef>>> = Lazy::new(|| {
+    Mutex::new(HashMap::new())
+});
+
+/// Atom 定義のグローバルレジストリ（同一モジュール内の関数呼び出し解決用）
+static ATOM_ENV: Lazy<Mutex<HashMap<String, Atom>>> = Lazy::new(|| {
     Mutex::new(HashMap::new())
 });
 
@@ -70,6 +132,18 @@ pub fn register_struct(struct_def: &StructDef) -> MumeiResult<()> {
     Ok(())
 }
 
+/// Atom 定義をグローバルレジストリに登録（同一モジュール内の関数呼び出し解決用）
+pub fn register_atom(atom: &Atom) -> MumeiResult<()> {
+    let mut env = ATOM_ENV.lock().map_err(|_| MumeiError::TypeError("Failed to lock ATOM_ENV".into()))?;
+    env.insert(atom.name.clone(), atom.clone());
+    Ok(())
+}
+
+/// 登録済み Atom を取得
+pub fn get_atom_def(name: &str) -> Option<Atom> {
+    ATOM_ENV.lock().ok().and_then(|env| env.get(name).cloned())
+}
+
 pub fn get_struct_def(name: &str) -> Option<StructDef> {
     STRUCT_ENV.lock().ok().and_then(|env| env.get(name).cloned())
 }
@@ -83,6 +157,13 @@ pub fn resolve_base_type(type_name: &str) -> String {
         }
     }
     type_name.to_string()
+}
+
+/// グローバル環境をクリアする（テスト用）
+pub fn clear_global_env() {
+    if let Ok(mut env) = TYPE_ENV.lock() { env.clear(); }
+    if let Ok(mut env) = STRUCT_ENV.lock() { env.clear(); }
+    if let Ok(mut env) = ATOM_ENV.lock() { env.clear(); }
 }
 
 pub fn verify(atom: &Atom, output_dir: &Path) -> MumeiResult<()> {
@@ -294,7 +375,93 @@ fn expr_to_z3<'a>(
                     let _val = expr_to_z3(vc, &args[0], env, solver_opt)?;
                     Ok(Int::new_const(ctx, "cast_result").into())
                 }
-                _ => Err(MumeiError::VerificationError(format!("Unknown function: {}", name))),
+                _ => {
+                    // ユーザー定義関数呼び出し: 契約による検証（Compositional Verification）
+                    // 呼び出し先の requires を現在のコンテキストで証明し、
+                    // 成功すれば ensures を事実として追加する
+                    if let Some(callee) = get_atom_def(name) {
+                        // 引数を評価
+                        let mut arg_vals = Vec::new();
+                        for arg in args {
+                            arg_vals.push(expr_to_z3(vc, arg, env, solver_opt)?);
+                        }
+
+                        // 仮引数名と実引数値の対応を構築
+                        let mut call_env = env.clone();
+                        for (i, param) in callee.params.iter().enumerate() {
+                            if let Some(val) = arg_vals.get(i) {
+                                call_env.insert(param.name.clone(), val.clone());
+                            }
+                        }
+
+                        // 呼び出し先の精緻型制約を call_env に適用
+                        {
+                            let type_defs = TYPE_ENV.lock().map_err(|_| MumeiError::TypeError("Failed to lock TYPE_ENV".into()))?;
+                            for (i, param) in callee.params.iter().enumerate() {
+                                if let Some(type_name) = &param.type_name {
+                                    if let Some(refined) = type_defs.get(type_name) {
+                                        // 実引数値を精緻型の述語変数に束縛して制約を検証
+                                        if let Some(val) = arg_vals.get(i) {
+                                            call_env.insert(refined.operand.clone(), val.clone());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // requires の検証: 呼び出し元のコンテキストで事前条件が満たされるか
+                        if callee.requires.trim() != "true" {
+                            if let Some(solver) = solver_opt {
+                                let req_ast = parse_expression(&callee.requires);
+                                let req_z3 = expr_to_z3(vc, &req_ast, &mut call_env, None)?;
+                                if let Some(req_bool) = req_z3.as_bool() {
+                                    solver.push();
+                                    solver.assert(&req_bool.not());
+                                    if solver.check() == SatResult::Sat {
+                                        solver.pop(1);
+                                        return Err(MumeiError::VerificationError(
+                                            format!("Call to '{}': precondition (requires) not satisfied at call site", name)
+                                        ));
+                                    }
+                                    solver.pop(1);
+                                }
+                            }
+                        }
+
+                        // ensures からシンボリック結果を生成し、事後条件を事実として追加
+                        static CALL_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+                        let call_id = CALL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        let result_name = format!("call_{}_{}", name, call_id);
+
+                        // 戻り値型の推定: 呼び出し先パラメータに f64 型があれば Float、なければ Int
+                        let has_float = callee.params.iter().any(|p| {
+                            p.type_name.as_deref()
+                                .map(|t| resolve_base_type(t) == "f64")
+                                .unwrap_or(false)
+                        });
+                        let result_z3: Dynamic = if has_float {
+                            Float::new_const(ctx, result_name.as_str(), 11, 53).into()
+                        } else {
+                            Int::new_const(ctx, result_name.as_str()).into()
+                        };
+
+                        // ensures を事実として solver に追加（result を呼び出し結果に束縛）
+                        if callee.ensures.trim() != "true" {
+                            call_env.insert("result".to_string(), result_z3.clone());
+                            let ens_ast = parse_expression(&callee.ensures);
+                            let ens_z3 = expr_to_z3(vc, &ens_ast, &mut call_env, None)?;
+                            if let Some(ens_bool) = ens_z3.as_bool() {
+                                if let Some(solver) = solver_opt {
+                                    solver.assert(&ens_bool);
+                                }
+                            }
+                        }
+
+                        Ok(result_z3)
+                    } else {
+                        Err(MumeiError::VerificationError(format!("Unknown function: {}", name)))
+                    }
+                },
             }
         },
         Expr::ArrayAccess(name, index_expr) => {

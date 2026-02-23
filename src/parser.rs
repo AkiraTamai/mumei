@@ -104,22 +104,41 @@ pub struct StructDef {
     pub fields: Vec<StructField>,
 }
 
+/// インポート宣言
+#[derive(Debug, Clone)]
+pub struct ImportDecl {
+    /// インポート対象のファイルパス（例: "./lib/math.mm"）
+    pub path: String,
+    /// エイリアス（例: as math → Some("math")）
+    pub alias: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub enum Item {
     Atom(Atom),
     TypeDef(RefinedType),
     StructDef(StructDef),
+    Import(ImportDecl),
 }
 
 // --- 3. メインパーサーロジック ---
 
 pub fn parse_module(source: &str) -> Vec<Item> {
     let mut items = Vec::new();
+    // import 定義: import "path" as alias; または import "path";
+    let import_re = Regex::new(r#"(?m)^import\s+"([^"]+)"(?:\s+as\s+(\w+))?\s*;"#).unwrap();
     // type 定義: i64 | u64 | f64 を許容するように変更
     let type_re = Regex::new(r"(?m)^type\s+(\w+)\s*=\s*(\w+)\s+where\s+([^;]+);").unwrap();
     let atom_re = Regex::new(r"atom\s+\w+").unwrap();
     // struct 定義: struct Name { field: Type, ... }
     let struct_re = Regex::new(r"(?m)^struct\s+(\w+)\s*\{([^}]*)\}").unwrap();
+
+    // import 宣言のパース
+    for cap in import_re.captures_iter(source) {
+        let path = cap[1].to_string();
+        let alias = cap.get(2).map(|m| m.as_str().to_string());
+        items.push(Item::Import(ImportDecl { path, alias }));
+    }
 
     for cap in type_re.captures_iter(source) {
         let full_predicate = cap[3].trim().to_string();

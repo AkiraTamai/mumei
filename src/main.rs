@@ -2,6 +2,7 @@ mod parser;
 mod verification;
 mod codegen;
 mod transpiler;
+mod resolver;
 
 use clap::Parser;
 use std::fs;
@@ -33,6 +34,15 @@ fn main() {
     // --- 1. Parsing (構文解析) ---
     let items = parser::parse_module(&source);
 
+    // --- 1.5 Resolve (依存解決) ---
+    // import 宣言を処理し、依存モジュールの型・構造体・atom を登録
+    let input_path = Path::new(&cli.input);
+    let base_dir = input_path.parent().unwrap_or(Path::new("."));
+    if let Err(e) = resolver::resolve_imports(&items, base_dir) {
+        eprintln!("  ❌ Import Resolution Failed: {}", e);
+        std::process::exit(1);
+    }
+
     let output_path = Path::new(&cli.output);
     let output_dir = output_path.parent().unwrap_or(Path::new("."));
     // ベースとなるファイル名（例: katana）
@@ -45,8 +55,24 @@ fn main() {
     let mut go_bundle = String::new();
     let mut ts_bundle = String::new();
 
+    // --- Phase 0: 全 Atom を事前登録（同一モジュール内の関数呼び出し解決用） ---
+    for item in &items {
+        if let Item::Atom(atom) = item {
+            if let Err(e) = verification::register_atom(atom) {
+                eprintln!("  ❌ Atom Registration Failed: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+
     for item in items {
         match item {
+            // --- import 宣言（resolver で処理済み） ---
+            Item::Import(import_decl) => {
+                let alias_str = import_decl.alias.as_deref().unwrap_or("(none)");
+                println!("  📦 Import: '{}' as '{}'", import_decl.path, alias_str);
+            }
+
             // --- 精緻型の登録 ---
             Item::TypeDef(refined_type) => {
                 println!("  ✨ Registered Refined Type: '{}' ({})", refined_type.name, refined_type._base_type);

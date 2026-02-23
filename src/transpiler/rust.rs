@@ -1,5 +1,25 @@
-use crate::parser::{Expr, Op, Atom, parse_expression};
+use crate::parser::{Expr, Op, Atom, ImportDecl, parse_expression};
 use crate::verification::resolve_base_type;
+
+/// import 宣言から Rust のモジュールヘッダーを生成する
+/// 例: mod math; use math::*;
+pub fn transpile_module_header_rust(imports: &[ImportDecl], _module_name: &str) -> String {
+    let mut lines = Vec::new();
+    for import in imports {
+        // パスからモジュール名を推定（例: "./lib/math.mm" → "math"）
+        let mod_name = import.alias.as_deref()
+            .unwrap_or_else(|| {
+                import.path.rsplit('/').next().unwrap_or(&import.path)
+                    .trim_end_matches(".mm")
+            });
+        lines.push(format!("mod {};", mod_name));
+        lines.push(format!("use {}::*;", mod_name));
+    }
+    if !lines.is_empty() {
+        lines.push(String::new()); // 空行で区切り
+    }
+    lines.join("\n")
+}
 
 pub fn transpile_to_rust(atom: &Atom) -> String {
     // 引数の型を精緻型のベース型からマッピング (Type System 2.0)

@@ -2,12 +2,13 @@ mod parser;
 mod verification;
 mod codegen;
 mod transpiler;
+mod resolver;
 
 use clap::Parser;
 use std::fs;
 use std::path::Path;
-use crate::transpiler::{TargetLanguage, transpile};
-use crate::parser::Item;
+use crate::transpiler::{TargetLanguage, transpile, transpile_module_header};
+use crate::parser::{Item, ImportDecl};
 
 #[derive(Parser)]
 #[command(name = "Mumei Compiler", version = "0.1.0")]
@@ -33,6 +34,15 @@ fn main() {
     // --- 1. Parsing (構文解析) ---
     let items = parser::parse_module(&source);
 
+    // --- 1.5 Resolve (依存解決) ---
+    // import 宣言を処理し、依存モジュールの型・構造体・atom を登録
+    let input_path = Path::new(&cli.input);
+    let base_dir = input_path.parent().unwrap_or(Path::new("."));
+    if let Err(e) = resolver::resolve_imports(&items, base_dir) {
+        eprintln!("  ❌ Import Resolution Failed: {}", e);
+        std::process::exit(1);
+    }
+
     let output_path = Path::new(&cli.output);
     let output_dir = output_path.parent().unwrap_or(Path::new("."));
     // ベースとなるファイル名（例: katana）
@@ -40,13 +50,35 @@ fn main() {
 
     let mut atom_count = 0;
 
+    // --- Phase 0: import 宣言を収集 + 全 Atom を事前登録 ---
+    let mut imports: Vec<ImportDecl> = Vec::new();
+    for item in &items {
+        match item {
+            Item::Import(decl) => imports.push(decl.clone()),
+            Item::Atom(atom) => {
+                if let Err(e) = verification::register_atom(atom) {
+                    eprintln!("  ❌ Atom Registration Failed: {}", e);
+                    std::process::exit(1);
+                }
+            }
+            _ => {}
+        }
+    }
+
     // 全ての Atom のコードを結合して出力するためのバッファ (Transpiler用)
-    let mut rust_bundle = String::new();
-    let mut go_bundle = String::new();
-    let mut ts_bundle = String::new();
+    // import 宣言がある場合、各言語のモジュールヘッダーを先頭に挿入
+    let mut rust_bundle = transpile_module_header(&imports, file_stem, TargetLanguage::Rust);
+    let mut go_bundle = transpile_module_header(&imports, file_stem, TargetLanguage::Go);
+    let mut ts_bundle = transpile_module_header(&imports, file_stem, TargetLanguage::TypeScript);
 
     for item in items {
         match item {
+            // --- import 宣言（resolver で処理済み） ---
+            Item::Import(import_decl) => {
+                let alias_str = import_decl.alias.as_deref().unwrap_or("(none)");
+                println!("  📦 Import: '{}' as '{}'", import_decl.path, alias_str);
+            }
+
             // --- 精緻型の登録 ---
             Item::TypeDef(refined_type) => {
                 println!("  ✨ Registered Refined Type: '{}' ({})", refined_type.name, refined_type._base_type);
@@ -72,12 +104,19 @@ fn main() {
                 println!("  ✨ [1/4] Polishing Syntax: Atom '{}' identified.", atom.name);
 
                 // --- 2. Verification (形式検証: Z3 + StdLib) ---
-                // 配列境界チェックや浮動小数点演算の検証を含む
-                match verification::verify(&atom, output_dir) {
-                    Ok(_) => println!("  ⚖️  [2/4] Verification: Passed. Logic verified with Z3."),
-                    Err(e) => {
-                        eprintln!("  ❌ [2/4] Verification: Failed! Flaw detected: {}", e);
-                        std::process::exit(1);
+                // インポートされた atom は検証済み（契約のみ信頼）なのでスキップ
+                if verification::is_verified(&atom.name) {
+                    println!("  ⚖️  [2/4] Verification: Skipped (imported, contract-trusted).");
+                } else {
+                    match verification::verify(&atom, output_dir) {
+                        Ok(_) => {
+                            println!("  ⚖️  [2/4] Verification: Passed. Logic verified with Z3.");
+                            verification::mark_verified(&atom.name);
+                        },
+                        Err(e) => {
+                            eprintln!("  ❌ [2/4] Verification: Failed! Flaw detected: {}", e);
+                            std::process::exit(1);
+                        }
                     }
                 }
 

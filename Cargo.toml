@@ -21,6 +21,12 @@ inkwell = { git = "https://github.com/TheDan64/inkwell", branch = "master", feat
 # レポート出力: 検証結果の JSON 書き出し
 serde_json = "1.0"
 
+# シリアライズ: 検証キャッシュの永続化
+serde = { version = "1.0", features = ["derive"] }
+
+# ハッシュ: ソースファイルの変更検出
+sha2 = "0.10"
+
 once_cell = "1.18"
 
 # ※ 以前使用していた pest は regex ベースの自作パーサーに移行したため依存関係から削除していますが、必要に応じて残すことも可能

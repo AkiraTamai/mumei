@@ -1,5 +1,31 @@
-use crate::parser::{Expr, Op, Atom, parse_expression};
+use crate::parser::{Expr, Op, Atom, ImportDecl, parse_expression};
 use crate::verification::resolve_base_type;
+
+/// import 宣言から Go のモジュールヘッダーを生成する
+/// 例: package main\nimport "path/to/math"
+pub fn transpile_module_header_go(imports: &[ImportDecl], module_name: &str) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!("package {}", module_name));
+    lines.push(String::new());
+
+    // import ブロック
+    let mut import_paths = Vec::new();
+    for import in imports {
+        let pkg_name = import.alias.as_deref()
+            .unwrap_or_else(|| {
+                import.path.rsplit('/').next().unwrap_or(&import.path)
+                    .trim_end_matches(".mm")
+            });
+        import_paths.push(format!("\t\"{}\"", pkg_name));
+    }
+    if !import_paths.is_empty() {
+        lines.push("import (".to_string());
+        lines.extend(import_paths);
+        lines.push(")".to_string());
+        lines.push(String::new());
+    }
+    lines.join("\n")
+}
 
 pub fn transpile_to_go(atom: &Atom) -> String {
     // パラメータの型を精緻型名からマッピング

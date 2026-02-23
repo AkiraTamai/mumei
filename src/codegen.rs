@@ -6,7 +6,7 @@ use inkwell::IntPredicate;
 use inkwell::FloatPredicate;
 use inkwell::AddressSpace;
 use crate::parser::{Atom, Expr, Op, Pattern, parse_expression};
-use crate::verification::{resolve_base_type, get_struct_def, get_atom_def, find_enum_by_variant, MumeiError, MumeiResult};
+use crate::verification::{ModuleEnv, MumeiError, MumeiResult};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -23,10 +23,10 @@ fn array_struct_type<'a>(context: &'a Context) -> inkwell::types::StructType<'a>
 }
 
 /// パラメータの LLVM 型を解決する
-fn resolve_param_type<'a>(context: &'a Context, type_name: Option<&str>) -> inkwell::types::BasicTypeEnum<'a> {
+fn resolve_param_type<'a>(context: &'a Context, type_name: Option<&str>, module_env: &ModuleEnv) -> inkwell::types::BasicTypeEnum<'a> {
     match type_name {
         Some(name) => {
-            let base = resolve_base_type(name);
+            let base = module_env.resolve_base_type(name);
             match base.as_str() {
                 "f64" => context.f64_type().into(),
                 "u64" => context.i64_type().into(),
@@ -38,7 +38,7 @@ fn resolve_param_type<'a>(context: &'a Context, type_name: Option<&str>) -> inkw
     }
 }
 
-pub fn compile(atom: &Atom, output_path: &Path) -> MumeiResult<()> {
+pub fn compile(atom: &Atom, output_path: &Path, module_env: &ModuleEnv) -> MumeiResult<()> {
     let context = Context::create();
     let module = context.create_module(&atom.name);
     let builder = context.create_builder();
@@ -47,7 +47,7 @@ pub fn compile(atom: &Atom, output_path: &Path) -> MumeiResult<()> {
 
     // パラメータ型を精緻型から解決
     let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = atom.params.iter()
-        .map(|p| resolve_param_type(&context, p.type_name.as_deref()).into())
+        .map(|p| resolve_param_type(&context, p.type_name.as_deref(), module_env).into())
         .collect();
     let fn_type = i64_type.fn_type(&param_types, false);
     let function = module.add_function(&atom.name, fn_type, None);
@@ -73,7 +73,7 @@ pub fn compile(atom: &Atom, output_path: &Path) -> MumeiResult<()> {
     }
 
     let body_ast = parse_expression(&atom.body_expr);
-    let result_val = compile_expr(&context, &builder, &module, &function, &body_ast, &mut variables, &array_ptrs)?;
+    let result_val = compile_expr(&context, &builder, &module, &function, &body_ast, &mut variables, &array_ptrs, module_env)?;
 
     llvm!(builder.build_return(Some(&result_val)));
 
@@ -91,6 +91,7 @@ fn compile_expr<'a>(
     expr: &Expr,
     variables: &mut HashMap<String, BasicValueEnum<'a>>,
     array_ptrs: &HashMap<String, (BasicValueEnum<'a>, BasicValueEnum<'a>)>,
+    module_env: &ModuleEnv,
 ) -> MumeiResult<BasicValueEnum<'a>> {
     match expr {
         Expr::Number(n) => Ok(context.i64_type().const_int(*n as u64, true).into()),
@@ -104,7 +105,7 @@ fn compile_expr<'a>(
         Expr::Call(name, args) => {
             match name.as_str() {
                 "sqrt" => {
-                    let arg = compile_expr(context, builder, module, function, &args[0], variables, array_ptrs)?;
+                    let arg = compile_expr(context, builder, module, function, &args[0], variables, array_ptrs, module_env)?;
                     let sqrt_func = module.get_function("llvm.sqrt.f64").unwrap_or_else(|| {
                         let type_f64 = context.f64_type();
                         let fn_type = type_f64.fn_type(&[type_f64.into()], false);
@@ -128,16 +129,16 @@ fn compile_expr<'a>(
                 },
                 _ => {
                     // ユーザー定義関数呼び出し: declare（外部宣言）+ call
-                    if let Some(callee) = get_atom_def(name) {
+                    if let Some(callee) = module_env.get_atom(name) {
                         // 呼び出し先の関数型を構築
                         let callee_param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = callee.params.iter()
-                            .map(|p| resolve_param_type(context, p.type_name.as_deref()).into())
+                            .map(|p| resolve_param_type(context, p.type_name.as_deref(), module_env).into())
                             .collect();
 
                         // 戻り値型の推定: f64 パラメータがあれば f64、なければ i64
                         let has_float = callee.params.iter().any(|p| {
                             p.type_name.as_deref()
-                                .map(|t| resolve_base_type(t) == "f64")
+                                .map(|t| module_env.resolve_base_type(t) == "f64")
                                 .unwrap_or(false)
                         });
                         let callee_fn = if has_float {
@@ -155,7 +156,7 @@ fn compile_expr<'a>(
                         // 引数を評価
                         let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
                         for arg in args {
-                            let val = compile_expr(context, builder, module, function, arg, variables, array_ptrs)?;
+                            let val = compile_expr(context, builder, module, function, arg, variables, array_ptrs, module_env)?;
                             arg_vals.push(val.into());
                         }
 
@@ -175,7 +176,7 @@ fn compile_expr<'a>(
 
         Expr::ArrayAccess(name, index_expr) => {
             // Fat Pointer: data_ptr から GEP + load
-            let idx = compile_expr(context, builder, module, function, index_expr, variables, array_ptrs)?
+            let idx = compile_expr(context, builder, module, function, index_expr, variables, array_ptrs, module_env)?
                 .into_int_value();
             if let Some((len_val, data_ptr_val)) = array_ptrs.get(name) {
                 let data_ptr = data_ptr_val.into_pointer_value();
@@ -218,8 +219,8 @@ fn compile_expr<'a>(
         },
 
         Expr::BinaryOp(left, op, right) => {
-            let lhs = compile_expr(context, builder, module, function, left, variables, array_ptrs)?;
-            let rhs = compile_expr(context, builder, module, function, right, variables, array_ptrs)?;
+            let lhs = compile_expr(context, builder, module, function, left, variables, array_ptrs, module_env)?;
+            let rhs = compile_expr(context, builder, module, function, right, variables, array_ptrs, module_env)?;
 
             if lhs.is_float_value() || rhs.is_float_value() {
                 let l = if lhs.is_float_value() {

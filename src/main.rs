@@ -8,7 +8,7 @@ mod resolver;
 use clap::Parser;
 use std::fs;
 use std::path::Path;
-use crate::transpiler::{TargetLanguage, transpile, transpile_enum, transpile_struct, transpile_module_header};
+use crate::transpiler::{TargetLanguage, transpile, transpile_enum, transpile_struct, transpile_trait, transpile_impl, transpile_module_header};
 use crate::parser::{Item, ImportDecl};
 
 #[derive(Parser)]
@@ -125,15 +125,22 @@ fn main() {
                 ts_bundle.push_str("\n\n");
             }
 
-            // --- トレイト定義 ---
+            // --- トレイト定義 + トランスパイル ---
             Item::TraitDef(trait_def) => {
                 let method_names: Vec<&str> = trait_def.methods.iter().map(|m| m.name.as_str()).collect();
                 let law_names: Vec<&str> = trait_def.laws.iter().map(|(n, _)| n.as_str()).collect();
                 println!("  📜 Registered Trait: '{}' (methods: {}, laws: {})",
                     trait_def.name, method_names.join(", "), law_names.join(", "));
+                // トレイト定義をトランスパイル出力に含める
+                rust_bundle.push_str(&transpile_trait(trait_def, TargetLanguage::Rust));
+                rust_bundle.push_str("\n\n");
+                go_bundle.push_str(&transpile_trait(trait_def, TargetLanguage::Go));
+                go_bundle.push_str("\n\n");
+                ts_bundle.push_str(&transpile_trait(trait_def, TargetLanguage::TypeScript));
+                ts_bundle.push_str("\n\n");
             }
 
-            // --- トレイト実装の登録 + 法則検証 ---
+            // --- トレイト実装の登録 + 法則検証 + トランスパイル ---
             Item::ImplDef(impl_def) => {
                 println!("  🔧 Registered Impl: {} for {}", impl_def.trait_name, impl_def.target_type);
                 // impl が trait の全 law を満たしているか Z3 で検証
@@ -144,6 +151,13 @@ fn main() {
                         std::process::exit(1);
                     }
                 }
+                // impl 定義をトランスパイル出力に含める
+                rust_bundle.push_str(&transpile_impl(impl_def, TargetLanguage::Rust));
+                rust_bundle.push_str("\n\n");
+                go_bundle.push_str(&transpile_impl(impl_def, TargetLanguage::Go));
+                go_bundle.push_str("\n\n");
+                ts_bundle.push_str(&transpile_impl(impl_def, TargetLanguage::TypeScript));
+                ts_bundle.push_str("\n\n");
             }
 
             // --- Atom の処理 ---

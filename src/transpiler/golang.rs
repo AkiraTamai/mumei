@@ -84,6 +84,41 @@ fn capitalize_first(s: &str) -> String {
     }
 }
 
+/// Trait 定義を Go の interface に変換する
+pub fn transpile_trait_go(trait_def: &TraitDef) -> String {
+    let mut lines = Vec::new();
+    for (law_name, law_expr) in &trait_def.laws {
+        lines.push(format!("// Law {}: {}", law_name, law_expr));
+    }
+    lines.push(format!("type {} interface {{", trait_def.name));
+    for method in &trait_def.methods {
+        let go_ret = if method.return_type == "bool" { "bool" } else { "int64" };
+        let params: Vec<String> = method.param_types.iter().enumerate()
+            .map(|(i, _)| {
+                let name = if i == 0 { "a" } else if i == 1 { "b" } else { "c" };
+                format!("{} int64", name)
+            })
+            .collect();
+        lines.push(format!("\t{}({}) {}", capitalize_first(&method.name), params.join(", "), go_ret));
+    }
+    lines.push("}".to_string());
+    lines.join("\n")
+}
+
+/// Impl 定義を Go のメソッドレシーバに変換する
+pub fn transpile_impl_go(impl_def: &ImplDef) -> String {
+    let mut lines = Vec::new();
+    let go_type = map_type_go(Some(&impl_def.target_type));
+    lines.push(format!("// impl {} for {}", impl_def.trait_name, go_type));
+    for (method_name, method_body) in &impl_def.method_bodies {
+        lines.push(format!("func {}{}(a, b {}) {} {{ return {} }}",
+            go_type, capitalize_first(method_name), go_type,
+            if method_body.contains("==") || method_body.contains("<=") { "bool" } else { &go_type },
+            method_body));
+    }
+    lines.join("\n")
+}
+
 pub fn transpile_to_go(atom: &Atom) -> String {
     // パラメータの型を精緻型名からマッピング
     let params: Vec<String> = atom.params.iter()

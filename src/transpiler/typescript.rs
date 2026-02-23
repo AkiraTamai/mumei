@@ -1,4 +1,4 @@
-use crate::parser::{Expr, Op, Atom, ImportDecl, EnumDef, StructDef, parse_expression};
+use crate::parser::{Expr, Op, Atom, ImportDecl, EnumDef, StructDef, TraitDef, ImplDef, parse_expression};
 
 /// 型名をベース型に解決する（transpiler ローカル版）
 fn resolve_base_type(name: &str) -> String {
@@ -94,6 +94,39 @@ pub fn transpile_struct_ts(struct_def: &StructDef) -> String {
         lines.push(format!("    {}: {};", field.name, ts_type));
     }
     lines.push("}".to_string());
+    lines.join("\n")
+}
+
+/// Trait 定義を TypeScript の interface に変換する
+pub fn transpile_trait_ts(trait_def: &TraitDef) -> String {
+    let mut lines = Vec::new();
+    for (law_name, law_expr) in &trait_def.laws {
+        lines.push(format!("/** Law {}: {} */", law_name, law_expr));
+    }
+    lines.push(format!("export interface {} {{", trait_def.name));
+    for method in &trait_def.methods {
+        let params: Vec<String> = method.param_types.iter().enumerate()
+            .map(|(i, _)| {
+                let name = if i == 0 { "a" } else if i == 1 { "b" } else { "c" };
+                format!("{}: number", name)
+            })
+            .collect();
+        let ret = if method.return_type == "bool" { "boolean" } else { "number" };
+        lines.push(format!("    {}({}): {};", method.name, params.join(", "), ret));
+    }
+    lines.push("}".to_string());
+    lines.join("\n")
+}
+
+/// Impl 定義を TypeScript のクラスに変換する
+pub fn transpile_impl_ts(impl_def: &ImplDef) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!("/** impl {} for {} */", impl_def.trait_name, impl_def.target_type));
+    lines.push(format!("export const {}{}: {} = {{", impl_def.target_type, impl_def.trait_name, impl_def.trait_name));
+    for (method_name, method_body) in &impl_def.method_bodies {
+        lines.push(format!("    {}: (a: number, b: number) => {},", method_name, method_body));
+    }
+    lines.push("};".to_string());
     lines.join("\n")
 }
 

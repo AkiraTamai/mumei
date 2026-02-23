@@ -146,6 +146,8 @@ pub struct Atom {
     /// Generics: 型パラメータリスト（例: ["T", "U"]）。非ジェネリックなら空。
     pub type_params: Vec<String>,
     /// トレイト境界: 型パラメータに課す制約（例: [TypeParamBound { param: "T", bounds: ["Comparable"] }]）
+    /// 単相化時のトレイト境界バリデーションで使用（将来の拡張）
+    #[allow(dead_code)]
     pub where_bounds: Vec<TypeParamBound>,
     pub params: Vec<Param>,
     pub requires: String,
@@ -518,18 +520,52 @@ pub fn parse_module(source: &str) -> Vec<Item> {
     }
 
     // impl 定義: impl TraitName for TypeName { fn method(params) -> Type { body } }
-    let impl_re = Regex::new(r"(?m)^impl\s+(\w+)\s+for\s+(\w+)\s*\{([^}]*)\}").unwrap();
-    for cap in impl_re.captures_iter(source) {
+    // ネストした {} を正しく処理するためにカスタムパーサーを使用
+    let impl_header_re = Regex::new(r"(?m)^impl\s+(\w+)\s+for\s+(\w+)\s*\{").unwrap();
+    for cap in impl_header_re.captures_iter(source) {
         let trait_name = cap[1].to_string();
         let target_type = cap[2].to_string();
-        let body = &cap[3];
+        // impl ブロックの開始位置から、ネストした {} を考慮して終了位置を探す
+        let block_start = cap.get(0).unwrap().end(); // '{' の直後
+        let mut depth = 1;
+        let mut block_end = block_start;
+        for (i, c) in source[block_start..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        block_end = block_start + i;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let body = &source[block_start..block_end];
         let mut method_bodies = Vec::new();
 
-        // fn method(params) -> Type { body } をパース
-        let method_re = Regex::new(r"fn\s+(\w+)\s*\([^)]*\)\s*->\s*\w+\s*\{([^}]*)\}").unwrap();
-        for mcap in method_re.captures_iter(body) {
-            let method_name = mcap[1].to_string();
-            let method_body = mcap[2].trim().to_string();
+        // fn method(params) -> Type { body } をパース（ネスト対応）
+        let fn_header_re = Regex::new(r"fn\s+(\w+)\s*\([^)]*\)\s*->\s*\w+\s*\{").unwrap();
+        for fcap in fn_header_re.captures_iter(body) {
+            let method_name = fcap[1].to_string();
+            let fn_body_start = fcap.get(0).unwrap().end();
+            let mut fn_depth = 1;
+            let mut fn_body_end = fn_body_start;
+            for (i, c) in body[fn_body_start..].char_indices() {
+                match c {
+                    '{' => fn_depth += 1,
+                    '}' => {
+                        fn_depth -= 1;
+                        if fn_depth == 0 {
+                            fn_body_end = fn_body_start + i;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let method_body = body[fn_body_start..fn_body_end].trim().to_string();
             method_bodies.push((method_name, method_body));
         }
         items.push(Item::ImplDef(ImplDef { trait_name, target_type, method_bodies }));

@@ -106,6 +106,7 @@ impl ModuleEnv {
         self.atoms.get(name)
     }
 
+    #[allow(dead_code)]
     pub fn get_enum(&self, name: &str) -> Option<&EnumDef> {
         self.enums.get(name)
     }
@@ -136,11 +137,13 @@ impl ModuleEnv {
     }
 
     /// 指定した型がトレイトを実装しているか確認する
+    #[allow(dead_code)]
     pub fn find_impl(&self, trait_name: &str, target_type: &str) -> Option<&ImplDef> {
         self.impls.iter().find(|i| i.trait_name == trait_name && i.target_type == target_type)
     }
 
     /// 指定した型がトレイト境界を全て満たしているか検証する
+    #[allow(dead_code)]
     pub fn check_trait_bounds(&self, type_name: &str, bounds: &[String]) -> Result<(), String> {
         for bound in bounds {
             if self.find_impl(bound, type_name).is_none() {

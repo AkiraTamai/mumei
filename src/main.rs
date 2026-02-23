@@ -1,3 +1,4 @@
+mod ast;
 mod parser;
 mod verification;
 mod codegen;
@@ -29,7 +30,7 @@ fn main() {
         std::process::exit(1);
     });
 
-    println!("🗡️  Mumei: Forging the blade (Type System 2.0 enabled)...");
+    println!("🗡️  Mumei: Forging the blade (Type System 2.0 + Generics enabled)...");
 
     // --- 1. Parsing (構文解析) ---
     let items = parser::parse_module(&source);
@@ -42,6 +43,18 @@ fn main() {
         eprintln!("  ❌ Import Resolution Failed: {}", e);
         std::process::exit(1);
     }
+
+    // --- 1.7 Monomorphization (単相化) ---
+    // ジェネリック定義を収集し、使用箇所の具体型で展開する
+    let mut mono = ast::Monomorphizer::new();
+    mono.collect(&items);
+    let items = if mono.has_generics() {
+        let mono_items = mono.monomorphize(&items);
+        println!("  🔬 Monomorphization: {} generic instance(s) expanded.", mono.instances().len());
+        mono_items
+    } else {
+        items
+    };
 
     let output_path = Path::new(&cli.output);
     let output_dir = output_path.parent().unwrap_or(Path::new("."));

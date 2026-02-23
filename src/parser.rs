@@ -471,6 +471,7 @@ pub fn parse_atom(source: &str) -> Atom {
 
     Atom {
         name,
+        type_params,
         params,
         requires: forall_re.replace_all(&exists_re.replace_all(&requires_raw, "true"), "true").to_string(),
         forall_constraints,

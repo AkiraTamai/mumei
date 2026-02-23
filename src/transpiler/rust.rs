@@ -26,7 +26,13 @@ pub fn transpile_enum_rust(enum_def: &EnumDef) -> String {
     let mut lines = Vec::new();
     lines.push(format!("/// Verified Enum: {}", enum_def.name));
     lines.push(format!("#[derive(Debug, Clone, Copy, PartialEq)]"));
-    lines.push(format!("pub enum {} {{", enum_def.name));
+    // Generics: 型パラメータがある場合は <T, U> を付与
+    let type_params_str = if enum_def.type_params.is_empty() {
+        String::new()
+    } else {
+        format!("<{}>", enum_def.type_params.join(", "))
+    };
+    lines.push(format!("pub enum {}{} {{", enum_def.name, type_params_str));
     for variant in &enum_def.variants {
         if variant.fields.is_empty() {
             lines.push(format!("    {},", variant.name));
@@ -46,7 +52,13 @@ pub fn transpile_struct_rust(struct_def: &StructDef) -> String {
     let mut lines = Vec::new();
     lines.push(format!("/// Verified Struct: {}", struct_def.name));
     lines.push(format!("#[derive(Debug, Clone)]"));
-    lines.push(format!("pub struct {} {{", struct_def.name));
+    // Generics: 型パラメータがある場合は <T, U> を付与
+    let type_params_str = if struct_def.type_params.is_empty() {
+        String::new()
+    } else {
+        format!("<{}>", struct_def.type_params.join(", "))
+    };
+    lines.push(format!("pub struct {}{} {{", struct_def.name, type_params_str));
     for field in &struct_def.fields {
         let rust_type = map_type_rust(Some(field.type_name.as_str()));
         if let Some(constraint) = &field.constraint {

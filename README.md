@@ -16,14 +16,18 @@ Only atoms that pass formal verification are compiled to LLVM IR and transpiled 
 |---|---|
 | **Refinement Types** | `type Nat = i64 where v >= 0;` — Z3-backed type predicates |
 | **Structs with Field Constraints** | `struct Point { x: f64 where v >= 0.0 }` — per-field invariants |
+| **Enums (ADT)** | `enum Shape { Circle(f64), Rect(f64, f64), None }` — algebraic data types |
+| **Pattern Matching** | `match expr { Pattern if guard => body }` — with Z3 exhaustiveness checking |
+| **Recursive ADT** | `enum List { Nil, Cons(i64, Self) }` — self-referencing types with bounded verification |
 | **Loop Invariant Verification** | `while ... invariant: ...` — Z3 proves preservation |
 | **Termination Checking** | `decreases: n - i` — ranking function proves loops terminate |
 | **Float Verification** | Sign propagation for `f64` arithmetic (pos×pos→pos, etc.) |
 | **Array Bounds Checking** | Symbolic `len_<name>` model with Z3 out-of-bounds detection |
-| **Structured Error Types** | `MumeiError::VerificationError / CodegenError / TypeError` |
-| **Multi-target Output** | LLVM IR + Rust + Go + TypeScript from a single source |
+| **Multi-target Transpiler** | Enum/Struct/Atom → Rust enum + Go const/type + TypeScript discriminated union |
+| **Standard Library** | `std/option.mm`, `std/result.mm`, `std/list.mm` — verified core types |
 | **Module System** | `import "path" as alias;` — multi-file builds with compositional verification |
 | **Inter-atom Calls** | Contract-based verification: caller proves `requires`, assumes `ensures` |
+| **Counter-example Display** | Z3 `get_model()` shows exactly which value is uncovered on exhaustiveness failure |
 
 ---
 
@@ -179,21 +183,41 @@ body: {
 
 ## 📦 Standard Library
 
+### Built-in Functions
+
 | Function | Description |
 |---|---|
 | `sqrt(x)` | Square root (f64) |
 | `len(a)` | Array length (symbolic) |
 | `cast_to_int(x)` | Float to int conversion |
 
+### Verified Core Types (`std/`)
+
+Mumei ships with a verified standard library that can be imported into any `.mm` file:
+
+```mumei
+import "./std/option.mm" as opt;
+import "./std/result.mm" as res;
+import "./std/list.mm" as list;
+```
+
+| Module | Types | Atoms |
+|---|---|---|
+| `std/option.mm` | `Option { None, Some(i64) }` | `is_some`, `is_none`, `unwrap_or` |
+| `std/result.mm` | `Result { Ok(i64), Err(i64) }` | `is_ok`, `is_err`, `unwrap_or_default`, `safe_divide` |
+| `std/list.mm` | `List { Nil, Cons(i64, Self) }` | `is_empty`, `head_or`, `is_sorted_pair`, `insert_sorted` |
+
+All atoms in `std/` are formally verified — their `requires`/`ensures` contracts are proven by Z3 at compile time. When imported, only the contracts are trusted (body is not re-verified).
+
 ---
 
 ## 🛠️ Forging Process
 
-1. **Polishing (Parser):** Parses `import`, `type`, `struct`, and `atom` definitions. Supports `if/else`, `let`, `while invariant decreases`, function calls, array access, struct init (`Name { field: expr }`), and field access (`v.x`).
-2. **Resolving (Resolver):** Recursively resolves `import` declarations, builds the dependency graph, detects circular imports, and registers imported symbols with fully qualified names (FQN).
-3. **Verification (Z3):** Verifies `requires`, `ensures`, loop invariants, termination (decreases), struct field constraints, division-by-zero, array bounds, and **inter-atom call contracts** (compositional verification).
-4. **Tempering (LLVM IR):** Emits a `.ll` file per atom with LLVM StructType support and `declare` for external atom calls.
-5. **Sharpening (Transpiler):** Generates module headers (`mod`/`use`, `package`/`import`, `import`/`export`) from import declarations, then bundles all atoms and outputs `.rs`, `.go`, and `.ts` files with native struct syntax.
+1. **Polishing (Parser):** Parses `import`, `type`, `struct`, `enum`, and `atom` definitions. Supports `if/else`, `let`, `while invariant decreases`, `match` with guards, function calls, array access, struct init, field access, and recursive ADT (`Self`).
+2. **Resolving (Resolver):** Recursively resolves `import` declarations, builds the dependency graph, detects circular imports, and registers all symbols (types, structs, enums, atoms) with fully qualified names (FQN).
+3. **Verification (Z3):** Verifies `requires`, `ensures`, loop invariants, termination (decreases), struct field constraints, division-by-zero, array bounds, **inter-atom call contracts**, **match exhaustiveness** (SMT-based with counter-examples), and **Enum domain constraints** (`0 ≤ tag < n_variants`).
+4. **Tempering (LLVM IR):** Emits a `.ll` file per atom. Match expressions use Pattern Matrix codegen (linear if-else chain). LLVM StructType support and `declare` for external atom calls.
+5. **Sharpening (Transpiler):** Generates **Enum definitions** (Rust `enum` / Go `const+type` / TypeScript discriminated union), **Struct definitions** (Rust `struct` / Go `struct` / TypeScript `interface`), module headers, and atom bodies. Outputs `.rs`, `.go`, and `.ts` files.
 
 ---
 
@@ -223,6 +247,12 @@ brew install llvm@18 z3
 
 # Multi-file import test
 ./target/release/mumei examples/import_test/main.mm --output dist/import_test
+
+# Pattern matching: ATM state machine (enum + match + guards)
+./target/release/mumei examples/match_atm.mm --output dist/match_atm
+
+# Pattern matching: Safe expression evaluator (zero-division detection)
+./target/release/mumei examples/match_evaluator.mm --output dist/match_evaluator
 ```
 
 ### Expected Output
@@ -333,6 +363,81 @@ body: {
 
 ---
 
+## 📄 Pattern Matching Test (`examples/match_atm.mm`)
+
+Demonstrates Enum + match + guards + Refinement Types. The ATM state machine proves that all state×action combinations are handled and results are always valid states:
+
+```mumei
+type Balance = i64 where v >= 0;
+
+enum AtmState {
+    Idle,
+    Authenticated,
+    Dispensing,
+    Error
+}
+
+atom atm_transition(state, action, balance: Balance)
+    requires: state >= 0 && state <= 3 && action >= 0 && action <= 3;
+    ensures: result >= 0 && result <= 3;
+    body: {
+        match state {
+            0 => match action {
+                0 => 1,
+                _ => 3
+            },
+            1 => match action {
+                1 => 2,
+                3 => 0,
+                _ => 3
+            },
+            2 => match action {
+                2 if balance > 0 => 0,
+                2 => 3,
+                3 => 0,
+                _ => 3
+            },
+            _ => 3
+        }
+    }
+```
+
+### Transpiler Output
+
+**Rust:**
+```rust
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AtmState {
+    Idle,
+    Authenticated,
+    Dispensing,
+    Error,
+}
+
+pub fn atm_transition(state: i64, action: i64, balance: i64) -> i64 {
+    match state { 0 => match action { 0 => 1, _ => 3 }, ... }
+}
+```
+
+**Go:**
+```go
+type AtmState int64
+const (
+	Idle AtmState = iota
+	Authenticated
+	Dispensing
+	Error
+)
+```
+
+**TypeScript:**
+```typescript
+export const enum AtmStateTag { Idle, Authenticated, Dispensing, Error }
+export type AtmState = { tag: AtmStateTag.Idle } | { tag: AtmStateTag.Authenticated } | ...;
+```
+
+---
+
 ## 📄 Inter-atom Call Test (`examples/call_test.mm`)
 
 Demonstrates contract-based verification across atom calls. The verifier proves each caller's postcondition using only the callee's `ensures` contract — without re-verifying the callee's body:
@@ -411,12 +516,17 @@ body: {
 
 With `--output dist/katana`:
 
-| Output | Path |
-|---|---|
-| LLVM IR | `dist/katana_<AtomName>.ll` (one per atom) |
-| Rust | `dist/katana.rs` |
-| Go | `dist/katana.go` |
-| TypeScript | `dist/katana.ts` |
+| Output | Path | Contents |
+|---|---|---|
+| LLVM IR | `dist/katana_<AtomName>.ll` (one per atom) | Pattern Matrix match, StructType |
+| Rust | `dist/katana.rs` | `enum` + `struct` + `fn` with `match` |
+| Go | `dist/katana.go` | `const+type` + `struct` + `func` with `switch` |
+| TypeScript | `dist/katana.ts` | `const enum` + `interface` + `function` with `switch` |
+
+All generated code includes:
+- **Enum definitions** with variant tags
+- **Struct definitions** with field constraint comments (`/// where v >= 0`)
+- **Atom functions** with contract comments (`/// Requires: ...`, `/// Ensures: ...`)
 
 ---
 
@@ -424,18 +534,24 @@ With `--output dist/katana`:
 
 ```
 ├── src/
-│   ├── parser.rs          # AST, tokenizer, parser (import, struct, field access, decreases)
+│   ├── parser.rs          # AST, tokenizer, parser (enum, match, struct, recursive ADT)
 │   ├── resolver.rs        # Import resolution, dependency graph, circular import detection
-│   ├── verification.rs    # Z3 verification, ModuleEnv, inter-atom call contracts
-│   ├── codegen.rs         # LLVM IR generation (StructType, declare + call, llvm! macro)
+│   ├── verification.rs    # Z3 verification: exhaustiveness, domain constraints, projectors
+│   ├── codegen.rs         # LLVM IR generation (Pattern Matrix, StructType, llvm! macro)
 │   ├── transpiler/
-│   │   ├── mod.rs         # TargetLanguage dispatch + module header generation
-│   │   ├── rust.rs        # Rust transpiler (mod/use header)
-│   │   ├── golang.rs      # Go transpiler (package/import header)
-│   │   └── typescript.rs  # TypeScript transpiler (import/export header)
+│   │   ├── mod.rs         # TargetLanguage dispatch + enum/struct/atom transpile
+│   │   ├── rust.rs        # Rust transpiler (enum, struct, match, mod/use)
+│   │   ├── golang.rs      # Go transpiler (const+type, struct, switch)
+│   │   └── typescript.rs  # TypeScript transpiler (const enum, interface, discriminated union)
 │   └── main.rs            # Compiler orchestrator (parse → resolve → verify → codegen → transpile)
+├── std/
+│   ├── option.mm          # Option { None, Some(i64) } — verified
+│   ├── result.mm          # Result { Ok(i64), Err(i64) } — verified
+│   └── list.mm            # List { Nil, Cons(i64, Self) } — recursive ADT, verified
 ├── examples/
 │   ├── call_test.mm               # Inter-atom call test (compositional verification)
+│   ├── match_atm.mm              # ATM state machine (enum + match + guards)
+│   ├── match_evaluator.mm        # Safe expression evaluator (zero-division detection)
 │   └── import_test/
 │       ├── lib/
 │       │   └── math_utils.mm      # Reusable verified library

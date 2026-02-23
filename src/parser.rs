@@ -45,6 +45,51 @@ pub enum Expr {
     },
     /// フィールドアクセス: expr.field_name
     FieldAccess(Box<Expr>, String),
+    /// Match 式: match expr { Pattern => expr, ... }
+    Match {
+        target: Box<Expr>,
+        arms: Vec<MatchArm>,
+    },
+}
+
+/// Match 式のアーム（パターン → 式）
+#[derive(Debug, Clone)]
+pub struct MatchArm {
+    pub pattern: Pattern,
+    /// オプションのガード条件: match x { Pattern if cond => ... }
+    pub guard: Option<Box<Expr>>,
+    pub body: Box<Expr>,
+}
+
+/// パターン
+#[derive(Debug, Clone)]
+pub enum Pattern {
+    /// ワイルドカード: _
+    Wildcard,
+    /// リテラル整数: 42
+    Literal(i64),
+    /// 変数バインド: x（小文字始まり）
+    Variable(String),
+    /// Enum Variant パターン: Circle(r) or None
+    Variant {
+        variant_name: String,
+        fields: Vec<Pattern>,
+    },
+}
+
+/// Enum Variant 定義
+#[derive(Debug, Clone)]
+pub struct EnumVariant {
+    pub name: String,
+    /// Variant が保持するフィールドの型名リスト（Unit variant なら空）
+    pub fields: Vec<String>,
+}
+
+/// Enum 定義
+#[derive(Debug, Clone)]
+pub struct EnumDef {
+    pub name: String,
+    pub variants: Vec<EnumVariant>,
 }
 
 // --- 2. 量子化子、精緻型、および Item の定義 ---
@@ -118,6 +163,7 @@ pub enum Item {
     Atom(Atom),
     TypeDef(RefinedType),
     StructDef(StructDef),
+    EnumDef(EnumDef),
     Import(ImportDecl),
 }
 
@@ -181,6 +227,34 @@ pub fn parse_module(source: &str) -> Vec<Item> {
             })
             .collect();
         items.push(Item::StructDef(StructDef { name, fields }));
+    }
+
+    // enum 定義: enum Name { Variant1(Type), Variant2, Variant3(Type1, Type2) }
+    let enum_re = Regex::new(r"(?m)^enum\s+(\w+)\s*\{([^}]*)\}").unwrap();
+    for cap in enum_re.captures_iter(source) {
+        let name = cap[1].to_string();
+        let variants_raw = &cap[2];
+        let variants: Vec<EnumVariant> = variants_raw
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                // "Circle(f64)" or "None" or "Rect(f64, f64)"
+                if let Some(paren_start) = s.find('(') {
+                    let variant_name = s[..paren_start].trim().to_string();
+                    let fields_str = &s[paren_start + 1..s.rfind(')').unwrap_or(s.len())];
+                    let fields: Vec<String> = fields_str
+                        .split(',')
+                        .map(|f| f.trim().to_string())
+                        .filter(|f| !f.is_empty())
+                        .collect();
+                    EnumVariant { name: variant_name, fields }
+                } else {
+                    EnumVariant { name: s.to_string(), fields: vec![] }
+                }
+            })
+            .collect();
+        items.push(Item::EnumDef(EnumDef { name, variants }));
     }
 
     let atom_indices: Vec<_> = atom_re.find_iter(source).map(|m| m.start()).collect();
@@ -418,6 +492,41 @@ fn parse_primary(tokens: &[String], pos: &mut usize) -> Expr {
         panic!("Mumei requires an 'else' branch.");
     }
 
+    // match 式: match expr { Pattern => expr, ... }
+    if token == "match" {
+        *pos += 1;
+        let target = parse_implies(tokens, pos);
+        if *pos < tokens.len() && tokens[*pos] == "{" {
+            *pos += 1; // skip {
+        }
+        let mut arms = Vec::new();
+        while *pos < tokens.len() && tokens[*pos] != "}" {
+            let pattern = parse_pattern(tokens, pos);
+            // オプション: ガード条件 "if cond"
+            let guard = if *pos < tokens.len() && tokens[*pos] == "if" {
+                *pos += 1;
+                Some(Box::new(parse_implies(tokens, pos)))
+            } else {
+                None
+            };
+            // "=>" をスキップ
+            if *pos < tokens.len() && tokens[*pos] == "=" {
+                *pos += 1;
+                if *pos < tokens.len() && tokens[*pos] == ">" {
+                    *pos += 1;
+                }
+            } else if *pos < tokens.len() && tokens[*pos] == "=>" {
+                *pos += 1;
+            }
+            let body = parse_block_or_expr(tokens, pos);
+            arms.push(MatchArm { pattern, guard, body: Box::new(body) });
+            // アーム間の "," をスキップ
+            if *pos < tokens.len() && tokens[*pos] == "," { *pos += 1; }
+        }
+        if *pos < tokens.len() && tokens[*pos] == "}" { *pos += 1; }
+        return Expr::Match { target: Box::new(target), arms };
+    }
+
     *pos += 1;
     let mut node = if token == "(" {
         let node = parse_implies(tokens, pos);
@@ -476,4 +585,63 @@ fn parse_primary(tokens: &[String], pos: &mut usize) -> Expr {
         }
     }
     node
+}
+
+/// パターンをパースする
+/// - "_" → Wildcard
+/// - 数値リテラル → Literal
+/// - 大文字始まり識別子 + "(" ... ")" → Variant パターン
+/// - 大文字始まり識別子（括弧なし） → Unit Variant パターン
+/// - 小文字始まり識別子 → 変数バインド
+fn parse_pattern(tokens: &[String], pos: &mut usize) -> Pattern {
+    if *pos >= tokens.len() { return Pattern::Wildcard; }
+
+    let token = &tokens[*pos];
+
+    if token == "_" {
+        *pos += 1;
+        return Pattern::Wildcard;
+    }
+
+    // 負の数値リテラル: "-" + 数字
+    if token == "-" && *pos + 1 < tokens.len() {
+        if let Ok(n) = tokens[*pos + 1].parse::<i64>() {
+            *pos += 2;
+            return Pattern::Literal(-n);
+        }
+    }
+
+    // 数値リテラル
+    if let Ok(n) = token.parse::<i64>() {
+        *pos += 1;
+        return Pattern::Literal(n);
+    }
+
+    // 識別子
+    if token.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_') {
+        let name = token.clone();
+        *pos += 1;
+
+        // 大文字始まり → Variant パターン
+        if name.chars().next().map_or(false, |c| c.is_uppercase()) {
+            if *pos < tokens.len() && tokens[*pos] == "(" {
+                *pos += 1; // skip (
+                let mut fields = Vec::new();
+                while *pos < tokens.len() && tokens[*pos] != ")" {
+                    fields.push(parse_pattern(tokens, pos));
+                    if *pos < tokens.len() && tokens[*pos] == "," { *pos += 1; }
+                }
+                if *pos < tokens.len() && tokens[*pos] == ")" { *pos += 1; }
+                return Pattern::Variant { variant_name: name, fields };
+            }
+            // Unit variant（括弧なし）
+            return Pattern::Variant { variant_name: name, fields: vec![] };
+        }
+
+        // 小文字始まり → 変数バインド
+        return Pattern::Variable(name);
+    }
+
+    *pos += 1;
+    Pattern::Wildcard
 }

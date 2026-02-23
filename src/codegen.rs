@@ -306,6 +306,6 @@ fn compile_expr<'a>(
             Ok(val)
         },
 
-        _ => Err(format!("LLVM Codegen: Unimplemented expression type {:?}", expr)),
+
     }
 }

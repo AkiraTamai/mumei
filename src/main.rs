@@ -36,10 +36,11 @@ fn main() {
     let items = parser::parse_module(&source);
 
     // --- 1.5 Resolve (依存解決) ---
-    // import 宣言を処理し、依存モジュールの型・構造体・atom を登録
+    // import 宣言を処理し、依存モジュールの型・構造体・atom を ModuleEnv に登録
+    let mut module_env = verification::ModuleEnv::new();
     let input_path = Path::new(&cli.input);
     let base_dir = input_path.parent().unwrap_or(Path::new("."));
-    if let Err(e) = resolver::resolve_imports(&items, base_dir) {
+    if let Err(e) = resolver::resolve_imports(&items, base_dir, &mut module_env) {
         eprintln!("  ❌ Import Resolution Failed: {}", e);
         std::process::exit(1);
     }
@@ -63,9 +64,7 @@ fn main() {
 
     let mut atom_count = 0;
 
-    // --- Phase 0: ModuleEnv 構築 + import 宣言収集 ---
-    // グローバル Mutex を廃止し、ModuleEnv で全定義を一元管理する
-    let mut module_env = verification::ModuleEnv::new();
+    // --- Phase 0: ModuleEnv に全定義を登録 ---
     let mut imports: Vec<ImportDecl> = Vec::new();
     for item in &items {
         match item {

@@ -1,6 +1,6 @@
 use z3::ast::{Ast, Int, Bool, Array, Dynamic, Float};
 use z3::{Config, Context, Solver, SatResult};
-use crate::parser::{Atom, QuantifierType, Expr, Op, parse_expression, RefinedType, StructDef, EnumDef, Pattern, MatchArm};
+use crate::parser::{Atom, QuantifierType, Expr, Op, parse_expression, RefinedType, StructDef, EnumDef, Pattern, MatchArm, TraitDef, ImplDef};
 use std::fs;
 use std::path::Path;
 use std::fmt;
@@ -65,6 +65,10 @@ pub struct ModuleEnv {
     pub atoms: HashMap<String, Atom>,
     /// Enum 定義（FQN キー）
     pub enums: HashMap<String, EnumDef>,
+    /// トレイト定義
+    pub traits: HashMap<String, TraitDef>,
+    /// トレイト実装: (トレイト名, 型名) → ImplDef
+    pub impls: Vec<ImplDef>,
     /// 検証済み Atom 名のキャッシュ
     pub verified_cache: HashSet<String>,
 }
@@ -117,6 +121,33 @@ impl ModuleEnv {
             return refined._base_type.clone();
         }
         type_name.to_string()
+    }
+
+    pub fn register_trait(&mut self, trait_def: &TraitDef) {
+        self.traits.insert(trait_def.name.clone(), trait_def.clone());
+    }
+
+    pub fn register_impl(&mut self, impl_def: &ImplDef) {
+        self.impls.push(impl_def.clone());
+    }
+
+    pub fn get_trait(&self, name: &str) -> Option<&TraitDef> {
+        self.traits.get(name)
+    }
+
+    /// 指定した型がトレイトを実装しているか確認する
+    pub fn find_impl(&self, trait_name: &str, target_type: &str) -> Option<&ImplDef> {
+        self.impls.iter().find(|i| i.trait_name == trait_name && i.target_type == target_type)
+    }
+
+    /// 指定した型がトレイト境界を全て満たしているか検証する
+    pub fn check_trait_bounds(&self, type_name: &str, bounds: &[String]) -> Result<(), String> {
+        for bound in bounds {
+            if self.find_impl(bound, type_name).is_none() {
+                return Err(format!("Type '{}' does not implement trait '{}'", type_name, bound));
+            }
+        }
+        Ok(())
     }
 
     /// Atom を検証済みとしてマークする

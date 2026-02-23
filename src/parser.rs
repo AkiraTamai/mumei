@@ -145,6 +145,8 @@ pub struct Atom {
     pub name: String,
     /// Generics: 型パラメータリスト（例: ["T", "U"]）。非ジェネリックなら空。
     pub type_params: Vec<String>,
+    /// トレイト境界: 型パラメータに課す制約（例: [TypeParamBound { param: "T", bounds: ["Comparable"] }]）
+    pub where_bounds: Vec<TypeParamBound>,
     pub params: Vec<Param>,
     pub requires: String,
     pub forall_constraints: Vec<Quantifier>,
@@ -181,6 +183,61 @@ pub struct ImportDecl {
     pub alias: Option<String>,
 }
 
+/// トレイト境界: 型パラメータに課す制約（例: "T: Comparable"）
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypeParamBound {
+    /// 型パラメータ名（例: "T"）
+    pub param: String,
+    /// 制約トレイト名のリスト（例: ["Comparable", "Numeric"]）
+    pub bounds: Vec<String>,
+}
+
+/// トレイトのメソッドシグネチャ
+#[derive(Debug, Clone)]
+pub struct TraitMethod {
+    /// メソッド名（例: "leq"）
+    pub name: String,
+    /// パラメータの型名リスト（Self は暗黙）
+    pub param_types: Vec<String>,
+    /// 戻り値型名（例: "bool", "i64"）
+    pub return_type: String,
+}
+
+/// トレイト定義
+/// ```mumei
+/// trait Comparable {
+///     fn leq(a: Self, b: Self) -> bool;
+///     law reflexive: leq(x, x) == true;
+///     law transitive: leq(a, b) && leq(b, c) => leq(a, c);
+/// }
+/// ```
+#[derive(Debug, Clone)]
+pub struct TraitDef {
+    /// トレイト名（例: "Comparable"）
+    pub name: String,
+    /// メソッドシグネチャ
+    pub methods: Vec<TraitMethod>,
+    /// 法則（Laws）: トレイトが満たすべき論理的性質。
+    /// 各要素は (法則名, 論理式の文字列) のペア。
+    pub laws: Vec<(String, String)>,
+}
+
+/// トレイト実装定義
+/// ```mumei
+/// impl Comparable for i64 {
+///     fn leq(a: i64, b: i64) -> bool { a <= b }
+/// }
+/// ```
+#[derive(Debug, Clone)]
+pub struct ImplDef {
+    /// 実装対象のトレイト名（例: "Comparable"）
+    pub trait_name: String,
+    /// 実装する型名（例: "i64"）
+    pub target_type: String,
+    /// メソッド実装: (メソッド名, body 式の文字列)
+    pub method_bodies: Vec<(String, String)>,
+}
+
 #[derive(Debug, Clone)]
 pub enum Item {
     Atom(Atom),
@@ -188,6 +245,8 @@ pub enum Item {
     StructDef(StructDef),
     EnumDef(EnumDef),
     Import(ImportDecl),
+    TraitDef(TraitDef),
+    ImplDef(ImplDef),
 }
 
 // --- 3. Generics パースヘルパー ---
@@ -269,6 +328,29 @@ fn split_type_args(input: &str) -> Vec<String> {
         result.push(trimmed);
     }
     result
+}
+
+/// 型パラメータリストから境界付きパラメータをパースする。
+/// 例: "<T: Comparable, U>" → type_params=["T","U"], bounds=[{param:"T", bounds:["Comparable"]}]
+fn parse_type_params_with_bounds(input: &str) -> (Vec<String>, Vec<TypeParamBound>) {
+    let (raw_params, _) = parse_type_params_from_str(input);
+    let mut type_params = Vec::new();
+    let mut bounds = Vec::new();
+
+    for raw in &raw_params {
+        if let Some((param, bound_str)) = raw.split_once(':') {
+            let param = param.trim().to_string();
+            let param_bounds: Vec<String> = bound_str.split('+')
+                .map(|b| b.trim().to_string())
+                .filter(|b| !b.is_empty())
+                .collect();
+            bounds.push(TypeParamBound { param: param.clone(), bounds: param_bounds });
+            type_params.push(param);
+        } else {
+            type_params.push(raw.trim().to_string());
+        }
+    }
+    (type_params, bounds)
 }
 
 // --- 4. メインパーサーロジック ---
@@ -391,6 +473,68 @@ pub fn parse_module(source: &str) -> Vec<Item> {
         items.push(Item::EnumDef(EnumDef { name, type_params, variants, is_recursive: any_recursive }));
     }
 
+    // trait 定義: trait Name { fn method(a: Type) -> Type; law name: expr; }
+    let trait_re = Regex::new(r"(?m)^trait\s+(\w+)\s*\{([^}]*)\}").unwrap();
+    for cap in trait_re.captures_iter(source) {
+        let name = cap[1].to_string();
+        let body = &cap[2];
+        let mut methods = Vec::new();
+        let mut laws = Vec::new();
+
+        for line in body.lines() {
+            let line = line.trim();
+            if line.is_empty() { continue; }
+
+            if line.starts_with("fn ") {
+                // fn leq(a: Self, b: Self) -> bool;
+                let fn_re = Regex::new(r"fn\s+(\w+)\s*\(([^)]*)\)\s*->\s*(\w+)").unwrap();
+                if let Some(fcap) = fn_re.captures(line) {
+                    let method_name = fcap[1].to_string();
+                    let params_str = &fcap[2];
+                    let return_type = fcap[3].to_string();
+                    let param_types: Vec<String> = params_str.split(',')
+                        .map(|p| {
+                            if let Some((_, t)) = p.split_once(':') {
+                                t.trim().to_string()
+                            } else {
+                                p.trim().to_string()
+                            }
+                        })
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    methods.push(TraitMethod { name: method_name, param_types, return_type });
+                }
+            } else if line.starts_with("law ") {
+                // law reflexive: leq(x, x) == true;
+                let law_re = Regex::new(r"law\s+(\w+)\s*:\s*([^;]+)").unwrap();
+                if let Some(lcap) = law_re.captures(line) {
+                    let law_name = lcap[1].to_string();
+                    let law_expr = lcap[2].trim().to_string();
+                    laws.push((law_name, law_expr));
+                }
+            }
+        }
+        items.push(Item::TraitDef(TraitDef { name, methods, laws }));
+    }
+
+    // impl 定義: impl TraitName for TypeName { fn method(params) -> Type { body } }
+    let impl_re = Regex::new(r"(?m)^impl\s+(\w+)\s+for\s+(\w+)\s*\{([^}]*)\}").unwrap();
+    for cap in impl_re.captures_iter(source) {
+        let trait_name = cap[1].to_string();
+        let target_type = cap[2].to_string();
+        let body = &cap[3];
+        let mut method_bodies = Vec::new();
+
+        // fn method(params) -> Type { body } をパース
+        let method_re = Regex::new(r"fn\s+(\w+)\s*\([^)]*\)\s*->\s*\w+\s*\{([^}]*)\}").unwrap();
+        for mcap in method_re.captures_iter(body) {
+            let method_name = mcap[1].to_string();
+            let method_body = mcap[2].trim().to_string();
+            method_bodies.push((method_name, method_body));
+        }
+        items.push(Item::ImplDef(ImplDef { trait_name, target_type, method_bodies }));
+    }
+
     let atom_indices: Vec<_> = atom_re.find_iter(source).map(|m| m.start()).collect();
     for i in 0..atom_indices.len() {
         let start = atom_indices[i];
@@ -413,12 +557,9 @@ pub fn parse_atom(source: &str) -> Atom {
 
     let name_caps = name_re.captures(source).expect("Failed to parse atom name");
     let name = name_caps[1].to_string();
-    // Generics: 型パラメータ <T, U> のパース
-    let type_params = name_caps.get(2)
-        .map(|m| {
-            let (params, _) = parse_type_params_from_str(m.as_str());
-            params
-        })
+    // Generics: 型パラメータ <T: Trait, U> のパース（トレイト境界対応）
+    let (type_params, where_bounds) = name_caps.get(2)
+        .map(|m| parse_type_params_with_bounds(m.as_str()))
         .unwrap_or_default();
     let params: Vec<Param> = name_caps[3]
         .split(',')
@@ -472,6 +613,7 @@ pub fn parse_atom(source: &str) -> Atom {
     Atom {
         name,
         type_params,
+        where_bounds,
         params,
         requires: forall_re.replace_all(&exists_re.replace_all(&requires_raw, "true"), "true").to_string(),
         forall_constraints,

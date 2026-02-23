@@ -1,4 +1,5 @@
 use regex::Regex;
+use crate::ast::TypeRef;
 
 // --- 1. 数式の構造定義 (AST: Abstract Syntax Tree) ---
 
@@ -86,6 +87,9 @@ pub struct EnumVariant {
     /// `Cons(i64, List)` のような再帰的データ構造を定義可能。
     /// パーサーは "Self" を Enum 自身の名前に自動展開する。
     pub fields: Vec<String>,
+    /// Generics: フィールドの型参照（TypeRef 版）。
+    /// fields (String) との後方互換性のため両方保持する。
+    pub field_types: Vec<TypeRef>,
     /// このバリアントが再帰的か（フィールドに自身の Enum 名を含むか）
     #[allow(dead_code)]
     pub is_recursive: bool,
@@ -95,6 +99,8 @@ pub struct EnumVariant {
 #[derive(Debug, Clone)]
 pub struct EnumDef {
     pub name: String,
+    /// Generics: 型パラメータリスト（例: ["T", "U"]）。非ジェネリックなら空。
+    pub type_params: Vec<String>,
     pub variants: Vec<EnumVariant>,
     /// この Enum が再帰的データ型か（いずれかの Variant が自身を参照するか）
     #[allow(dead_code)]
@@ -130,11 +136,15 @@ pub struct RefinedType {
 pub struct Param {
     pub name: String,
     pub type_name: Option<String>,
+    /// Generics: 型参照（TypeRef 版）。type_name との後方互換性のため両方保持。
+    pub type_ref: Option<TypeRef>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Atom {
     pub name: String,
+    /// Generics: 型パラメータリスト（例: ["T", "U"]）。非ジェネリックなら空。
+    pub type_params: Vec<String>,
     pub params: Vec<Param>,
     pub requires: String,
     pub forall_constraints: Vec<Quantifier>,
@@ -147,6 +157,8 @@ pub struct Atom {
 pub struct StructField {
     pub name: String,
     pub type_name: String,
+    /// Generics: フィールドの型参照（TypeRef 版）
+    pub type_ref: TypeRef,
     /// フィールドの精緻型制約（例: "v >= 0"）。None なら制約なし
     pub constraint: Option<String>,
 }
@@ -155,6 +167,8 @@ pub struct StructField {
 #[derive(Debug, Clone)]
 pub struct StructDef {
     pub name: String,
+    /// Generics: 型パラメータリスト（例: ["T"]）。非ジェネリックなら空。
+    pub type_params: Vec<String>,
     pub fields: Vec<StructField>,
 }
 
@@ -176,7 +190,88 @@ pub enum Item {
     Import(ImportDecl),
 }
 
-// --- 3. メインパーサーロジック ---
+// --- 3. Generics パースヘルパー ---
+
+/// 型パラメータリスト `<T, U>` をパースする。
+/// input は `<` で始まる文字列を想定。成功時は (パラメータリスト, 消費バイト数) を返す。
+fn parse_type_params_from_str(input: &str) -> (Vec<String>, usize) {
+    if !input.starts_with('<') {
+        return (vec![], 0);
+    }
+    let mut depth = 0;
+    let mut end = 0;
+    for (i, c) in input.char_indices() {
+        match c {
+            '<' => depth += 1,
+            '>' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = i;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    if end == 0 {
+        return (vec![], 0);
+    }
+    let inner = &input[1..end];
+    let params: Vec<String> = inner.split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    (params, end + 1)
+}
+
+/// 型参照文字列（例: "Stack<i64>", "i64", "Map<String, List<i64>>"）を TypeRef にパースする。
+pub fn parse_type_ref(input: &str) -> TypeRef {
+    let input = input.trim();
+    if let Some(angle_pos) = input.find('<') {
+        // ジェネリック型: "Stack<i64>" → name="Stack", type_args=[TypeRef("i64")]
+        let name = input[..angle_pos].trim().to_string();
+        // 最後の '>' を見つける
+        let inner = if input.ends_with('>') {
+            &input[angle_pos + 1..input.len() - 1]
+        } else {
+            &input[angle_pos + 1..]
+        };
+        // カンマで分割（ネストした <> を考慮）
+        let args = split_type_args(inner);
+        let type_args: Vec<TypeRef> = args.iter().map(|a| parse_type_ref(a)).collect();
+        TypeRef::generic(&name, type_args)
+    } else {
+        TypeRef::simple(input)
+    }
+}
+
+/// ネストした `<>` を考慮してカンマで型引数を分割する
+fn split_type_args(input: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut depth = 0;
+    let mut current = String::new();
+    for c in input.chars() {
+        match c {
+            '<' => { depth += 1; current.push(c); }
+            '>' => { depth -= 1; current.push(c); }
+            ',' if depth == 0 => {
+                let trimmed = current.trim().to_string();
+                if !trimmed.is_empty() {
+                    result.push(trimmed);
+                }
+                current.clear();
+            }
+            _ => { current.push(c); }
+        }
+    }
+    let trimmed = current.trim().to_string();
+    if !trimmed.is_empty() {
+        result.push(trimmed);
+    }
+    result
+}
+
+// --- 4. メインパーサーロジック ---
 
 pub fn parse_module(source: &str) -> Vec<Item> {
     let mut items = Vec::new();
@@ -191,8 +286,8 @@ pub fn parse_module(source: &str) -> Vec<Item> {
     // type 定義: i64 | u64 | f64 を許容するように変更
     let type_re = Regex::new(r"(?m)^type\s+(\w+)\s*=\s*(\w+)\s+where\s+([^;]+);").unwrap();
     let atom_re = Regex::new(r"atom\s+\w+").unwrap();
-    // struct 定義: struct Name { field: Type, ... }
-    let struct_re = Regex::new(r"(?m)^struct\s+(\w+)\s*\{([^}]*)\}").unwrap();
+    // struct 定義: struct Name { field: Type, ... } または struct Name<T> { field: T, ... }
+    let struct_re = Regex::new(r"(?m)^struct\s+(\w+)\s*(<[^>]*>)?\s*\{([^}]*)\}").unwrap();
 
     // import 宣言のパース
     for cap in import_re.captures_iter(source) {
@@ -215,7 +310,14 @@ pub fn parse_module(source: &str) -> Vec<Item> {
 
     for cap in struct_re.captures_iter(source) {
         let name = cap[1].to_string();
-        let fields_raw = &cap[2];
+        // Generics: 型パラメータ <T, U> のパース
+        let type_params = cap.get(2)
+            .map(|m| {
+                let (params, _) = parse_type_params_from_str(m.as_str());
+                params
+            })
+            .unwrap_or_default();
+        let fields_raw = &cap[3];
         let fields: Vec<StructField> = fields_raw
             .split(',')
             .map(|s| s.trim())
@@ -228,22 +330,32 @@ pub fn parse_module(source: &str) -> Vec<Item> {
                     (s.trim(), None)
                 };
                 let parts: Vec<&str> = field_part.splitn(2, ':').collect();
+                let type_name_str = parts.get(1).map(|t| t.trim().to_string()).unwrap_or_else(|| "i64".to_string());
+                let type_ref = parse_type_ref(&type_name_str);
                 StructField {
                     name: parts[0].trim().to_string(),
-                    type_name: parts.get(1).map(|t| t.trim().to_string()).unwrap_or_else(|| "i64".to_string()),
+                    type_name: type_name_str,
+                    type_ref,
                     constraint,
                 }
             })
             .collect();
-        items.push(Item::StructDef(StructDef { name, fields }));
+        items.push(Item::StructDef(StructDef { name, type_params, fields }));
     }
 
-    // enum 定義: enum Name { Variant1(Type), Variant2, Variant3(Type1, Type2) }
+    // enum 定義: enum Name { ... } または enum Name<T> { ... }
     // 再帰的 ADT: フィールド型に "Self" または Enum 自身の名前を記述可能
-    let enum_re = Regex::new(r"(?m)^enum\s+(\w+)\s*\{([^}]*)\}").unwrap();
+    let enum_re = Regex::new(r"(?m)^enum\s+(\w+)\s*(<[^>]*>)?\s*\{([^}]*)\}").unwrap();
     for cap in enum_re.captures_iter(source) {
         let name = cap[1].to_string();
-        let variants_raw = &cap[2];
+        // Generics: 型パラメータ <T, U> のパース
+        let type_params = cap.get(2)
+            .map(|m| {
+                let (params, _) = parse_type_params_from_str(m.as_str());
+                params
+            })
+            .unwrap_or_default();
+        let variants_raw = &cap[3];
         let mut any_recursive = false;
         let variants: Vec<EnumVariant> = variants_raw
             .split(',')
@@ -263,16 +375,20 @@ pub fn parse_module(source: &str) -> Vec<Item> {
                         })
                         .filter(|f| !f.is_empty())
                         .collect();
+                    // TypeRef 版のフィールド型も生成
+                    let field_types: Vec<TypeRef> = fields.iter()
+                        .map(|f| parse_type_ref(f))
+                        .collect();
                     // 再帰判定: フィールドに自身の Enum 名を含むか
                     let is_recursive = fields.iter().any(|f| f == &name);
                     if is_recursive { any_recursive = true; }
-                    EnumVariant { name: variant_name, fields, is_recursive }
+                    EnumVariant { name: variant_name, fields, field_types, is_recursive }
                 } else {
-                    EnumVariant { name: s.to_string(), fields: vec![], is_recursive: false }
+                    EnumVariant { name: s.to_string(), fields: vec![], field_types: vec![], is_recursive: false }
                 }
             })
             .collect();
-        items.push(Item::EnumDef(EnumDef { name, variants, is_recursive: any_recursive }));
+        items.push(Item::EnumDef(EnumDef { name, type_params, variants, is_recursive: any_recursive }));
     }
 
     let atom_indices: Vec<_> = atom_re.find_iter(source).map(|m| m.start()).collect();
@@ -287,7 +403,8 @@ pub fn parse_module(source: &str) -> Vec<Item> {
 }
 
 pub fn parse_atom(source: &str) -> Atom {
-    let name_re = Regex::new(r"atom\s+(\w+)\s*\(([^)]*)\)").unwrap();
+    // Generics 対応: atom name<T, U>(params) の形式もパース
+    let name_re = Regex::new(r"atom\s+(\w+)\s*(<[^>]*>)?\s*\(([^)]*)\)").unwrap();
     let req_re = Regex::new(r"requires:\s*([^;]+);").unwrap();
     let ens_re = Regex::new(r"ensures:\s*([^;]+);").unwrap();
 
@@ -296,18 +413,28 @@ pub fn parse_atom(source: &str) -> Atom {
 
     let name_caps = name_re.captures(source).expect("Failed to parse atom name");
     let name = name_caps[1].to_string();
-    let params: Vec<Param> = name_caps[2]
+    // Generics: 型パラメータ <T, U> のパース
+    let type_params = name_caps.get(2)
+        .map(|m| {
+            let (params, _) = parse_type_params_from_str(m.as_str());
+            params
+        })
+        .unwrap_or_default();
+    let params: Vec<Param> = name_caps[3]
         .split(',')
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .map(|s| {
             if let Some((param_name, type_name)) = s.split_once(':') {
+                let type_name_str = type_name.trim().to_string();
+                let type_ref = parse_type_ref(&type_name_str);
                 Param {
                     name: param_name.trim().to_string(),
-                    type_name: Some(type_name.trim().to_string()),
+                    type_name: Some(type_name_str),
+                    type_ref: Some(type_ref),
                 }
             } else {
-                Param { name: s.to_string(), type_name: None }
+                Param { name: s.to_string(), type_name: None, type_ref: None }
             }
         })
         .collect();

@@ -5,8 +5,8 @@ use inkwell::module::Module;
 use inkwell::IntPredicate;
 use inkwell::FloatPredicate;
 use inkwell::AddressSpace;
-use crate::parser::{Atom, Expr, Op, parse_expression};
-use crate::verification::{resolve_base_type, get_struct_def, get_atom_def, MumeiError, MumeiResult};
+use crate::parser::{Atom, Expr, Op, Pattern, parse_expression};
+use crate::verification::{resolve_base_type, get_struct_def, get_atom_def, find_enum_by_variant, MumeiError, MumeiResult};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -391,6 +391,104 @@ fn compile_expr<'a>(
             Ok(last_val)
         },
 
+        Expr::Match { target, arms } => {
+            // =================================================================
+            // Pattern Matrix 方式による Match 式の LLVM IR 生成
+            // =================================================================
+            // パターン行列を「上から順に試行する if-else チェーン」として
+            // コンパイルする。各行（アーム）は以下の手順で処理：
+            //
+            // 1. パターンの条件判定（Literal: ==, Variant: tag ==, _: true）
+            // 2. ガード条件がある場合は追加の条件分岐
+            // 3. パターン変数のバインド
+            // 4. body のコンパイル
+            // 5. merge ブロックへジャンプ
+            //
+            // ネストパターンは再帰的に条件を AND 結合する。
+            // これにより CFG が線形な if-else チェーンになり、
+            // switch_block の後付け挿入問題を完全に解消する。
+            let target_val = compile_expr(context, builder, module, function, target, variables, array_ptrs)?;
+
+            let merge_block = context.append_basic_block(*function, "match.merge");
+            let unreachable_block = context.append_basic_block(*function, "match.unreachable");
+
+            // 結果を集約する phi ノード用のバッファ
+            let mut incoming: Vec<(BasicValueEnum<'a>, inkwell::basic_block::BasicBlock<'a>)> = Vec::new();
+
+            // 次のアームの試行ブロック（最後のアームの fail は unreachable へ）
+            // アームを逆順に処理して fail_block チェーンを構築…ではなく、
+            // 順方向で「現在のアームが失敗したら次のアームへ」を構築する。
+            let arm_count = arms.len();
+            // 各アームの「試行開始」ブロックを事前に作成
+            let mut try_blocks: Vec<inkwell::basic_block::BasicBlock<'a>> = Vec::new();
+            for i in 0..arm_count {
+                try_blocks.push(context.append_basic_block(*function, &format!("match.try_{}", i)));
+            }
+
+            // 現在のブロックから最初の try ブロックへジャンプ
+            llvm!(builder.build_unconditional_branch(try_blocks[0]));
+
+            for (i, arm) in arms.iter().enumerate() {
+                let try_block = try_blocks[i];
+                let fail_block = if i + 1 < arm_count {
+                    try_blocks[i + 1]
+                } else {
+                    unreachable_block
+                };
+
+                builder.position_at_end(try_block);
+
+                // --- Step 1: パターン条件の生成（再帰的） ---
+                let pattern_matches = compile_pattern_test(
+                    context, builder, &arm.pattern, target_val, variables,
+                )?;
+
+                // --- Step 2: ガード条件 ---
+                let full_cond = if let Some(guard) = &arm.guard {
+                    // ガード評価のためにパターン変数を一時バインド
+                    let mut guard_vars = variables.clone();
+                    bind_pattern_variables(&arm.pattern, target_val, &mut guard_vars);
+                    let guard_val = compile_expr(context, builder, module, function, guard, &mut guard_vars, array_ptrs)?.into_int_value();
+                    let guard_bool = llvm!(builder.build_int_compare(
+                        IntPredicate::NE, guard_val,
+                        context.i64_type().const_int(0, false), "guard_cond"
+                    ));
+                    llvm!(builder.build_and(pattern_matches, guard_bool, "match_and_guard"))
+                } else {
+                    pattern_matches
+                };
+
+                // 条件分岐: マッチ → body ブロック, 不一致 → 次のアーム
+                let body_block = context.append_basic_block(*function, &format!("match.body_{}", i));
+                llvm!(builder.build_conditional_branch(full_cond, body_block, fail_block));
+
+                // --- Step 3 & 4: パターン変数バインド + body コンパイル ---
+                builder.position_at_end(body_block);
+                let mut arm_vars = variables.clone();
+                bind_pattern_variables(&arm.pattern, target_val, &mut arm_vars);
+
+                let body_val = compile_expr(context, builder, module, function, &arm.body, &mut arm_vars, array_ptrs)?;
+                let body_end = builder.get_insert_block().unwrap();
+                llvm!(builder.build_unconditional_branch(merge_block));
+                incoming.push((body_val, body_end));
+            }
+
+            // unreachable ブロック: 網羅性は verification で保証済みなので到達しない
+            builder.position_at_end(unreachable_block);
+            let unreachable_val: BasicValueEnum = context.i64_type().const_int(0, false).into();
+            llvm!(builder.build_unconditional_branch(merge_block));
+            incoming.push((unreachable_val, unreachable_block));
+
+            // merge ブロックで phi ノードを構築
+            builder.position_at_end(merge_block);
+            let phi = llvm!(builder.build_phi(context.i64_type(), "match_result"));
+            for (val, block) in &incoming {
+                phi.add_incoming(&[(val, *block)]);
+            }
+
+            Ok(phi.as_basic_value())
+        },
+
         Expr::FieldAccess(expr, field_name) => {
             if let Expr::Variable(var_name) = expr.as_ref() {
                 // フラット変数として探す
@@ -428,6 +526,114 @@ fn compile_expr<'a>(
                     Err(MumeiError::CodegenError(format!("Cannot access field '{}' on non-struct value", field_name)))
                 }
             }
+        },
+    }
+}
+
+// =============================================================================
+// Pattern Matrix: パターン条件生成 + 変数バインド
+// =============================================================================
+
+/// パターンから LLVM の条件（i1 bool）を再帰的に生成する。
+/// ネストパターン `Variant(Literal(42), x)` のような場合、
+/// 各サブパターンの条件を AND 結合する。
+///
+/// - Wildcard / Variable → true (const 1)
+/// - Literal(n) → target == n
+/// - Variant { name, fields } → (target == tag) ∧ (fields の再帰条件)
+fn compile_pattern_test<'a>(
+    context: &'a Context,
+    builder: &Builder<'a>,
+    pattern: &Pattern,
+    target: BasicValueEnum<'a>,
+    _variables: &HashMap<String, BasicValueEnum<'a>>,
+) -> MumeiResult<inkwell::values::IntValue<'a>> {
+    match pattern {
+        Pattern::Wildcard | Pattern::Variable(_) => {
+            // 常にマッチ
+            Ok(context.bool_type().const_int(1, false))
+        },
+        Pattern::Literal(n) => {
+            let target_int = target.into_int_value();
+            let lit = context.i64_type().const_int(*n as u64, true);
+            let cmp = llvm!(builder.build_int_compare(IntPredicate::EQ, target_int, lit, "pat_lit_eq"));
+            Ok(cmp)
+        },
+        Pattern::Variant { variant_name, fields } => {
+            // Enum variant: tag 値で判定
+            let target_int = target.into_int_value();
+            let tag_val = if let Some(enum_def) = find_enum_by_variant(variant_name) {
+                enum_def.variants.iter()
+                    .position(|v| v.name == *variant_name)
+                    .unwrap_or(0) as u64
+            } else {
+                // Enum 定義が見つからない場合はハッシュベースのフォールバック
+                variant_name.bytes().fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64))
+            };
+            let tag_const = context.i64_type().const_int(tag_val, false);
+            let tag_match = llvm!(builder.build_int_compare(IntPredicate::EQ, target_int, tag_const, "pat_tag_eq"));
+
+            // ネストパターンの再帰処理: 各フィールドの条件を AND 結合
+            // 現在は tag のみで payload を持たないため、フィールドパターンが
+            // Wildcard/Variable 以外の場合のみ再帰（将来の payload 対応の準備）
+            let mut result = tag_match;
+            for (_i, field_pat) in fields.iter().enumerate() {
+                match field_pat {
+                    Pattern::Wildcard | Pattern::Variable(_) => {
+                        // 常にマッチ → AND しても変わらない
+                    },
+                    _ => {
+                        // 将来: payload からフィールド値を取得して再帰
+                        // 現在は payload がないため、ダミー値 0 で再帰テスト
+                        let dummy_field: BasicValueEnum = context.i64_type().const_int(0, false).into();
+                        let field_test = compile_pattern_test(context, builder, field_pat, dummy_field, _variables)?;
+                        result = llvm!(builder.build_and(result, field_test, "pat_nested_and"));
+                    },
+                }
+            }
+            Ok(result)
+        },
+    }
+}
+
+/// パターンから変数バインドを variables に登録する（再帰的）。
+/// - Variable(name) → target の値を name にバインド
+/// - Variant の fields 内の Variable → 将来は payload から取得、現在はダミー
+fn bind_pattern_variables<'a>(
+    pattern: &Pattern,
+    target: BasicValueEnum<'a>,
+    variables: &mut HashMap<String, BasicValueEnum<'a>>,
+) {
+    match pattern {
+        Pattern::Variable(name) => {
+            variables.insert(name.clone(), target);
+        },
+        Pattern::Variant { variant_name: _, fields } => {
+            for (_i, field_pat) in fields.iter().enumerate() {
+                match field_pat {
+                    Pattern::Variable(fname) => {
+                        // 将来: payload からフィールド値を GEP + load で取得
+                        // 現在は tag のみなのでダミー値
+                        let dummy: BasicValueEnum = target.get_type()
+                            .into_int_type()
+                            .const_int(0, false)
+                            .into();
+                        variables.insert(fname.clone(), dummy);
+                    },
+                    Pattern::Variant { .. } => {
+                        // ネストした Variant: 再帰的にバインド（将来の payload 対応）
+                        let dummy: BasicValueEnum = target.get_type()
+                            .into_int_type()
+                            .const_int(0, false)
+                            .into();
+                        bind_pattern_variables(field_pat, dummy, variables);
+                    },
+                    _ => {}
+                }
+            }
+        },
+        Pattern::Wildcard | Pattern::Literal(_) => {
+            // バインドなし
         },
     }
 }

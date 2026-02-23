@@ -1,4 +1,4 @@
-use crate::parser::{Expr, Op, Atom, ImportDecl, parse_expression};
+use crate::parser::{Expr, Op, Atom, ImportDecl, EnumDef, StructDef, parse_expression};
 use crate::verification::resolve_base_type;
 
 /// import 宣言から Go のモジュールヘッダーを生成する
@@ -25,6 +25,50 @@ pub fn transpile_module_header_go(imports: &[ImportDecl], module_name: &str) -> 
         lines.push(String::new());
     }
     lines.join("\n")
+}
+
+/// Enum 定義を Go の const + type に変換する
+pub fn transpile_enum_go(enum_def: &EnumDef) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!("// Verified Enum: {}", enum_def.name));
+    lines.push(format!("type {} int64", enum_def.name));
+    lines.push(String::new());
+    lines.push("const (".to_string());
+    for (i, variant) in enum_def.variants.iter().enumerate() {
+        if i == 0 {
+            lines.push(format!("\t{} {} = iota", variant.name, enum_def.name));
+        } else {
+            lines.push(format!("\t{}", variant.name));
+        }
+    }
+    lines.push(")".to_string());
+    lines.join("\n")
+}
+
+/// Struct 定義を Go の struct に変換する
+pub fn transpile_struct_go(struct_def: &StructDef) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!("// Verified Struct: {}", struct_def.name));
+    lines.push(format!("type {} struct {{", struct_def.name));
+    for field in &struct_def.fields {
+        let go_type = map_type_go(Some(field.type_name.as_str()));
+        if let Some(constraint) = &field.constraint {
+            lines.push(format!("\t// where {}", constraint));
+        }
+        // Go のフィールド名は大文字始まり（エクスポート）
+        let capitalized = capitalize_first(&field.name);
+        lines.push(format!("\t{} {}", capitalized, go_type));
+    }
+    lines.push("}".to_string());
+    lines.join("\n")
+}
+
+fn capitalize_first(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        None => String::new(),
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+    }
 }
 
 pub fn transpile_to_go(atom: &Atom) -> String {
@@ -144,6 +188,27 @@ fn format_expr_go(expr: &Expr) -> String {
 
         Expr::FieldAccess(expr, field) => {
             format!("{}.{}", format_expr_go(expr), field)
+        },
+
+        Expr::Match { target, arms } => {
+            // Go には match がないため switch 文に変換
+            let target_str = format_expr_go(target);
+            let mut cases = Vec::new();
+            for arm in arms {
+                let body = format_expr_go(&arm.body);
+                match &arm.pattern {
+                    crate::parser::Pattern::Literal(n) => {
+                        cases.push(format!("case {}:\n        return {}", n, body));
+                    },
+                    crate::parser::Pattern::Variant { variant_name, .. } => {
+                        cases.push(format!("// {}\n        case /* {} */:\n        return {}", variant_name, variant_name, body));
+                    },
+                    crate::parser::Pattern::Wildcard | crate::parser::Pattern::Variable(_) => {
+                        cases.push(format!("default:\n        return {}", body));
+                    },
+                }
+            }
+            format!("switch {} {{\n    {}\n    }}", target_str, cases.join("\n    "))
         },
     }
 }

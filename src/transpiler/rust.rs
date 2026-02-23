@@ -1,4 +1,4 @@
-use crate::parser::{Expr, Op, Atom, ImportDecl, parse_expression};
+use crate::parser::{Expr, Op, Atom, ImportDecl, EnumDef, StructDef, parse_expression};
 use crate::verification::resolve_base_type;
 
 /// import 宣言から Rust のモジュールヘッダーを生成する
@@ -18,6 +18,43 @@ pub fn transpile_module_header_rust(imports: &[ImportDecl], _module_name: &str) 
     if !lines.is_empty() {
         lines.push(String::new()); // 空行で区切り
     }
+    lines.join("\n")
+}
+
+/// Enum 定義を Rust の enum に変換する
+pub fn transpile_enum_rust(enum_def: &EnumDef) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!("/// Verified Enum: {}", enum_def.name));
+    lines.push(format!("#[derive(Debug, Clone, Copy, PartialEq)]"));
+    lines.push(format!("pub enum {} {{", enum_def.name));
+    for variant in &enum_def.variants {
+        if variant.fields.is_empty() {
+            lines.push(format!("    {},", variant.name));
+        } else {
+            let field_types: Vec<String> = variant.fields.iter()
+                .map(|f| map_type_rust(Some(f.as_str())))
+                .collect();
+            lines.push(format!("    {}({}),", variant.name, field_types.join(", ")));
+        }
+    }
+    lines.push("}".to_string());
+    lines.join("\n")
+}
+
+/// Struct 定義を Rust の struct に変換する
+pub fn transpile_struct_rust(struct_def: &StructDef) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!("/// Verified Struct: {}", struct_def.name));
+    lines.push(format!("#[derive(Debug, Clone)]"));
+    lines.push(format!("pub struct {} {{", struct_def.name));
+    for field in &struct_def.fields {
+        let rust_type = map_type_rust(Some(field.type_name.as_str()));
+        if let Some(constraint) = &field.constraint {
+            lines.push(format!("    /// where {}", constraint));
+        }
+        lines.push(format!("    pub {}: {},", field.name, rust_type));
+    }
+    lines.push("}".to_string());
     lines.join("\n")
 }
 
@@ -56,6 +93,7 @@ fn body_contains_float(expr: &Expr) -> bool {
             body_contains_float(cond) || body_contains_float(then_branch) || body_contains_float(else_branch),
         Expr::While { cond, body, .. } => body_contains_float(cond) || body_contains_float(body),
         Expr::Call(_, args) => args.iter().any(body_contains_float),
+        Expr::Match { target, arms } => body_contains_float(target) || arms.iter().any(|a| body_contains_float(&a.body)),
         _ => false,
     }
 }
@@ -174,6 +212,35 @@ fn format_expr_rust(expr: &Expr) -> String {
 
         Expr::FieldAccess(expr, field) => {
             format!("{}.{}", format_expr_rust(expr), field)
+        },
+
+        Expr::Match { target, arms } => {
+            let target_str = format_expr_rust(target);
+            let arms_str: Vec<String> = arms.iter().map(|arm| {
+                let pat = format_pattern_rust(&arm.pattern);
+                let guard = arm.guard.as_ref()
+                    .map(|g| format!(" if {}", format_expr_rust(g)))
+                    .unwrap_or_default();
+                let body = format_expr_rust(&arm.body);
+                format!("{}{} => {}", pat, guard, body)
+            }).collect();
+            format!("match {} {{ {} }}", target_str, arms_str.join(", "))
+        },
+    }
+}
+
+fn format_pattern_rust(pattern: &crate::parser::Pattern) -> String {
+    match pattern {
+        crate::parser::Pattern::Wildcard => "_".to_string(),
+        crate::parser::Pattern::Literal(n) => n.to_string(),
+        crate::parser::Pattern::Variable(name) => name.clone(),
+        crate::parser::Pattern::Variant { variant_name, fields } => {
+            if fields.is_empty() {
+                variant_name.clone()
+            } else {
+                let field_strs: Vec<String> = fields.iter().map(format_pattern_rust).collect();
+                format!("{}({})", variant_name, field_strs.join(", "))
+            }
         },
     }
 }

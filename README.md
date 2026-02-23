@@ -58,6 +58,41 @@ struct Circle {
 }
 ```
 
+### Enums & Pattern Matching
+
+Mumei supports algebraic data types (Enums) with Z3-powered exhaustiveness checking.
+
+```mumei
+enum AtmState {
+    Idle,
+    Authenticated,
+    Dispensing,
+    Error
+}
+```
+
+Match expressions with guard conditions — Z3 proves exhaustiveness:
+
+```mumei
+atom classify_int(x)
+    requires: true;
+    ensures: result >= 0 && result <= 2;
+    body: {
+        match x {
+            n if n > 0 => 0,
+            0 => 1,
+            _ => 2
+        }
+    }
+```
+
+**Exhaustiveness checking** uses SMT solving, not syntactic analysis. For a match on `x`:
+- Each arm's condition $P_i$ is extracted (including guard conditions)
+- Z3 proves $\neg(P_1 \lor P_2 \lor \dots \lor P_n)$ is **Unsat**
+- If **Sat**, Z3's `get_model()` provides a concrete counter-example showing which value is uncovered
+
+**Default arm optimization**: When a `_` arm is present, the negation of all prior arms is injected as a precondition, improving verification precision within the default body.
+
 ---
 
 ## 📐 Termination Checking
@@ -435,6 +470,13 @@ With `--output dist/katana`:
 - [x] Verification cache (`.mumei_cache`) with SHA-256 hash-based invalidation
 - [x] Imported atom body re-verification skip (contract-trusted)
 - [x] Transpiler module headers (`mod`/`use` for Rust, `package`/`import` for Go, `import` for TypeScript)
+- [x] Enum (ADT) definitions (`enum Shape { Circle(f64), Rect(f64, f64), None }`)
+- [x] Pattern matching (`match expr { Pattern => expr, ... }`)
+- [x] Z3-powered exhaustiveness checking (SMT-based, not syntactic)
+- [x] Match guard conditions (`Pattern if cond => ...`)
+- [x] Default arm optimization (prior arm negations as preconditions for `_` arms)
+- [x] Nested pattern decomposition (recursive `Variant(Variant(...))` support)
+- [x] Counter-example display on exhaustiveness failure (Z3 `get_model()`)
 - [ ] Equality ensures propagation (`ensures: result == n + 1` for chained call verification)
 - [ ] Fully qualified name (FQN) dot-notation in source code (`math.add(x, y)`)
 - [ ] Incremental build (re-verify only changed modules)

@@ -167,6 +167,7 @@ pub fn register_enum(enum_def: &EnumDef) -> MumeiResult<()> {
 }
 
 /// 登録済み Enum 定義を取得
+#[allow(dead_code)]
 pub fn get_enum_def(name: &str) -> Option<EnumDef> {
     ENUM_ENV.lock().ok().and_then(|env| env.get(name).cloned())
 }

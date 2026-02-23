@@ -69,7 +69,7 @@ fn format_expr_go(expr: &Expr) -> String {
             )
         },
 
-        Expr::While { cond, invariant, body } => {
+        Expr::While { cond, invariant, decreases: _, body } => {
             format!(
                 "// invariant: {}\n    for {} {{\n        {}\n    }}",
                 format_expr_go(invariant),

@@ -51,7 +51,7 @@ fn format_expr_ts(expr: &Expr) -> String {
             )
         },
 
-        Expr::While { cond, invariant, body } => {
+        Expr::While { cond, invariant, decreases: _, body } => {
             format!(
                 "// invariant: {}\n    while ({}) {{\n        {}\n    }}",
                 format_expr_ts(invariant),

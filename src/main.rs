@@ -72,31 +72,62 @@ enum Command {
 fn main() {
     let cli = Cli::parse();
 
-    // ソースファイルの読み込み
-    let source = fs::read_to_string(&cli.input).unwrap_or_else(|_| {
-        eprintln!("❌ Error: Could not read Mumei source file '{}'", cli.input);
+    match cli.command {
+        Some(Command::Build { input, output }) => {
+            cmd_build(&input, &output);
+        }
+        Some(Command::Verify { input }) => {
+            cmd_verify(&input);
+        }
+        Some(Command::Check { input }) => {
+            cmd_check(&input);
+        }
+        Some(Command::Init { name }) => {
+            cmd_init(&name);
+        }
+        None => {
+            // 後方互換: `mumei input.mm -o dist/katana` → build として実行
+            if let Some(ref input) = cli.input {
+                cmd_build(input, &cli.output);
+            } else {
+                eprintln!("Usage: mumei <COMMAND> or mumei <input.mm>");
+                eprintln!("  build   Verify + compile + transpile (default)");
+                eprintln!("  verify  Z3 formal verification only");
+                eprintln!("  check   Parse + resolve only (fast syntax check)");
+                eprintln!("  init    Generate a new project template");
+                eprintln!("Run `mumei --help` for full usage.");
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
+// =============================================================================
+// Shared pipeline helpers
+// =============================================================================
+
+/// ソースファイルを読み込む
+fn load_source(input: &str) -> String {
+    fs::read_to_string(input).unwrap_or_else(|_| {
+        eprintln!("❌ Error: Could not read Mumei source file '{}'", input);
         std::process::exit(1);
-    });
+    })
+}
 
-    println!("🗡️  Mumei: Forging the blade (Type System 2.0 + Generics enabled)...");
-
-    // --- 1. Parsing (構文解析) ---
+/// parse → resolve → monomorphize → ModuleEnv に全定義を登録
+fn load_and_prepare(input: &str) -> (Vec<Item>, verification::ModuleEnv, Vec<ImportDecl>) {
+    let source = load_source(input);
     let items = parser::parse_module(&source);
 
-    // --- 1.5 Resolve (依存解決) ---
-    // import 宣言を処理し、依存モジュールの型・構造体・atom を ModuleEnv に登録
     let mut module_env = verification::ModuleEnv::new();
-    // 組み込みトレイト（Eq, Ord, Numeric）+ i64/u64/f64 の自動 impl を登録
     verification::register_builtin_traits(&mut module_env);
-    let input_path = Path::new(&cli.input);
+    let input_path = Path::new(input);
     let base_dir = input_path.parent().unwrap_or(Path::new("."));
     if let Err(e) = resolver::resolve_imports(&items, base_dir, &mut module_env) {
         eprintln!("  ❌ Import Resolution Failed: {}", e);
         std::process::exit(1);
     }
 
-    // --- 1.7 Monomorphization (単相化) ---
-    // ジェネリック定義を収集し、使用箇所の具体型で展開する
     let mut mono = ast::Monomorphizer::new();
     mono.collect(&items);
     let items = if mono.has_generics() {
@@ -107,14 +138,6 @@ fn main() {
         items
     };
 
-    let output_path = Path::new(&cli.output);
-    let output_dir = output_path.parent().unwrap_or(Path::new("."));
-    // ベースとなるファイル名（例: katana）
-    let file_stem = output_path.file_stem().and_then(|s| s.to_str()).unwrap_or(&cli.output);
-
-    let mut atom_count = 0;
-
-    // --- Phase 0: ModuleEnv に全定義を登録 ---
     let mut imports: Vec<ImportDecl> = Vec::new();
     for item in &items {
         match item {
@@ -128,8 +151,174 @@ fn main() {
         }
     }
 
-    // 全ての Atom のコードを結合して出力するためのバッファ (Transpiler用)
-    // import 宣言がある場合、各言語のモジュールヘッダーを先頭に挿入
+    (items, module_env, imports)
+}
+
+// =============================================================================
+// mumei check — parse + resolve + monomorphize only
+// =============================================================================
+
+fn cmd_check(input: &str) {
+    println!("🗡️  Mumei check: parsing and resolving '{}'...", input);
+    let (items, _module_env, _imports) = load_and_prepare(input);
+
+    let mut type_count = 0;
+    let mut struct_count = 0;
+    let mut enum_count = 0;
+    let mut trait_count = 0;
+    let mut atom_count = 0;
+    for item in &items {
+        match item {
+            Item::Import(decl) => {
+                let alias_str = decl.alias.as_deref().unwrap_or("(none)");
+                println!("  📦 Import: '{}' as '{}'", decl.path, alias_str);
+            }
+            Item::TypeDef(t) => { type_count += 1; println!("  ✨ Type: '{}' ({})", t.name, t._base_type); }
+            Item::StructDef(s) => { struct_count += 1; println!("  🏗️  Struct: '{}'", s.name); }
+            Item::EnumDef(e) => { enum_count += 1; println!("  🔷 Enum: '{}'", e.name); }
+            Item::TraitDef(t) => { trait_count += 1; println!("  📜 Trait: '{}'", t.name); }
+            Item::ImplDef(i) => { println!("  🔧 Impl: {} for {}", i.trait_name, i.target_type); }
+            Item::Atom(a) => { atom_count += 1; println!("  ✨ Atom: '{}'", a.name); }
+        }
+    }
+    println!("✅ Check passed: {} types, {} structs, {} enums, {} traits, {} atoms",
+        type_count, struct_count, enum_count, trait_count, atom_count);
+}
+
+// =============================================================================
+// mumei verify — Z3 verification only (no codegen, no transpile)
+// =============================================================================
+
+fn cmd_verify(input: &str) {
+    println!("🗡️  Mumei verify: verifying '{}'...", input);
+    let (items, mut module_env, _imports) = load_and_prepare(input);
+
+    let output_dir = Path::new(".");
+    let mut verified = 0;
+    let mut failed = 0;
+
+    for item in &items {
+        match item {
+            Item::ImplDef(impl_def) => {
+                println!("  🔧 Verifying impl {} for {}...", impl_def.trait_name, impl_def.target_type);
+                match verification::verify_impl(impl_def, &module_env) {
+                    Ok(_) => {
+                        println!("    ✅ Laws verified");
+                        verified += 1;
+                    }
+                    Err(e) => {
+                        eprintln!("    ❌ Law verification failed: {}", e);
+                        failed += 1;
+                    }
+                }
+            }
+            Item::Atom(atom) => {
+                if module_env.is_verified(&atom.name) {
+                    println!("  ⚖️  '{}': skipped (imported, contract-trusted)", atom.name);
+                } else {
+                    match verification::verify(atom, output_dir, &module_env) {
+                        Ok(_) => {
+                            println!("  ⚖️  '{}': verified ✅", atom.name);
+                            module_env.mark_verified(&atom.name);
+                            verified += 1;
+                        }
+                        Err(e) => {
+                            eprintln!("  ❌ '{}': verification failed: {}", atom.name, e);
+                            failed += 1;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    println!("");
+    if failed > 0 {
+        eprintln!("❌ Verification: {} passed, {} failed", verified, failed);
+        std::process::exit(1);
+    }
+    println!("✅ Verification passed: {} item(s) verified", verified);
+}
+
+// =============================================================================
+// mumei init — generate project template
+// =============================================================================
+
+fn cmd_init(name: &str) {
+    let project_dir = Path::new(name);
+    if project_dir.exists() {
+        eprintln!("❌ Error: Directory '{}' already exists", name);
+        std::process::exit(1);
+    }
+
+    // ディレクトリ構造を作成
+    fs::create_dir_all(project_dir.join("src")).unwrap_or_else(|e| {
+        eprintln!("❌ Error: Failed to create directory: {}", e);
+        std::process::exit(1);
+    });
+
+    // mumei.toml
+    let toml_content = format!(r#"[package]
+name = "{}"
+version = "0.1.0"
+
+[dependencies]
+# 依存パッケージをここに記述
+# example = {{ git = "https://github.com/user/example-mm", rev = "main" }}
+"#, name);
+    fs::write(project_dir.join("mumei.toml"), toml_content).unwrap();
+
+    // src/main.mm
+    let main_content = format!(r#"// =============================================================
+// {} — Mumei Project
+// =============================================================
+
+import "std/option" as option;
+
+type Nat = i64 where v >= 0;
+
+atom hello(n: Nat)
+requires:
+    n >= 0;
+ensures:
+    result >= 0;
+body: {{
+    n + 1
+}};
+"#, name);
+    fs::write(project_dir.join("src/main.mm"), main_content).unwrap();
+
+    println!("🗡️  Created new Mumei project '{}'", name);
+    println!("");
+    println!("  {}/", name);
+    println!("  ├── mumei.toml");
+    println!("  └── src/");
+    println!("      └── main.mm");
+    println!("");
+    println!("Get started:");
+    println!("  cd {}", name);
+    println!("  mumei build src/main.mm -o dist/output");
+    println!("  mumei verify src/main.mm");
+    println!("  mumei check src/main.mm");
+}
+
+// =============================================================================
+// mumei build — full pipeline (verify + codegen + transpile)
+// =============================================================================
+
+fn cmd_build(input: &str, output: &str) {
+    println!("🗡️  Mumei: Forging the blade (Type System 2.0 + Generics enabled)...");
+
+    let (items, mut module_env, imports) = load_and_prepare(input);
+
+    let output_path = Path::new(output);
+    let output_dir = output_path.parent().unwrap_or(Path::new("."));
+    let file_stem = output_path.file_stem().and_then(|s| s.to_str()).unwrap_or(output);
+
+    let mut atom_count = 0;
+
+    // Transpiler バンドル初期化
     let mut rust_bundle = transpile_module_header(&imports, file_stem, TargetLanguage::Rust);
     let mut go_bundle = transpile_module_header(&imports, file_stem, TargetLanguage::Go);
     let mut ts_bundle = transpile_module_header(&imports, file_stem, TargetLanguage::TypeScript);
@@ -279,3 +468,5 @@ fn main() {
         println!("⚠️  Warning: No atoms found in the source file.");
     }
 }
+
+// end of src/main.rs

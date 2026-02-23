@@ -245,7 +245,7 @@ fn expr_to_z3<'a>(
                     let _val = expr_to_z3(vc, &args[0], env, solver_opt)?;
                     Ok(Int::new_const(ctx, "cast_result").into())
                 }
-                _ => Err(format!("Unknown function: {}", name)),
+                _ => Err(MumeiError::VerificationError(format!("Unknown function: {}", name))),
             }
         },
         Expr::ArrayAccess(name, index_expr) => {
@@ -268,7 +268,7 @@ fn expr_to_z3<'a>(
                 solver.assert(&safe.not());
                 if solver.check() == SatResult::Sat {
                     solver.pop(1);
-                    return Err(format!("Verification Error: Potential Out-of-Bounds on '{}' (index may be < 0 or >= len_{})", name, name));
+                    return Err(MumeiError::VerificationError(format!("Potential Out-of-Bounds on '{}' (index may be < 0 or >= len_{})", name, name)));
                 }
                 solver.pop(1);
             }
@@ -371,7 +371,7 @@ fn expr_to_z3<'a>(
                     Op::Le  => Ok(li.le(&ri).into()),
                     Op::Eq  => Ok(li._eq(&ri).into()),
                     Op::Neq => Ok(li._eq(&ri).not().into()),
-                    _ => Err(format!("Unsupported int operator {:?}", op)),
+                    _ => Err(MumeiError::VerificationError(format!("Unsupported int operator {:?}", op))),
                 }
             }
         },

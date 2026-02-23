@@ -8,6 +8,62 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use once_cell::sync::Lazy;
 
+/// Z3 FPA の RoundNearestTiesToEven 丸めモードを生成する
+/// z3 crate 0.12 には高レベル API がないため z3-sys を直接使用
+fn make_rne<'a>(ctx: &'a Context) -> Dynamic<'a> {
+    unsafe {
+        let raw = z3_sys::Z3_mk_fpa_round_nearest_ties_to_even(ctx.z3_ctx);
+        Dynamic::wrap(ctx, raw)
+    }
+}
+
+/// Float の NaN チェック制約を生成（!isNaN(x)）
+fn assert_not_nan<'a>(ctx: &'a Context, solver: &Solver<'a>, f: &Float<'a>) {
+    unsafe {
+        let is_nan_raw = z3_sys::Z3_mk_fpa_is_nan(ctx.z3_ctx, f.z3_ast);
+        let is_nan = Bool::wrap(ctx, is_nan_raw);
+        solver.assert(&is_nan.not());
+    }
+}
+
+/// Float の Inf チェック制約を生成（!isInf(x)）
+fn assert_not_inf<'a>(ctx: &'a Context, solver: &Solver<'a>, f: &Float<'a>) {
+    unsafe {
+        let is_inf_raw = z3_sys::Z3_mk_fpa_is_inf(ctx.z3_ctx, f.z3_ast);
+        let is_inf = Bool::wrap(ctx, is_inf_raw);
+        solver.assert(&is_inf.not());
+    }
+}
+
+/// z3-sys を使った FPA 算術演算
+fn fpa_add<'a>(ctx: &'a Context, rm: &Dynamic<'a>, a: &Float<'a>, b: &Float<'a>) -> Float<'a> {
+    unsafe {
+        let raw = z3_sys::Z3_mk_fpa_add(ctx.z3_ctx, rm.z3_ast, a.z3_ast, b.z3_ast);
+        Float::wrap(ctx, raw)
+    }
+}
+
+fn fpa_sub<'a>(ctx: &'a Context, rm: &Dynamic<'a>, a: &Float<'a>, b: &Float<'a>) -> Float<'a> {
+    unsafe {
+        let raw = z3_sys::Z3_mk_fpa_sub(ctx.z3_ctx, rm.z3_ast, a.z3_ast, b.z3_ast);
+        Float::wrap(ctx, raw)
+    }
+}
+
+fn fpa_mul<'a>(ctx: &'a Context, rm: &Dynamic<'a>, a: &Float<'a>, b: &Float<'a>) -> Float<'a> {
+    unsafe {
+        let raw = z3_sys::Z3_mk_fpa_mul(ctx.z3_ctx, rm.z3_ast, a.z3_ast, b.z3_ast);
+        Float::wrap(ctx, raw)
+    }
+}
+
+fn fpa_div<'a>(ctx: &'a Context, rm: &Dynamic<'a>, a: &Float<'a>, b: &Float<'a>) -> Float<'a> {
+    unsafe {
+        let raw = z3_sys::Z3_mk_fpa_div(ctx.z3_ctx, rm.z3_ast, a.z3_ast, b.z3_ast);
+        Float::wrap(ctx, raw)
+    }
+}
+
 // --- 型環境のグローバル管理 ---
 static TYPE_ENV: Lazy<Mutex<HashMap<String, RefinedType>>> = Lazy::new(|| {
     Mutex::new(HashMap::new())
@@ -73,6 +129,17 @@ pub fn verify(atom: &Atom, output_dir: &Path) -> Result<(), String> {
                     apply_refinement_constraint(&ctx, &arr, &solver, &param.name, refined, &mut env)?;
                 }
             }
+        }
+    }
+
+    // 2b. 全パラメータに対して配列長シンボルを事前生成
+    // パラメータ名が配列として使われる可能性があるため、len_<name> >= 0 を暗黙的に生成
+    for param in &atom.params {
+        let len_name = format!("len_{}", param.name);
+        if !env.contains_key(&len_name) {
+            let len_var = Int::new_const(&ctx, len_name.as_str());
+            solver.assert(&len_var.ge(&Int::from_i64(&ctx, 0)));
+            env.insert(len_name, len_var.into());
         }
     }
 
@@ -240,42 +307,19 @@ fn expr_to_z3<'a>(
                     Op::Eq  => Ok(lf._eq(&rf).into()),
                     Op::Neq => Ok(lf._eq(&rf).not().into()),
                     Op::Add | Op::Sub | Op::Mul | Op::Div => {
-                        // z3 0.12 では丸めモード API が利用できないため、
-                        // シンボリック Float を返し、基本的な符号制約を付与する
-                        static FLOAT_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-                        let id = FLOAT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        let result = Float::new_const(ctx, format!("float_arith_{}", id), 11, 53);
-                        let zero = Float::from_f64(ctx, 0.0);
+                        // IEEE 754 FPA 算術: z3-sys を直接使用して厳密な浮動小数点演算を実行
+                        let rm = make_rne(ctx);
+                        let result = match op {
+                            Op::Add => fpa_add(ctx, &rm, &lf, &rf),
+                            Op::Sub => fpa_sub(ctx, &rm, &lf, &rf),
+                            Op::Mul => fpa_mul(ctx, &rm, &lf, &rf),
+                            Op::Div => fpa_div(ctx, &rm, &lf, &rf),
+                            _ => unreachable!(),
+                        };
+                        // NaN / Inf 安全性チェック: 結果が NaN や Inf でないことを検証
                         if let Some(solver) = solver_opt {
-                            match op {
-                                Op::Mul => {
-                                    // pos * pos => pos
-                                    let both_pos = Bool::and(ctx, &[&lf.gt(&zero), &rf.gt(&zero)]);
-                                    solver.assert(&both_pos.implies(&result.gt(&zero)));
-                                    // neg * neg => pos
-                                    let both_neg = Bool::and(ctx, &[&lf.lt(&zero), &rf.lt(&zero)]);
-                                    solver.assert(&both_neg.implies(&result.gt(&zero)));
-                                },
-                                Op::Add => {
-                                    // pos + non-neg => pos
-                                    let both_pos = Bool::and(ctx, &[&lf.gt(&zero), &rf.ge(&zero)]);
-                                    solver.assert(&both_pos.implies(&result.gt(&zero)));
-                                    // non-neg + pos => pos
-                                    let both_pos2 = Bool::and(ctx, &[&lf.ge(&zero), &rf.gt(&zero)]);
-                                    solver.assert(&both_pos2.implies(&result.gt(&zero)));
-                                },
-                                Op::Sub => {
-                                    // a > b >= 0 => a - b >= 0
-                                    let a_gt_b = Bool::and(ctx, &[&lf.gt(&rf), &rf.ge(&zero)]);
-                                    solver.assert(&a_gt_b.implies(&result.ge(&zero)));
-                                },
-                                Op::Div => {
-                                    // pos / pos => pos
-                                    let both_pos = Bool::and(ctx, &[&lf.gt(&zero), &rf.gt(&zero)]);
-                                    solver.assert(&both_pos.implies(&result.gt(&zero)));
-                                },
-                                _ => {}
-                            }
+                            assert_not_nan(ctx, solver, &result);
+                            assert_not_inf(ctx, solver, &result);
                         }
                         Ok(result.into())
                     },

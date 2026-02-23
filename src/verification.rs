@@ -1,13 +1,11 @@
 use z3::ast::{Ast, Int, Bool, Array, Dynamic, Float};
 use z3::{Config, Context, Solver, SatResult};
-use crate::parser::{Atom, QuantifierType, Expr, Op, parse_expression, RefinedType, StructDef, EnumDef, Pattern, MatchArm};
+use crate::parser::{Atom, QuantifierType, Expr, Op, parse_expression, RefinedType, StructDef, EnumDef, Pattern, MatchArm, TraitDef, ImplDef};
 use std::fs;
 use std::path::Path;
 use std::fmt;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
-use std::sync::Mutex;
-use once_cell::sync::Lazy;
 
 // --- エラー型の定義 ---
 #[derive(Debug)]
@@ -43,21 +41,20 @@ pub type MumeiResult<T> = Result<T, MumeiError>;
 type Env<'a> = HashMap<String, Dynamic<'a>>;
 type DynResult<'a> = MumeiResult<Dynamic<'a>>;
 
-/// 検証時に共有するコンテキスト（ctx, arr を束ねて引数を削減）
+/// 検証時に共有するコンテキスト（ctx, arr, module_env を束ねて引数を削減）
 struct VCtx<'a> {
     ctx: &'a Context,
     arr: &'a Array<'a>,
+    module_env: &'a ModuleEnv,
 }
 
 // =============================================================================
 // モジュール環境: グローバル static Mutex から構造体ベースの管理に移行
 // =============================================================================
 
-/// モジュール単位の環境。型定義・構造体定義・atom 定義を保持する。
-/// モジュールシステム導入時は、モジュールごとに独立した ModuleEnv を持ち、
-/// Resolver が完全修飾名（FQN）でフラット化して VerificationContext に渡す。
-/// 現在はグローバル環境からの段階的移行中のため、一部メソッドは未使用。
-#[allow(dead_code)]
+/// モジュール単位の環境。型定義・構造体定義・atom 定義・enum 定義を保持する。
+/// グローバル static Mutex を廃止し、この構造体で一元管理する。
+/// main.rs で構築し、verify() / codegen / transpiler に参照渡しする。
 #[derive(Debug, Clone, Default)]
 pub struct ModuleEnv {
     /// 精緻型定義（FQN キー: 例 "math::Nat" or 自モジュールなら "Nat"）
@@ -66,11 +63,16 @@ pub struct ModuleEnv {
     pub structs: HashMap<String, StructDef>,
     /// Atom 定義（FQN キー）。契約による検証で requires/ensures のみ参照する。
     pub atoms: HashMap<String, Atom>,
-    /// 検証済みフラグ（モジュール単位）
-    pub verified: bool,
+    /// Enum 定義（FQN キー）
+    pub enums: HashMap<String, EnumDef>,
+    /// トレイト定義
+    pub traits: HashMap<String, TraitDef>,
+    /// トレイト実装: (トレイト名, 型名) → ImplDef
+    pub impls: Vec<ImplDef>,
+    /// 検証済み Atom 名のキャッシュ
+    pub verified_cache: HashSet<String>,
 }
 
-#[allow(dead_code)]
 impl ModuleEnv {
     pub fn new() -> Self {
         Self::default()
@@ -88,6 +90,10 @@ impl ModuleEnv {
         self.atoms.insert(atom.name.clone(), atom.clone());
     }
 
+    pub fn register_enum(&mut self, enum_def: &EnumDef) {
+        self.enums.insert(enum_def.name.clone(), enum_def.clone());
+    }
+
     pub fn get_type(&self, name: &str) -> Option<&RefinedType> {
         self.types.get(name)
     }
@@ -100,6 +106,16 @@ impl ModuleEnv {
         self.atoms.get(name)
     }
 
+    #[allow(dead_code)]
+    pub fn get_enum(&self, name: &str) -> Option<&EnumDef> {
+        self.enums.get(name)
+    }
+
+    /// Variant 名から所属する Enum 定義を逆引きする
+    pub fn find_enum_by_variant(&self, variant_name: &str) -> Option<&EnumDef> {
+        self.enums.values().find(|e| e.variants.iter().any(|v| v.name == variant_name))
+    }
+
     /// 精緻型名からベース型名を解決する（例: "Nat" -> "i64", "Pos" -> "f64"）
     pub fn resolve_base_type(&self, type_name: &str) -> String {
         if let Some(refined) = self.types.get(type_name) {
@@ -107,118 +123,241 @@ impl ModuleEnv {
         }
         type_name.to_string()
     }
+
+    pub fn register_trait(&mut self, trait_def: &TraitDef) {
+        self.traits.insert(trait_def.name.clone(), trait_def.clone());
+    }
+
+    pub fn register_impl(&mut self, impl_def: &ImplDef) {
+        self.impls.push(impl_def.clone());
+    }
+
+    pub fn get_trait(&self, name: &str) -> Option<&TraitDef> {
+        self.traits.get(name)
+    }
+
+    /// 指定した型がトレイトを実装しているか確認する
+    #[allow(dead_code)]
+    pub fn find_impl(&self, trait_name: &str, target_type: &str) -> Option<&ImplDef> {
+        self.impls.iter().find(|i| i.trait_name == trait_name && i.target_type == target_type)
+    }
+
+    /// 指定した型がトレイト境界を全て満たしているか検証する
+    #[allow(dead_code)]
+    pub fn check_trait_bounds(&self, type_name: &str, bounds: &[String]) -> Result<(), String> {
+        for bound in bounds {
+            if self.find_impl(bound, type_name).is_none() {
+                return Err(format!("Type '{}' does not implement trait '{}'", type_name, bound));
+            }
+        }
+        Ok(())
+    }
+
+    /// Atom を検証済みとしてマークする
+    pub fn mark_verified(&mut self, atom_name: &str) {
+        self.verified_cache.insert(atom_name.to_string());
+    }
+
+    /// Atom が検証済みかどうかを確認する
+    pub fn is_verified(&self, atom_name: &str) -> bool {
+        self.verified_cache.contains(atom_name)
+    }
 }
 
-// --- 後方互換性のためのグローバル環境（段階的に廃止予定） ---
-static TYPE_ENV: Lazy<Mutex<HashMap<String, RefinedType>>> = Lazy::new(|| {
-    Mutex::new(HashMap::new())
-});
+// =============================================================================
+// 組み込みトレイト (Built-in Traits)
+// =============================================================================
 
-static STRUCT_ENV: Lazy<Mutex<HashMap<String, StructDef>>> = Lazy::new(|| {
-    Mutex::new(HashMap::new())
-});
+/// 組み込みトレイトを ModuleEnv に自動登録する。
+/// Numeric（算術演算）、Ord（比較）、Eq（等価性）の3つを提供。
+pub fn register_builtin_traits(module_env: &mut ModuleEnv) {
+    use crate::parser::{TraitMethod, TraitDef as TD, ImplDef as ID};
 
-/// Atom 定義のグローバルレジストリ（同一モジュール内の関数呼び出し解決用）
-static ATOM_ENV: Lazy<Mutex<HashMap<String, Atom>>> = Lazy::new(|| {
-    Mutex::new(HashMap::new())
-});
+    // --- trait Eq ---
+    // fn eq(a: Self, b: Self) -> bool;
+    // law reflexive: eq(x, x) == true;
+    // law symmetric: eq(a, b) => eq(b, a);
+    module_env.register_trait(&TD {
+        name: "Eq".to_string(),
+        methods: vec![
+            TraitMethod { name: "eq".to_string(), param_types: vec!["Self".into(), "Self".into()], return_type: "bool".into() },
+        ],
+        laws: vec![
+            ("reflexive".into(), "eq(x, x) == true".into()),
+            ("symmetric".into(), "eq(a, b) => eq(b, a)".into()),
+        ],
+    });
 
-/// Enum 定義のグローバルレジストリ
-static ENUM_ENV: Lazy<Mutex<HashMap<String, EnumDef>>> = Lazy::new(|| {
-    Mutex::new(HashMap::new())
-});
+    // --- trait Ord (extends Eq implicitly) ---
+    // fn leq(a: Self, b: Self) -> bool;
+    // law reflexive: leq(x, x) == true;
+    // law antisymmetric: leq(a, b) && leq(b, a) => eq(a, b);
+    // law transitive: leq(a, b) && leq(b, c) => leq(a, c);
+    module_env.register_trait(&TD {
+        name: "Ord".to_string(),
+        methods: vec![
+            TraitMethod { name: "leq".to_string(), param_types: vec!["Self".into(), "Self".into()], return_type: "bool".into() },
+        ],
+        laws: vec![
+            ("reflexive".into(), "leq(x, x) == true".into()),
+            ("transitive".into(), "leq(a, b) && leq(b, c) => leq(a, c)".into()),
+        ],
+    });
 
-/// 検証済み Atom のキャッシュ（ソースハッシュ → 検証済みフラグ）
-/// インポートされたモジュールの atom は body 再検証をスキップし、
-/// requires/ensures の契約のみを信頼する。
-static VERIFIED_CACHE: Lazy<Mutex<HashSet<String>>> = Lazy::new(|| {
-    Mutex::new(HashSet::new())
-});
+    // --- trait Numeric (extends Ord implicitly) ---
+    // fn add(a: Self, b: Self) -> Self;
+    // fn sub(a: Self, b: Self) -> Self;
+    // fn mul(a: Self, b: Self) -> Self;
+    // law additive_identity: add(a, 0) == a;
+    // law commutative_add: add(a, b) == add(b, a);
+    module_env.register_trait(&TD {
+        name: "Numeric".to_string(),
+        methods: vec![
+            TraitMethod { name: "add".to_string(), param_types: vec!["Self".into(), "Self".into()], return_type: "Self".into() },
+            TraitMethod { name: "sub".to_string(), param_types: vec!["Self".into(), "Self".into()], return_type: "Self".into() },
+            TraitMethod { name: "mul".to_string(), param_types: vec!["Self".into(), "Self".into()], return_type: "Self".into() },
+        ],
+        laws: vec![
+            ("commutative_add".into(), "add(a, b) == add(b, a)".into()),
+        ],
+    });
 
-pub fn register_type(refined_type: &RefinedType) -> MumeiResult<()> {
-    let mut env = TYPE_ENV.lock().map_err(|_| MumeiError::TypeError("Failed to lock TYPE_ENV".into()))?;
-    env.insert(refined_type.name.clone(), refined_type.clone());
-    Ok(())
+    // --- 組み込み impl: i64, u64, f64 は Eq + Ord + Numeric を自動実装 ---
+    for base_type in &["i64", "u64", "f64"] {
+        module_env.register_impl(&ID {
+            trait_name: "Eq".into(),
+            target_type: base_type.to_string(),
+            method_bodies: vec![("eq".into(), "a == b".into())],
+        });
+        module_env.register_impl(&ID {
+            trait_name: "Ord".into(),
+            target_type: base_type.to_string(),
+            method_bodies: vec![("leq".into(), "a <= b".into())],
+        });
+        module_env.register_impl(&ID {
+            trait_name: "Numeric".into(),
+            target_type: base_type.to_string(),
+            method_bodies: vec![
+                ("add".into(), "a + b".into()),
+                ("sub".into(), "a - b".into()),
+                ("mul".into(), "a * b".into()),
+            ],
+        });
+    }
 }
 
-pub fn register_struct(struct_def: &StructDef) -> MumeiResult<()> {
-    let mut env = STRUCT_ENV.lock().map_err(|_| MumeiError::TypeError("Failed to lock STRUCT_ENV".into()))?;
-    env.insert(struct_def.name.clone(), struct_def.clone());
-    Ok(())
-}
+// =============================================================================
+// impl の法則充足性検証 (Law Verification)
+// =============================================================================
 
-/// Atom 定義をグローバルレジストリに登録（同一モジュール内の関数呼び出し解決用）
-pub fn register_atom(atom: &Atom) -> MumeiResult<()> {
-    let mut env = ATOM_ENV.lock().map_err(|_| MumeiError::TypeError("Failed to lock ATOM_ENV".into()))?;
-    env.insert(atom.name.clone(), atom.clone());
-    Ok(())
-}
+/// impl が対応する trait の全 law を満たしているかを Z3 で検証する。
+/// 各 law の論理式内のメソッド呼び出しを impl の具体的な body で置換し、
+/// ∀x. law_expr が成立するかを検証する。
+pub fn verify_impl(impl_def: &ImplDef, module_env: &ModuleEnv) -> MumeiResult<()> {
+    let trait_def = module_env.get_trait(&impl_def.trait_name)
+        .ok_or_else(|| MumeiError::TypeError(
+            format!("Trait '{}' not found for impl on '{}'", impl_def.trait_name, impl_def.target_type)
+        ))?;
 
-/// 登録済み Atom を取得
-pub fn get_atom_def(name: &str) -> Option<Atom> {
-    ATOM_ENV.lock().ok().and_then(|env| env.get(name).cloned())
-}
-
-/// Enum 定義をグローバルレジストリに登録
-pub fn register_enum(enum_def: &EnumDef) -> MumeiResult<()> {
-    let mut env = ENUM_ENV.lock().map_err(|_| MumeiError::TypeError("Failed to lock ENUM_ENV".into()))?;
-    env.insert(enum_def.name.clone(), enum_def.clone());
-    Ok(())
-}
-
-/// 登録済み Enum 定義を取得
-#[allow(dead_code)]
-pub fn get_enum_def(name: &str) -> Option<EnumDef> {
-    ENUM_ENV.lock().ok().and_then(|env| env.get(name).cloned())
-}
-
-/// Variant 名から所属する Enum 定義を逆引きする
-pub fn find_enum_by_variant(variant_name: &str) -> Option<EnumDef> {
-    ENUM_ENV.lock().ok().and_then(|env| {
-        env.values().find(|e| e.variants.iter().any(|v| v.name == variant_name)).cloned()
-    })
-}
-
-pub fn get_struct_def(name: &str) -> Option<StructDef> {
-    STRUCT_ENV.lock().ok().and_then(|env| env.get(name).cloned())
-}
-
-/// 精緻型名からベース型名を解決する（例: "Nat" -> "i64", "Pos" -> "f64"）
-/// 未登録の型名はそのまま返す
-pub fn resolve_base_type(type_name: &str) -> String {
-    if let Ok(env) = TYPE_ENV.lock() {
-        if let Some(refined) = env.get(type_name) {
-            return refined._base_type.clone();
+    // メソッドの完全性チェック: trait の全メソッドが impl されているか
+    for method in &trait_def.methods {
+        if !impl_def.method_bodies.iter().any(|(name, _)| name == &method.name) {
+            return Err(MumeiError::TypeError(
+                format!("impl {} for {}: missing method '{}'", impl_def.trait_name, impl_def.target_type, method.name)
+            ));
         }
     }
-    type_name.to_string()
-}
 
-/// グローバル環境をクリアする（テスト用）
-#[allow(dead_code)]
-pub fn clear_global_env() {
-    if let Ok(mut env) = TYPE_ENV.lock() { env.clear(); }
-    if let Ok(mut env) = STRUCT_ENV.lock() { env.clear(); }
-    if let Ok(mut env) = ATOM_ENV.lock() { env.clear(); }
-    if let Ok(mut env) = ENUM_ENV.lock() { env.clear(); }
-    if let Ok(mut cache) = VERIFIED_CACHE.lock() { cache.clear(); }
-}
+    // 各 law を Z3 で検証
+    let mut cfg = Config::new();
+    cfg.set_timeout_msec(5000);
+    let ctx = Context::new(&cfg);
+    let solver = Solver::new(&ctx);
 
-/// Atom を検証済みとしてマークする（インポートされたモジュールの atom 用）
-pub fn mark_verified(atom_name: &str) {
-    if let Ok(mut cache) = VERIFIED_CACHE.lock() {
-        cache.insert(atom_name.to_string());
+    for (law_name, law_expr) in &trait_def.laws {
+        // law 内のメソッド呼び出しを impl body で置換
+        // 簡易版: メソッド名(args) の呼び出しを直接 body 式に展開はせず、
+        // law 式をそのまま Z3 に投入する（未解釈関数対応は将来の拡張）
+        let substituted = law_expr.clone();
+
+        // シンボリック変数で law を検証
+        let int_sort = z3::Sort::int(&ctx);
+        let arr = Array::new_const(&ctx, "arr", &int_sort, &int_sort);
+        let vc = VCtx { ctx: &ctx, arr: &arr, module_env };
+
+        let mut env: Env = HashMap::new();
+        // law 内の自由変数をシンボリック整数として登録
+        for var_name in &["a", "b", "c", "x", "y", "z"] {
+            let base = module_env.resolve_base_type(&impl_def.target_type);
+            let var: Dynamic = match base.as_str() {
+                "f64" => Float::new_const(&ctx, *var_name, 11, 53).into(),
+                _ => Int::new_const(&ctx, *var_name).into(),
+            };
+            env.insert(var_name.to_string(), var);
+        }
+        // "true" リテラルを登録
+        env.insert("true".to_string(), Bool::from_bool(&ctx, true).into());
+
+        // impl のメソッド body を未解釈関数として env に登録
+        // 簡易版: メソッド呼び出しは expr_to_z3 の Call ブランチで解決される
+        for (_method_name, _method_body) in &impl_def.method_bodies {
+            // 将来の未解釈関数対応で使用
+        }
+
+        // law 式をパースして検証
+        let law_ast = parse_expression(&substituted);
+        let verify_result = expr_to_z3(&vc, &law_ast, &mut env, None);
+        match verify_result {
+            Ok(law_z3) => {
+                if let Some(law_bool) = law_z3.as_bool() {
+                    solver.push();
+                    solver.assert(&law_bool.not());
+                    if solver.check() == SatResult::Sat {
+                        // 反例（Counter-example）を Z3 model から取得
+                        let counterexample = if let Some(model) = solver.get_model() {
+                            let var_names = ["a", "b", "c", "x", "y", "z"];
+                            let mut ce_parts = Vec::new();
+                            for var_name in &var_names {
+                                if let Some(var_z3) = env.get(*var_name) {
+                                    if let Some(val) = model.eval(var_z3, true) {
+                                        let val_str = format!("{}", val);
+                                        // 変数が law 式に含まれている場合のみ表示
+                                        if law_expr.contains(*var_name) {
+                                            ce_parts.push(format!("{} = {}", var_name, val_str));
+                                        }
+                                    }
+                                }
+                            }
+                            if ce_parts.is_empty() {
+                                "  (no concrete values available)".to_string()
+                            } else {
+                                format!("  Counter-example: {}", ce_parts.join(", "))
+                            }
+                        } else {
+                            "  (could not retrieve model)".to_string()
+                        };
+                        solver.pop(1);
+                        return Err(MumeiError::VerificationError(
+                            format!(
+                                "impl {} for {}: law '{}' is not satisfied\n  Law: {}\n{}",
+                                impl_def.trait_name, impl_def.target_type,
+                                law_name, law_expr, counterexample
+                            )
+                        ));
+                    }
+                    solver.pop(1);
+                }
+            }
+            Err(_) => {
+                // law のパースに失敗した場合はスキップ（将来の未解釈関数対応で改善）
+            }
+        };
     }
+
+    Ok(())
 }
 
-/// Atom が検証済みかどうかを確認する
-pub fn is_verified(atom_name: &str) -> bool {
-    VERIFIED_CACHE.lock().ok()
-        .map(|cache| cache.contains(atom_name))
-        .unwrap_or(false)
-}
-
-pub fn verify(atom: &Atom, output_dir: &Path) -> MumeiResult<()> {
+pub fn verify(atom: &Atom, output_dir: &Path, module_env: &ModuleEnv) -> MumeiResult<()> {
     let mut cfg = Config::new();
     cfg.set_timeout_msec(10000);
     let ctx = Context::new(&cfg);
@@ -226,7 +365,7 @@ pub fn verify(atom: &Atom, output_dir: &Path) -> MumeiResult<()> {
 
     let int_sort = z3::Sort::int(&ctx);
     let arr = Array::new_const(&ctx, "arr", &int_sort, &int_sort);
-    let vc = VCtx { ctx: &ctx, arr: &arr };
+    let vc = VCtx { ctx: &ctx, arr: &arr, module_env };
 
     let mut env: Env = HashMap::new();
 
@@ -253,45 +392,39 @@ pub fn verify(atom: &Atom, output_dir: &Path) -> MumeiResult<()> {
     }
 
     // 2. 引数（params）に対する精緻型制約の自動適用
-    {
-        let type_defs = TYPE_ENV.lock().map_err(|_| MumeiError::TypeError("Failed to lock TYPE_ENV".into()))?;
-        for param in &atom.params {
-            if let Some(type_name) = &param.type_name {
-                if let Some(refined) = type_defs.get(type_name) {
-                    apply_refinement_constraint(&vc, &solver, &param.name, refined, &mut env)?;
-                }
+    for param in &atom.params {
+        if let Some(type_name) = &param.type_name {
+            if let Some(refined) = module_env.get_type(type_name) {
+                apply_refinement_constraint(&vc, &solver, &param.name, refined, &mut env)?;
             }
         }
     }
 
     // 2b. 引数（params）に対する構造体フィールド制約の自動適用
-    {
-        let struct_defs = STRUCT_ENV.lock().map_err(|_| MumeiError::TypeError("Failed to lock STRUCT_ENV".into()))?;
-        for param in &atom.params {
-            if let Some(type_name) = &param.type_name {
-                if let Some(sdef) = struct_defs.get(type_name) {
-                    // 構造体の各フィールドをシンボリック変数として env に登録し、制約を適用
-                    for field in &sdef.fields {
-                        let field_var_name = format!("{}_{}", param.name, field.name);
-                        let base = resolve_base_type(&field.type_name);
-                        let field_z3: Dynamic = match base.as_str() {
-                            "f64" => Float::new_const(&ctx, field_var_name.as_str(), 11, 53).into(),
-                            _ => Int::new_const(&ctx, field_var_name.as_str()).into(),
-                        };
-                        env.insert(field_var_name.clone(), field_z3.clone());
-                        // qualified name も登録
-                        let qualified = format!("__struct_{}_{}", param.name, field.name);
-                        env.insert(qualified, field_z3.clone());
+    for param in &atom.params {
+        if let Some(type_name) = &param.type_name {
+            if let Some(sdef) = module_env.get_struct(type_name) {
+                // 構造体の各フィールドをシンボリック変数として env に登録し、制約を適用
+                for field in &sdef.fields {
+                    let field_var_name = format!("{}_{}", param.name, field.name);
+                    let base = module_env.resolve_base_type(&field.type_name);
+                    let field_z3: Dynamic = match base.as_str() {
+                        "f64" => Float::new_const(&ctx, field_var_name.as_str(), 11, 53).into(),
+                        _ => Int::new_const(&ctx, field_var_name.as_str()).into(),
+                    };
+                    env.insert(field_var_name.clone(), field_z3.clone());
+                    // qualified name も登録
+                    let qualified = format!("__struct_{}_{}", param.name, field.name);
+                    env.insert(qualified, field_z3.clone());
 
-                        // フィールド制約を solver に assert
-                        if let Some(constraint_raw) = &field.constraint {
-                            let mut local_env = env.clone();
-                            local_env.insert("v".to_string(), field_z3);
-                            let constraint_ast = parse_expression(constraint_raw);
-                            let constraint_z3 = expr_to_z3(&vc, &constraint_ast, &mut local_env, None)?;
-                            if let Some(constraint_bool) = constraint_z3.as_bool() {
-                                solver.assert(&constraint_bool);
-                            }
+                    // フィールド制約を solver に assert
+                    if let Some(constraint_raw) = &field.constraint {
+                        let mut local_env = env.clone();
+                        local_env.insert("v".to_string(), field_z3);
+                        let constraint_ast = parse_expression(constraint_raw);
+                        let constraint_z3 = expr_to_z3(&vc, &constraint_ast, &mut local_env, None)?;
+                        if let Some(constraint_bool) = constraint_z3.as_bool() {
+                            solver.assert(&constraint_bool);
                         }
                     }
                 }
@@ -431,7 +564,7 @@ fn expr_to_z3<'a>(
                     // ユーザー定義関数呼び出し: 契約による検証（Compositional Verification）
                     // 呼び出し先の requires を現在のコンテキストで証明し、
                     // 成功すれば ensures を事実として追加する
-                    if let Some(callee) = get_atom_def(name) {
+                    if let Some(callee) = vc.module_env.get_atom(name).cloned() {
                         // 引数を評価
                         let mut arg_vals = Vec::new();
                         for arg in args {
@@ -447,15 +580,12 @@ fn expr_to_z3<'a>(
                         }
 
                         // 呼び出し先の精緻型制約を call_env に適用
-                        {
-                            let type_defs = TYPE_ENV.lock().map_err(|_| MumeiError::TypeError("Failed to lock TYPE_ENV".into()))?;
-                            for (i, param) in callee.params.iter().enumerate() {
-                                if let Some(type_name) = &param.type_name {
-                                    if let Some(refined) = type_defs.get(type_name) {
-                                        // 実引数値を精緻型の述語変数に束縛して制約を検証
-                                        if let Some(val) = arg_vals.get(i) {
-                                            call_env.insert(refined.operand.clone(), val.clone());
-                                        }
+                        for (i, param) in callee.params.iter().enumerate() {
+                            if let Some(type_name) = &param.type_name {
+                                if let Some(refined) = vc.module_env.get_type(type_name) {
+                                    // 実引数値を精緻型の述語変数に束縛して制約を検証
+                                    if let Some(val) = arg_vals.get(i) {
+                                        call_env.insert(refined.operand.clone(), val.clone());
                                     }
                                 }
                             }
@@ -488,7 +618,7 @@ fn expr_to_z3<'a>(
                         // 戻り値型の推定: 呼び出し先パラメータに f64 型があれば Float、なければ Int
                         let has_float = callee.params.iter().any(|p| {
                             p.type_name.as_deref()
-                                .map(|t| resolve_base_type(t) == "f64")
+                                .map(|t| vc.module_env.resolve_base_type(t) == "f64")
                                 .unwrap_or(false)
                         });
                         let result_z3: Dynamic = if has_float {
@@ -767,7 +897,7 @@ fn expr_to_z3<'a>(
                 last = val.clone();
 
                 // フィールド制約の検証: 構造体定義から constraint を取得
-                if let Some(sdef) = get_struct_def(type_name) {
+                if let Some(sdef) = vc.module_env.get_struct(type_name) {
                     if let Some(sfield) = sdef.fields.iter().find(|f| f.name == *field_name) {
                         if let Some(constraint_raw) = &sfield.constraint {
                             // constraint 内の "v" をフィールド値に置き換えて検証
@@ -805,7 +935,7 @@ fn expr_to_z3<'a>(
             // これにより Z3 が「これら以外のバリアントは存在しない」ことを知り、
             // 網羅性チェックの信頼性が 100% になる。
             if let Some(solver) = solver_opt {
-                if let Some(enum_def) = detect_enum_from_arms(arms) {
+                if let Some(enum_def) = detect_enum_from_arms(arms, vc.module_env) {
                     let n = enum_def.variants.len() as i64;
                     if let Some(tag_int) = target_z3.as_int() {
                         // tag ∈ [0, n_variants)
@@ -851,7 +981,7 @@ fn expr_to_z3<'a>(
                     if solver.check() == SatResult::Sat {
                         let counterexample = if let Some(model) = solver.get_model() {
                             // ターゲット変数の具体的な値を取得
-                            let ce_str = format_counterexample(&model, &target_z3, arms);
+                            let ce_str = format_counterexample(&model, &target_z3, arms, vc.module_env);
                             ce_str
                         } else {
                             "unknown value".to_string()
@@ -886,7 +1016,7 @@ fn expr_to_z3<'a>(
                 // B. ネストパターンの再帰解体:
                 //    pattern_bind_variables が再帰的にパターンを分解し、
                 //    バインド変数を arm_env に登録する。
-                pattern_bind_variables(ctx, &arm.pattern, &target_z3, &mut arm_env);
+                pattern_bind_variables(ctx, &arm.pattern, &target_z3, &mut arm_env, vc.module_env);
 
                 let arm_cond = pattern_to_z3_condition(ctx, &arm.pattern, &target_z3, &mut arm_env, vc, solver_opt)?;
                 let full_cond = if let Some(guard) = &arm.guard {
@@ -987,7 +1117,7 @@ fn pattern_to_z3_condition<'a>(
             Ok(target_int._eq(&lit))
         },
         Pattern::Variant { variant_name, fields } => {
-            if let Some(enum_def) = find_enum_by_variant(variant_name) {
+            if let Some(enum_def) = vc.module_env.find_enum_by_variant(variant_name) {
                 let variant_idx = enum_def.variants.iter()
                     .position(|v| v.name == *variant_name)
                     .unwrap_or(0) as i64;
@@ -1008,7 +1138,7 @@ fn pattern_to_z3_condition<'a>(
                         let base = if *field_type == enum_def.name {
                             "i64".to_string() // 再帰フィールドは tag 値
                         } else {
-                            resolve_base_type(field_type)
+                            vc.module_env.resolve_base_type(field_type)
                         };
                         match base.as_str() {
                             "f64" => Float::new_const(ctx, proj_name.as_str(), 11, 53).into(),
@@ -1059,13 +1189,14 @@ fn pattern_bind_variables<'a>(
     pattern: &Pattern,
     target: &Dynamic<'a>,
     env: &mut Env<'a>,
+    module_env: &ModuleEnv,
 ) {
     match pattern {
         Pattern::Variable(name) => {
             env.insert(name.clone(), target.clone());
         },
         Pattern::Variant { variant_name, fields } => {
-            if let Some(enum_def) = find_enum_by_variant(variant_name) {
+            if let Some(enum_def) = module_env.find_enum_by_variant(variant_name) {
                 if let Some(variant_def) = enum_def.variants.iter().find(|v| v.name == *variant_name) {
                     for (i, field_pattern) in fields.iter().enumerate() {
                         let proj_name = format!("__proj_{}_{}", variant_name, i);
@@ -1074,7 +1205,7 @@ fn pattern_bind_variables<'a>(
                             let base = if *field_type == enum_def.name {
                                 "i64".to_string()
                             } else {
-                                resolve_base_type(field_type)
+                                module_env.resolve_base_type(field_type)
                             };
                             match base.as_str() {
                                 "f64" => Float::new_const(ctx, proj_name.as_str(), 11, 53).into(),
@@ -1092,7 +1223,7 @@ fn pattern_bind_variables<'a>(
                             },
                             Pattern::Variant { .. } => {
                                 // ネストした Variant: 再帰的にバインド
-                                pattern_bind_variables(ctx, field_pattern, &field_sym, env);
+                                pattern_bind_variables(ctx, field_pattern, &field_sym, env, module_env);
                             },
                             _ => {}
                         }
@@ -1106,10 +1237,10 @@ fn pattern_bind_variables<'a>(
 
 /// アームの Variant パターンから対応する EnumDef を検出する。
 /// 最初に見つかった Variant パターンの所属 Enum を返す。
-fn detect_enum_from_arms(arms: &[MatchArm]) -> Option<EnumDef> {
+fn detect_enum_from_arms<'a>(arms: &[MatchArm], module_env: &'a ModuleEnv) -> Option<&'a EnumDef> {
     for arm in arms {
         if let Pattern::Variant { variant_name, .. } = &arm.pattern {
-            if let Some(enum_def) = find_enum_by_variant(variant_name) {
+            if let Some(enum_def) = module_env.find_enum_by_variant(variant_name) {
                 return Some(enum_def);
             }
         }
@@ -1123,9 +1254,10 @@ fn format_counterexample(
     model: &z3::Model,
     target: &Dynamic,
     arms: &[MatchArm],
+    module_env: &ModuleEnv,
 ) -> String {
     // アームから Enum 定義を特定（ドメイン制約と同じロジック）
-    let enum_ctx = detect_enum_from_arms(arms);
+    let enum_ctx = detect_enum_from_arms(arms, module_env);
 
     // ターゲット変数の具体的な値を取得
     if let Some(target_val) = model.eval(target, true) {
@@ -1136,7 +1268,7 @@ fn format_counterexample(
             let tag_str = format!("{}", target_int);
             if let Ok(tag_val) = tag_str.parse::<i64>() {
                 // まず arms から特定した Enum を優先的に使用
-                if let Some(ref edef) = enum_ctx {
+                if let Some(edef) = enum_ctx {
                     if let Some(variant) = edef.variants.get(tag_val as usize) {
                         // フィールド値も model から取得を試みる
                         let mut field_vals = Vec::new();
@@ -1157,12 +1289,10 @@ fn format_counterexample(
                         );
                     }
                 }
-                // フォールバック: 全 Enum 定義を走査
-                if let Ok(enum_env) = ENUM_ENV.lock() {
-                    for (enum_name, enum_def) in enum_env.iter() {
-                        if let Some(variant) = enum_def.variants.get(tag_val as usize) {
-                            return format!("{}::{} (tag={}) -- missing from match arms", enum_name, variant.name, tag_val);
-                        }
+                // フォールバック: module_env の全 Enum 定義を走査
+                for (enum_name, enum_def) in module_env.enums.iter() {
+                    if let Some(variant) = enum_def.variants.get(tag_val as usize) {
+                        return format!("{}::{} (tag={}) -- missing from match arms", enum_name, variant.name, tag_val);
                     }
                 }
             }

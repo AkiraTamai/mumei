@@ -1,7 +1,7 @@
 //! # Resolver モジュール
 //!
 //! import 宣言を再帰的に処理し、依存モジュールの型・構造体・atom を
-//! グローバル環境に登録する。循環参照の検出も行う。
+//! ModuleEnv に登録する。循環参照の検出も行う。
 //!
 //! ## 設計方針
 //! - Phase 1: ファイルベースの単純な import 解決
@@ -22,7 +22,7 @@ use sha2::{Sha256, Digest};
 use serde::{Serialize, Deserialize};
 
 use crate::parser::{self, Item};
-use crate::verification::{self, MumeiError, MumeiResult};
+use crate::verification::{ModuleEnv, MumeiError, MumeiResult};
 
 /// 検証キャッシュのエントリ
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,14 +58,14 @@ impl ResolverContext {
         }
     }
 }
-/// items 内の Import 宣言を処理し、依存モジュールの定義をグローバル環境に登録する。
+/// items 内の Import 宣言を処理し、依存モジュールの定義を ModuleEnv に登録する。
 /// base_dir はインポート元ファイルの親ディレクトリ。
 /// キャッシュファイルが存在し、ソースハッシュが一致する場合は再パースをスキップする。
-pub fn resolve_imports(items: &[Item], base_dir: &Path) -> MumeiResult<()> {
+pub fn resolve_imports(items: &[Item], base_dir: &Path, module_env: &mut ModuleEnv) -> MumeiResult<()> {
     let cache_path = base_dir.join(".mumei_cache");
     let mut cache = load_cache(&cache_path);
     let mut ctx = ResolverContext::new();
-    resolve_imports_recursive(items, base_dir, &mut ctx, &mut cache)?;
+    resolve_imports_recursive(items, base_dir, &mut ctx, &mut cache, module_env)?;
     save_cache(&cache_path, &cache);
     Ok(())
 }
@@ -75,6 +75,7 @@ fn resolve_imports_recursive(
     base_dir: &Path,
     ctx: &mut ResolverContext,
     cache: &mut VerificationCache,
+    module_env: &mut ModuleEnv,
 ) -> MumeiResult<()> {
     for item in items {
         if let Item::Import(import_decl) = item {
@@ -112,10 +113,10 @@ fn resolve_imports_recursive(
             let imported_items = parser::parse_module(&source);
             let import_base_dir = resolved_path.parent().unwrap_or(Path::new("."));
             // 再帰的にインポートを解決（インポートされたモジュール内の import も処理）
-            resolve_imports_recursive(&imported_items, import_base_dir, ctx, cache)?;
-            // インポートされたモジュールの定義をグローバル環境に登録
+            resolve_imports_recursive(&imported_items, import_base_dir, ctx, cache, module_env)?;
+            // インポートされたモジュールの定義を ModuleEnv に登録
             let alias_prefix = import_decl.alias.as_deref();
-            register_imported_items(&imported_items, alias_prefix)?;
+            register_imported_items(&imported_items, alias_prefix, module_env);
 
             // インポートされた atom を検証済みとしてマーク
             // → main.rs で verify() をスキップし、契約のみ信頼する
@@ -125,18 +126,20 @@ fn resolve_imports_recursive(
             for imported_item in &imported_items {
                 match imported_item {
                     Item::Atom(atom) => {
-                        verification::mark_verified(&atom.name);
+                        module_env.mark_verified(&atom.name);
                         verified_atoms.push(atom.name.clone());
                         // FQN でもマーク
                         if let Some(prefix) = alias_prefix {
                             let fqn = format!("{}::{}", prefix, atom.name);
-                            verification::mark_verified(&fqn);
+                            module_env.mark_verified(&fqn);
                             verified_atoms.push(fqn);
                         }
                     }
                     Item::TypeDef(t) => type_names.push(t.name.clone()),
                     Item::StructDef(s) => struct_names.push(s.name.clone()),
                     Item::EnumDef(_) => {},
+                    Item::TraitDef(_) => {},
+                    Item::ImplDef(_) => {},
                     Item::Import(_) => {},
                 }
             }
@@ -156,49 +159,55 @@ fn resolve_imports_recursive(
     }
     Ok(())
 }
-/// インポートされたモジュールの Item をグローバル環境に登録する。
+/// インポートされたモジュールの Item を ModuleEnv に登録する。
 /// alias が指定されている場合、FQN（alias::name）でも登録する。
-fn register_imported_items(items: &[Item], alias: Option<&str>) -> MumeiResult<()> {
+fn register_imported_items(items: &[Item], alias: Option<&str>, module_env: &mut ModuleEnv) {
     for item in items {
         match item {
             Item::TypeDef(refined_type) => {
-                verification::register_type(refined_type)?;
+                module_env.register_type(refined_type);
                 if let Some(prefix) = alias {
                     let mut fqn_type = refined_type.clone();
                     fqn_type.name = format!("{}::{}", prefix, refined_type.name);
-                    verification::register_type(&fqn_type)?;
+                    module_env.register_type(&fqn_type);
                 }
             }
             Item::StructDef(struct_def) => {
-                verification::register_struct(struct_def)?;
+                module_env.register_struct(struct_def);
                 if let Some(prefix) = alias {
                     let mut fqn_struct = struct_def.clone();
                     fqn_struct.name = format!("{}::{}", prefix, struct_def.name);
-                    verification::register_struct(&fqn_struct)?;
+                    module_env.register_struct(&fqn_struct);
                 }
             }
             Item::Atom(atom) => {
-                verification::register_atom(atom)?;
+                module_env.register_atom(atom);
                 if let Some(prefix) = alias {
                     let mut fqn_atom = atom.clone();
                     fqn_atom.name = format!("{}::{}", prefix, atom.name);
-                    verification::register_atom(&fqn_atom)?;
+                    module_env.register_atom(&fqn_atom);
                 }
             }
             Item::EnumDef(enum_def) => {
-                verification::register_enum(enum_def)?;
+                module_env.register_enum(enum_def);
                 if let Some(prefix) = alias {
                     let mut fqn_enum = enum_def.clone();
                     fqn_enum.name = format!("{}::{}", prefix, enum_def.name);
-                    verification::register_enum(&fqn_enum)?;
+                    module_env.register_enum(&fqn_enum);
                 }
+            }
+            Item::TraitDef(trait_def) => {
+                module_env.register_trait(trait_def);
+                // トレイトは FQN 登録不要（トレイト名はグローバルに一意と仮定）
+            }
+            Item::ImplDef(impl_def) => {
+                module_env.register_impl(impl_def);
             }
             Item::Import(_) => {
                 // 再帰的に処理済み
             }
         }
     }
-    Ok(())
 }
 /// インポートパスを絶対パスに解決する。
 /// 拡張子 .mm が省略されている場合は自動補完する。

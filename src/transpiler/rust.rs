@@ -1,5 +1,12 @@
-use crate::parser::{Expr, Op, Atom, ImportDecl, EnumDef, StructDef, parse_expression};
-use crate::verification::resolve_base_type;
+use crate::parser::{Expr, Op, Atom, ImportDecl, EnumDef, StructDef, TraitDef, ImplDef, parse_expression};
+
+/// 型名をベース型に解決する（transpiler ローカル版）
+/// 精緻型の解決は ModuleEnv が担当するが、transpiler は単相化後の具体型名を受け取るため、
+/// プリミティブ型のマッピングのみで十分。
+fn resolve_base_type(name: &str) -> String {
+    // プリミティブ型はそのまま返す。精緻型名は単相化後に具体型名に置換済み。
+    name.to_string()
+}
 
 /// import 宣言から Rust のモジュールヘッダーを生成する
 /// 例: mod math; use math::*;
@@ -26,7 +33,13 @@ pub fn transpile_enum_rust(enum_def: &EnumDef) -> String {
     let mut lines = Vec::new();
     lines.push(format!("/// Verified Enum: {}", enum_def.name));
     lines.push(format!("#[derive(Debug, Clone, Copy, PartialEq)]"));
-    lines.push(format!("pub enum {} {{", enum_def.name));
+    // Generics: 型パラメータがある場合は <T, U> を付与
+    let type_params_str = if enum_def.type_params.is_empty() {
+        String::new()
+    } else {
+        format!("<{}>", enum_def.type_params.join(", "))
+    };
+    lines.push(format!("pub enum {}{} {{", enum_def.name, type_params_str));
     for variant in &enum_def.variants {
         if variant.fields.is_empty() {
             lines.push(format!("    {},", variant.name));
@@ -46,13 +59,55 @@ pub fn transpile_struct_rust(struct_def: &StructDef) -> String {
     let mut lines = Vec::new();
     lines.push(format!("/// Verified Struct: {}", struct_def.name));
     lines.push(format!("#[derive(Debug, Clone)]"));
-    lines.push(format!("pub struct {} {{", struct_def.name));
+    // Generics: 型パラメータがある場合は <T, U> を付与
+    let type_params_str = if struct_def.type_params.is_empty() {
+        String::new()
+    } else {
+        format!("<{}>", struct_def.type_params.join(", "))
+    };
+    lines.push(format!("pub struct {}{} {{", struct_def.name, type_params_str));
     for field in &struct_def.fields {
         let rust_type = map_type_rust(Some(field.type_name.as_str()));
         if let Some(constraint) = &field.constraint {
             lines.push(format!("    /// where {}", constraint));
         }
         lines.push(format!("    pub {}: {},", field.name, rust_type));
+    }
+    lines.push("}".to_string());
+    lines.join("\n")
+}
+
+/// Trait 定義を Rust の trait に変換する
+pub fn transpile_trait_rust(trait_def: &TraitDef) -> String {
+    let mut lines = Vec::new();
+    // law をドキュメントコメントとして出力
+    for (law_name, law_expr) in &trait_def.laws {
+        lines.push(format!("/// Law {}: {}", law_name, law_expr));
+    }
+    lines.push(format!("pub trait {} {{", trait_def.name));
+    for method in &trait_def.methods {
+        let params: Vec<String> = method.param_types.iter().enumerate()
+            .map(|(i, t)| {
+                let param_name = if i == 0 { "a" } else if i == 1 { "b" } else { "c" };
+                let rust_type = if t == "Self" { "Self" } else { &map_type_rust(Some(t)) };
+                format!("{}: {}", param_name, rust_type)
+            })
+            .collect();
+        let ret = if method.return_type == "bool" { "bool" } else { "Self" };
+        lines.push(format!("    fn {}({}) -> {};", method.name, params.join(", "), ret));
+    }
+    lines.push("}".to_string());
+    lines.join("\n")
+}
+
+/// Impl 定義を Rust の impl に変換する
+pub fn transpile_impl_rust(impl_def: &ImplDef) -> String {
+    let mut lines = Vec::new();
+    let rust_type = map_type_rust(Some(&impl_def.target_type));
+    lines.push(format!("impl {} for {} {{", impl_def.trait_name, rust_type));
+    for (method_name, method_body) in &impl_def.method_bodies {
+        lines.push(format!("    fn {name}(a: {t}, b: {t}) -> {t} {{ {body} }}",
+            name = method_name, t = rust_type, body = method_body));
     }
     lines.push("}".to_string());
     lines.join("\n")

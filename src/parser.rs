@@ -1,4 +1,5 @@
 use regex::Regex;
+use crate::ast::TypeRef;
 
 // --- 1. 数式の構造定義 (AST: Abstract Syntax Tree) ---
 
@@ -86,6 +87,9 @@ pub struct EnumVariant {
     /// `Cons(i64, List)` のような再帰的データ構造を定義可能。
     /// パーサーは "Self" を Enum 自身の名前に自動展開する。
     pub fields: Vec<String>,
+    /// Generics: フィールドの型参照（TypeRef 版）。
+    /// fields (String) との後方互換性のため両方保持する。
+    pub field_types: Vec<TypeRef>,
     /// このバリアントが再帰的か（フィールドに自身の Enum 名を含むか）
     #[allow(dead_code)]
     pub is_recursive: bool,
@@ -95,6 +99,8 @@ pub struct EnumVariant {
 #[derive(Debug, Clone)]
 pub struct EnumDef {
     pub name: String,
+    /// Generics: 型パラメータリスト（例: ["T", "U"]）。非ジェネリックなら空。
+    pub type_params: Vec<String>,
     pub variants: Vec<EnumVariant>,
     /// この Enum が再帰的データ型か（いずれかの Variant が自身を参照するか）
     #[allow(dead_code)]
@@ -130,11 +136,19 @@ pub struct RefinedType {
 pub struct Param {
     pub name: String,
     pub type_name: Option<String>,
+    /// Generics: 型参照（TypeRef 版）。type_name との後方互換性のため両方保持。
+    pub type_ref: Option<TypeRef>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Atom {
     pub name: String,
+    /// Generics: 型パラメータリスト（例: ["T", "U"]）。非ジェネリックなら空。
+    pub type_params: Vec<String>,
+    /// トレイト境界: 型パラメータに課す制約（例: [TypeParamBound { param: "T", bounds: ["Comparable"] }]）
+    /// 単相化時のトレイト境界バリデーションで使用（将来の拡張）
+    #[allow(dead_code)]
+    pub where_bounds: Vec<TypeParamBound>,
     pub params: Vec<Param>,
     pub requires: String,
     pub forall_constraints: Vec<Quantifier>,
@@ -147,6 +161,8 @@ pub struct Atom {
 pub struct StructField {
     pub name: String,
     pub type_name: String,
+    /// Generics: フィールドの型参照（TypeRef 版）
+    pub type_ref: TypeRef,
     /// フィールドの精緻型制約（例: "v >= 0"）。None なら制約なし
     pub constraint: Option<String>,
 }
@@ -155,6 +171,8 @@ pub struct StructField {
 #[derive(Debug, Clone)]
 pub struct StructDef {
     pub name: String,
+    /// Generics: 型パラメータリスト（例: ["T"]）。非ジェネリックなら空。
+    pub type_params: Vec<String>,
     pub fields: Vec<StructField>,
 }
 
@@ -167,6 +185,61 @@ pub struct ImportDecl {
     pub alias: Option<String>,
 }
 
+/// トレイト境界: 型パラメータに課す制約（例: "T: Comparable"）
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypeParamBound {
+    /// 型パラメータ名（例: "T"）
+    pub param: String,
+    /// 制約トレイト名のリスト（例: ["Comparable", "Numeric"]）
+    pub bounds: Vec<String>,
+}
+
+/// トレイトのメソッドシグネチャ
+#[derive(Debug, Clone)]
+pub struct TraitMethod {
+    /// メソッド名（例: "leq"）
+    pub name: String,
+    /// パラメータの型名リスト（Self は暗黙）
+    pub param_types: Vec<String>,
+    /// 戻り値型名（例: "bool", "i64"）
+    pub return_type: String,
+}
+
+/// トレイト定義
+/// ```mumei
+/// trait Comparable {
+///     fn leq(a: Self, b: Self) -> bool;
+///     law reflexive: leq(x, x) == true;
+///     law transitive: leq(a, b) && leq(b, c) => leq(a, c);
+/// }
+/// ```
+#[derive(Debug, Clone)]
+pub struct TraitDef {
+    /// トレイト名（例: "Comparable"）
+    pub name: String,
+    /// メソッドシグネチャ
+    pub methods: Vec<TraitMethod>,
+    /// 法則（Laws）: トレイトが満たすべき論理的性質。
+    /// 各要素は (法則名, 論理式の文字列) のペア。
+    pub laws: Vec<(String, String)>,
+}
+
+/// トレイト実装定義
+/// ```mumei
+/// impl Comparable for i64 {
+///     fn leq(a: i64, b: i64) -> bool { a <= b }
+/// }
+/// ```
+#[derive(Debug, Clone)]
+pub struct ImplDef {
+    /// 実装対象のトレイト名（例: "Comparable"）
+    pub trait_name: String,
+    /// 実装する型名（例: "i64"）
+    pub target_type: String,
+    /// メソッド実装: (メソッド名, body 式の文字列)
+    pub method_bodies: Vec<(String, String)>,
+}
+
 #[derive(Debug, Clone)]
 pub enum Item {
     Atom(Atom),
@@ -174,9 +247,115 @@ pub enum Item {
     StructDef(StructDef),
     EnumDef(EnumDef),
     Import(ImportDecl),
+    TraitDef(TraitDef),
+    ImplDef(ImplDef),
 }
 
-// --- 3. メインパーサーロジック ---
+// --- 3. Generics パースヘルパー ---
+
+/// 型パラメータリスト `<T, U>` をパースする。
+/// input は `<` で始まる文字列を想定。成功時は (パラメータリスト, 消費バイト数) を返す。
+fn parse_type_params_from_str(input: &str) -> (Vec<String>, usize) {
+    if !input.starts_with('<') {
+        return (vec![], 0);
+    }
+    let mut depth = 0;
+    let mut end = 0;
+    for (i, c) in input.char_indices() {
+        match c {
+            '<' => depth += 1,
+            '>' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = i;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    if end == 0 {
+        return (vec![], 0);
+    }
+    let inner = &input[1..end];
+    let params: Vec<String> = inner.split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    (params, end + 1)
+}
+
+/// 型参照文字列（例: "Stack<i64>", "i64", "Map<String, List<i64>>"）を TypeRef にパースする。
+pub fn parse_type_ref(input: &str) -> TypeRef {
+    let input = input.trim();
+    if let Some(angle_pos) = input.find('<') {
+        // ジェネリック型: "Stack<i64>" → name="Stack", type_args=[TypeRef("i64")]
+        let name = input[..angle_pos].trim().to_string();
+        // 最後の '>' を見つける
+        let inner = if input.ends_with('>') {
+            &input[angle_pos + 1..input.len() - 1]
+        } else {
+            &input[angle_pos + 1..]
+        };
+        // カンマで分割（ネストした <> を考慮）
+        let args = split_type_args(inner);
+        let type_args: Vec<TypeRef> = args.iter().map(|a| parse_type_ref(a)).collect();
+        TypeRef::generic(&name, type_args)
+    } else {
+        TypeRef::simple(input)
+    }
+}
+
+/// ネストした `<>` を考慮してカンマで型引数を分割する
+fn split_type_args(input: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut depth = 0;
+    let mut current = String::new();
+    for c in input.chars() {
+        match c {
+            '<' => { depth += 1; current.push(c); }
+            '>' => { depth -= 1; current.push(c); }
+            ',' if depth == 0 => {
+                let trimmed = current.trim().to_string();
+                if !trimmed.is_empty() {
+                    result.push(trimmed);
+                }
+                current.clear();
+            }
+            _ => { current.push(c); }
+        }
+    }
+    let trimmed = current.trim().to_string();
+    if !trimmed.is_empty() {
+        result.push(trimmed);
+    }
+    result
+}
+
+/// 型パラメータリストから境界付きパラメータをパースする。
+/// 例: "<T: Comparable, U>" → type_params=["T","U"], bounds=[{param:"T", bounds:["Comparable"]}]
+fn parse_type_params_with_bounds(input: &str) -> (Vec<String>, Vec<TypeParamBound>) {
+    let (raw_params, _) = parse_type_params_from_str(input);
+    let mut type_params = Vec::new();
+    let mut bounds = Vec::new();
+
+    for raw in &raw_params {
+        if let Some((param, bound_str)) = raw.split_once(':') {
+            let param = param.trim().to_string();
+            let param_bounds: Vec<String> = bound_str.split('+')
+                .map(|b| b.trim().to_string())
+                .filter(|b| !b.is_empty())
+                .collect();
+            bounds.push(TypeParamBound { param: param.clone(), bounds: param_bounds });
+            type_params.push(param);
+        } else {
+            type_params.push(raw.trim().to_string());
+        }
+    }
+    (type_params, bounds)
+}
+
+// --- 4. メインパーサーロジック ---
 
 pub fn parse_module(source: &str) -> Vec<Item> {
     let mut items = Vec::new();
@@ -191,8 +370,8 @@ pub fn parse_module(source: &str) -> Vec<Item> {
     // type 定義: i64 | u64 | f64 を許容するように変更
     let type_re = Regex::new(r"(?m)^type\s+(\w+)\s*=\s*(\w+)\s+where\s+([^;]+);").unwrap();
     let atom_re = Regex::new(r"atom\s+\w+").unwrap();
-    // struct 定義: struct Name { field: Type, ... }
-    let struct_re = Regex::new(r"(?m)^struct\s+(\w+)\s*\{([^}]*)\}").unwrap();
+    // struct 定義: struct Name { field: Type, ... } または struct Name<T> { field: T, ... }
+    let struct_re = Regex::new(r"(?m)^struct\s+(\w+)\s*(<[^>]*>)?\s*\{([^}]*)\}").unwrap();
 
     // import 宣言のパース
     for cap in import_re.captures_iter(source) {
@@ -215,7 +394,14 @@ pub fn parse_module(source: &str) -> Vec<Item> {
 
     for cap in struct_re.captures_iter(source) {
         let name = cap[1].to_string();
-        let fields_raw = &cap[2];
+        // Generics: 型パラメータ <T, U> のパース
+        let type_params = cap.get(2)
+            .map(|m| {
+                let (params, _) = parse_type_params_from_str(m.as_str());
+                params
+            })
+            .unwrap_or_default();
+        let fields_raw = &cap[3];
         let fields: Vec<StructField> = fields_raw
             .split(',')
             .map(|s| s.trim())
@@ -228,22 +414,32 @@ pub fn parse_module(source: &str) -> Vec<Item> {
                     (s.trim(), None)
                 };
                 let parts: Vec<&str> = field_part.splitn(2, ':').collect();
+                let type_name_str = parts.get(1).map(|t| t.trim().to_string()).unwrap_or_else(|| "i64".to_string());
+                let type_ref = parse_type_ref(&type_name_str);
                 StructField {
                     name: parts[0].trim().to_string(),
-                    type_name: parts.get(1).map(|t| t.trim().to_string()).unwrap_or_else(|| "i64".to_string()),
+                    type_name: type_name_str,
+                    type_ref,
                     constraint,
                 }
             })
             .collect();
-        items.push(Item::StructDef(StructDef { name, fields }));
+        items.push(Item::StructDef(StructDef { name, type_params, fields }));
     }
 
-    // enum 定義: enum Name { Variant1(Type), Variant2, Variant3(Type1, Type2) }
+    // enum 定義: enum Name { ... } または enum Name<T> { ... }
     // 再帰的 ADT: フィールド型に "Self" または Enum 自身の名前を記述可能
-    let enum_re = Regex::new(r"(?m)^enum\s+(\w+)\s*\{([^}]*)\}").unwrap();
+    let enum_re = Regex::new(r"(?m)^enum\s+(\w+)\s*(<[^>]*>)?\s*\{([^}]*)\}").unwrap();
     for cap in enum_re.captures_iter(source) {
         let name = cap[1].to_string();
-        let variants_raw = &cap[2];
+        // Generics: 型パラメータ <T, U> のパース
+        let type_params = cap.get(2)
+            .map(|m| {
+                let (params, _) = parse_type_params_from_str(m.as_str());
+                params
+            })
+            .unwrap_or_default();
+        let variants_raw = &cap[3];
         let mut any_recursive = false;
         let variants: Vec<EnumVariant> = variants_raw
             .split(',')
@@ -263,16 +459,116 @@ pub fn parse_module(source: &str) -> Vec<Item> {
                         })
                         .filter(|f| !f.is_empty())
                         .collect();
+                    // TypeRef 版のフィールド型も生成
+                    let field_types: Vec<TypeRef> = fields.iter()
+                        .map(|f| parse_type_ref(f))
+                        .collect();
                     // 再帰判定: フィールドに自身の Enum 名を含むか
                     let is_recursive = fields.iter().any(|f| f == &name);
                     if is_recursive { any_recursive = true; }
-                    EnumVariant { name: variant_name, fields, is_recursive }
+                    EnumVariant { name: variant_name, fields, field_types, is_recursive }
                 } else {
-                    EnumVariant { name: s.to_string(), fields: vec![], is_recursive: false }
+                    EnumVariant { name: s.to_string(), fields: vec![], field_types: vec![], is_recursive: false }
                 }
             })
             .collect();
-        items.push(Item::EnumDef(EnumDef { name, variants, is_recursive: any_recursive }));
+        items.push(Item::EnumDef(EnumDef { name, type_params, variants, is_recursive: any_recursive }));
+    }
+
+    // trait 定義: trait Name { fn method(a: Type) -> Type; law name: expr; }
+    let trait_re = Regex::new(r"(?m)^trait\s+(\w+)\s*\{([^}]*)\}").unwrap();
+    for cap in trait_re.captures_iter(source) {
+        let name = cap[1].to_string();
+        let body = &cap[2];
+        let mut methods = Vec::new();
+        let mut laws = Vec::new();
+
+        for line in body.lines() {
+            let line = line.trim();
+            if line.is_empty() { continue; }
+
+            if line.starts_with("fn ") {
+                // fn leq(a: Self, b: Self) -> bool;
+                let fn_re = Regex::new(r"fn\s+(\w+)\s*\(([^)]*)\)\s*->\s*(\w+)").unwrap();
+                if let Some(fcap) = fn_re.captures(line) {
+                    let method_name = fcap[1].to_string();
+                    let params_str = &fcap[2];
+                    let return_type = fcap[3].to_string();
+                    let param_types: Vec<String> = params_str.split(',')
+                        .map(|p| {
+                            if let Some((_, t)) = p.split_once(':') {
+                                t.trim().to_string()
+                            } else {
+                                p.trim().to_string()
+                            }
+                        })
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    methods.push(TraitMethod { name: method_name, param_types, return_type });
+                }
+            } else if line.starts_with("law ") {
+                // law reflexive: leq(x, x) == true;
+                let law_re = Regex::new(r"law\s+(\w+)\s*:\s*([^;]+)").unwrap();
+                if let Some(lcap) = law_re.captures(line) {
+                    let law_name = lcap[1].to_string();
+                    let law_expr = lcap[2].trim().to_string();
+                    laws.push((law_name, law_expr));
+                }
+            }
+        }
+        items.push(Item::TraitDef(TraitDef { name, methods, laws }));
+    }
+
+    // impl 定義: impl TraitName for TypeName { fn method(params) -> Type { body } }
+    // ネストした {} を正しく処理するためにカスタムパーサーを使用
+    let impl_header_re = Regex::new(r"(?m)^impl\s+(\w+)\s+for\s+(\w+)\s*\{").unwrap();
+    for cap in impl_header_re.captures_iter(source) {
+        let trait_name = cap[1].to_string();
+        let target_type = cap[2].to_string();
+        // impl ブロックの開始位置から、ネストした {} を考慮して終了位置を探す
+        let block_start = cap.get(0).unwrap().end(); // '{' の直後
+        let mut depth = 1;
+        let mut block_end = block_start;
+        for (i, c) in source[block_start..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        block_end = block_start + i;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let body = &source[block_start..block_end];
+        let mut method_bodies = Vec::new();
+
+        // fn method(params) -> Type { body } をパース（ネスト対応）
+        let fn_header_re = Regex::new(r"fn\s+(\w+)\s*\([^)]*\)\s*->\s*\w+\s*\{").unwrap();
+        for fcap in fn_header_re.captures_iter(body) {
+            let method_name = fcap[1].to_string();
+            let fn_body_start = fcap.get(0).unwrap().end();
+            let mut fn_depth = 1;
+            let mut fn_body_end = fn_body_start;
+            for (i, c) in body[fn_body_start..].char_indices() {
+                match c {
+                    '{' => fn_depth += 1,
+                    '}' => {
+                        fn_depth -= 1;
+                        if fn_depth == 0 {
+                            fn_body_end = fn_body_start + i;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let method_body = body[fn_body_start..fn_body_end].trim().to_string();
+            method_bodies.push((method_name, method_body));
+        }
+        items.push(Item::ImplDef(ImplDef { trait_name, target_type, method_bodies }));
     }
 
     let atom_indices: Vec<_> = atom_re.find_iter(source).map(|m| m.start()).collect();
@@ -287,7 +583,8 @@ pub fn parse_module(source: &str) -> Vec<Item> {
 }
 
 pub fn parse_atom(source: &str) -> Atom {
-    let name_re = Regex::new(r"atom\s+(\w+)\s*\(([^)]*)\)").unwrap();
+    // Generics 対応: atom name<T, U>(params) の形式もパース
+    let name_re = Regex::new(r"atom\s+(\w+)\s*(<[^>]*>)?\s*\(([^)]*)\)").unwrap();
     let req_re = Regex::new(r"requires:\s*([^;]+);").unwrap();
     let ens_re = Regex::new(r"ensures:\s*([^;]+);").unwrap();
 
@@ -296,18 +593,25 @@ pub fn parse_atom(source: &str) -> Atom {
 
     let name_caps = name_re.captures(source).expect("Failed to parse atom name");
     let name = name_caps[1].to_string();
-    let params: Vec<Param> = name_caps[2]
+    // Generics: 型パラメータ <T: Trait, U> のパース（トレイト境界対応）
+    let (type_params, where_bounds) = name_caps.get(2)
+        .map(|m| parse_type_params_with_bounds(m.as_str()))
+        .unwrap_or_default();
+    let params: Vec<Param> = name_caps[3]
         .split(',')
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .map(|s| {
             if let Some((param_name, type_name)) = s.split_once(':') {
+                let type_name_str = type_name.trim().to_string();
+                let type_ref = parse_type_ref(&type_name_str);
                 Param {
                     name: param_name.trim().to_string(),
-                    type_name: Some(type_name.trim().to_string()),
+                    type_name: Some(type_name_str),
+                    type_ref: Some(type_ref),
                 }
             } else {
-                Param { name: s.to_string(), type_name: None }
+                Param { name: s.to_string(), type_name: None, type_ref: None }
             }
         })
         .collect();
@@ -344,6 +648,8 @@ pub fn parse_atom(source: &str) -> Atom {
 
     Atom {
         name,
+        type_params,
+        where_bounds,
         params,
         requires: forall_re.replace_all(&exists_re.replace_all(&requires_raw, "true"), "true").to_string(),
         forall_constraints,
@@ -662,4 +968,265 @@ fn parse_pattern(tokens: &[String], pos: &mut usize) -> Pattern {
 
     *pos += 1;
     Pattern::Wildcard
+}
+
+// =============================================================================
+// Generics テスト
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::TypeRef;
+
+    #[test]
+    fn test_parse_type_ref_simple() {
+        let tr = parse_type_ref("i64");
+        assert_eq!(tr.name, "i64");
+        assert!(tr.type_args.is_empty());
+    }
+
+    #[test]
+    fn test_parse_type_ref_generic() {
+        let tr = parse_type_ref("Stack<i64>");
+        assert_eq!(tr.name, "Stack");
+        assert_eq!(tr.type_args.len(), 1);
+        assert_eq!(tr.type_args[0].name, "i64");
+    }
+
+    #[test]
+    fn test_parse_type_ref_nested() {
+        let tr = parse_type_ref("Map<String, List<i64>>");
+        assert_eq!(tr.name, "Map");
+        assert_eq!(tr.type_args.len(), 2);
+        assert_eq!(tr.type_args[0].name, "String");
+        assert_eq!(tr.type_args[1].name, "List");
+        assert_eq!(tr.type_args[1].type_args[0].name, "i64");
+    }
+
+    #[test]
+    fn test_parse_type_ref_display() {
+        let tr = parse_type_ref("Stack<i64>");
+        assert_eq!(tr.display_name(), "Stack<i64>");
+
+        let tr2 = parse_type_ref("Map<String, List<i64>>");
+        assert_eq!(tr2.display_name(), "Map<String, List<i64>>");
+    }
+
+    #[test]
+    fn test_type_ref_substitute() {
+        use std::collections::HashMap;
+        let mut map = HashMap::new();
+        map.insert("T".to_string(), TypeRef::simple("i64"));
+
+        let tr = TypeRef::simple("T");
+        let result = tr.substitute(&map);
+        assert_eq!(result.name, "i64");
+
+        let tr2 = TypeRef::generic("Stack", vec![TypeRef::simple("T")]);
+        let result2 = tr2.substitute(&map);
+        assert_eq!(result2.display_name(), "Stack<i64>");
+    }
+
+    #[test]
+    fn test_parse_generic_struct() {
+        let source = r#"
+struct Pair<T, U> {
+    first: T,
+    second: U
+}
+"#;
+        let items = parse_module(source);
+        let struct_items: Vec<_> = items.iter().filter_map(|i| {
+            if let Item::StructDef(s) = i { Some(s) } else { None }
+        }).collect();
+
+        assert_eq!(struct_items.len(), 1);
+        let s = &struct_items[0];
+        assert_eq!(s.name, "Pair");
+        assert_eq!(s.type_params, vec!["T", "U"]);
+        assert_eq!(s.fields.len(), 2);
+        assert_eq!(s.fields[0].name, "first");
+        assert_eq!(s.fields[0].type_ref.name, "T");
+        assert_eq!(s.fields[1].name, "second");
+        assert_eq!(s.fields[1].type_ref.name, "U");
+    }
+
+    #[test]
+    fn test_parse_generic_enum() {
+        let source = r#"
+enum Option<T> {
+    Some(T),
+    None
+}
+"#;
+        let items = parse_module(source);
+        let enum_items: Vec<_> = items.iter().filter_map(|i| {
+            if let Item::EnumDef(e) = i { Some(e) } else { None }
+        }).collect();
+
+        assert_eq!(enum_items.len(), 1);
+        let e = &enum_items[0];
+        assert_eq!(e.name, "Option");
+        assert_eq!(e.type_params, vec!["T"]);
+        assert_eq!(e.variants.len(), 2);
+        assert_eq!(e.variants[0].name, "Some");
+        assert_eq!(e.variants[0].field_types[0].name, "T");
+        assert_eq!(e.variants[1].name, "None");
+        assert!(e.variants[1].fields.is_empty());
+    }
+
+    #[test]
+    fn test_parse_generic_atom() {
+        let source = r#"
+atom identity<T>(x: T)
+requires: true;
+ensures: true;
+body: x;
+"#;
+        let items = parse_module(source);
+        let atom_items: Vec<_> = items.iter().filter_map(|i| {
+            if let Item::Atom(a) = i { Some(a) } else { None }
+        }).collect();
+
+        assert_eq!(atom_items.len(), 1);
+        let a = &atom_items[0];
+        assert_eq!(a.name, "identity");
+        assert_eq!(a.type_params, vec!["T"]);
+        assert_eq!(a.params.len(), 1);
+        assert_eq!(a.params[0].name, "x");
+        assert_eq!(a.params[0].type_ref.as_ref().unwrap().name, "T");
+    }
+
+    #[test]
+    fn test_parse_trait_def() {
+        let source = r#"
+trait Comparable {
+    fn leq(a: Self, b: Self) -> bool;
+    law reflexive: leq(x, x) == true;
+    law transitive: leq(a, b) && leq(b, c) => leq(a, c);
+}
+"#;
+        let items = parse_module(source);
+        let traits: Vec<_> = items.iter().filter_map(|i| {
+            if let Item::TraitDef(t) = i { Some(t) } else { None }
+        }).collect();
+
+        assert_eq!(traits.len(), 1);
+        let t = &traits[0];
+        assert_eq!(t.name, "Comparable");
+        assert_eq!(t.methods.len(), 1);
+        assert_eq!(t.methods[0].name, "leq");
+        assert_eq!(t.methods[0].param_types, vec!["Self", "Self"]);
+        assert_eq!(t.methods[0].return_type, "bool");
+        assert_eq!(t.laws.len(), 2);
+        assert_eq!(t.laws[0].0, "reflexive");
+        assert_eq!(t.laws[1].0, "transitive");
+    }
+
+    #[test]
+    fn test_parse_impl_def() {
+        let source = r#"
+impl Comparable for i64 {
+    fn leq(a: i64, b: i64) -> bool { a <= b }
+}
+"#;
+        let items = parse_module(source);
+        let impls: Vec<_> = items.iter().filter_map(|i| {
+            if let Item::ImplDef(im) = i { Some(im) } else { None }
+        }).collect();
+
+        assert_eq!(impls.len(), 1);
+        assert_eq!(impls[0].trait_name, "Comparable");
+        assert_eq!(impls[0].target_type, "i64");
+        assert_eq!(impls[0].method_bodies.len(), 1);
+        assert_eq!(impls[0].method_bodies[0].0, "leq");
+        assert_eq!(impls[0].method_bodies[0].1, "a <= b");
+    }
+
+    #[test]
+    fn test_parse_atom_with_trait_bounds() {
+        let source = r#"
+atom min<T: Comparable>(a: T, b: T)
+requires: true;
+ensures: true;
+body: a;
+"#;
+        let items = parse_module(source);
+        let atoms: Vec<_> = items.iter().filter_map(|i| {
+            if let Item::Atom(a) = i { Some(a) } else { None }
+        }).collect();
+
+        assert_eq!(atoms.len(), 1);
+        let a = &atoms[0];
+        assert_eq!(a.name, "min");
+        assert_eq!(a.type_params, vec!["T"]);
+        assert_eq!(a.where_bounds.len(), 1);
+        assert_eq!(a.where_bounds[0].param, "T");
+        assert_eq!(a.where_bounds[0].bounds, vec!["Comparable"]);
+    }
+
+    #[test]
+    fn test_parse_atom_with_multiple_bounds() {
+        let source = r#"
+atom sorted_min<T: Comparable + Numeric>(a: T, b: T)
+requires: true;
+ensures: true;
+body: a;
+"#;
+        let items = parse_module(source);
+        let atoms: Vec<_> = items.iter().filter_map(|i| {
+            if let Item::Atom(a) = i { Some(a) } else { None }
+        }).collect();
+
+        assert_eq!(atoms.len(), 1);
+        let a = &atoms[0];
+        assert_eq!(a.type_params, vec!["T"]);
+        assert_eq!(a.where_bounds.len(), 1);
+        assert_eq!(a.where_bounds[0].bounds, vec!["Comparable", "Numeric"]);
+    }
+
+    #[test]
+    fn test_parse_non_generic_backward_compat() {
+        // 非ジェネリック定義が引き続き正しくパースされることを確認
+        let source = r#"
+struct Point {
+    x: f64,
+    y: f64
+}
+
+enum Color {
+    Red,
+    Green,
+    Blue
+}
+
+atom add(a: i64, b: i64)
+requires: true;
+ensures: true;
+body: a + b;
+"#;
+        let items = parse_module(source);
+
+        let structs: Vec<_> = items.iter().filter_map(|i| {
+            if let Item::StructDef(s) = i { Some(s) } else { None }
+        }).collect();
+        assert_eq!(structs.len(), 1);
+        assert_eq!(structs[0].name, "Point");
+        assert!(structs[0].type_params.is_empty());
+
+        let enums: Vec<_> = items.iter().filter_map(|i| {
+            if let Item::EnumDef(e) = i { Some(e) } else { None }
+        }).collect();
+        assert_eq!(enums.len(), 1);
+        assert_eq!(enums[0].name, "Color");
+        assert!(enums[0].type_params.is_empty());
+
+        let atoms: Vec<_> = items.iter().filter_map(|i| {
+            if let Item::Atom(a) = i { Some(a) } else { None }
+        }).collect();
+        assert_eq!(atoms.len(), 1);
+        assert_eq!(atoms[0].name, "add");
+        assert!(atoms[0].type_params.is_empty());
+    }
 }

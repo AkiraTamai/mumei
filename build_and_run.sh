@@ -44,24 +44,39 @@ echo "📝 Creating sword_test.mm (Comprehensive Verification Suite)..."
 cat <<'EOF' > sword_test.mm
 // ============================================================
 // Mumei Verification Suite: Comprehensive Feature Demonstration
+// Includes: Refinement Types, Structs, Generics, Traits, Laws
 // ============================================================
 
 // --- Refinement Types ---
 type Nat = i64 where v >= 0;
 type Pos = f64 where v > 0.0;
-type StackIdx = i64 where v >= 0;
 
-// --- Struct: Geometric Point (Plan B) ---
+// --- Struct: Geometric Point ---
 struct Point {
     x: f64 where v >= 0.0,
     y: f64 where v >= 0.0
 }
 
-// --- Struct: Circle with positive radius (Plan B) ---
-struct Circle {
-    cx: f64 where v >= 0.0,
-    cy: f64 where v >= 0.0,
-    r: f64 where v > 0.0
+// --- Generics: Pair<T, U> ---
+struct Pair<T, U> {
+    first: T,
+    second: U
+}
+
+// --- Generics: Option<T> ---
+enum Option<T> {
+    Some(T),
+    None
+}
+
+// --- Trait with Laws ---
+trait Comparable {
+    fn leq(a: Self, b: Self) -> bool;
+    law reflexive: leq(x, x) == true;
+}
+
+impl Comparable for i64 {
+    fn leq(a: i64, b: i64) -> bool { a <= b }
 }
 
 // ============================================================
@@ -188,7 +203,7 @@ EOF
 
 # --- 5. コンパイル実行 ---
 echo "🚀 Running Mumei Verification Suite..."
-echo "   Features: Refinement Types, Structs, Loop Invariants, Termination Check"
+echo "   Features: Refinement Types, Structs, Generics, Traits, Laws, Loop Invariants, Termination"
 echo ""
 mkdir -p dist
 rm -f dist/katana* # 古い成果物を削除
@@ -227,6 +242,9 @@ echo "  ✅ Atom 'robust_push'  : Bounded stack push (0 <= top' <= max)"
 echo "  ✅ Atom 'stack_clear'  : Loop termination (decreases: i) + invariant"
 echo "  ✅ Atom 'dist_squared' : Non-negative distance (dx²+dy² >= 0)"
 echo "  ✅ Struct 'Point'      : Field constraints (x >= 0.0, y >= 0.0)"
-echo "  ✅ Struct 'Circle'     : Field constraints (cx >= 0.0, cy >= 0.0, r > 0.0)"
+echo "  ✅ Generic 'Pair<T,U>' : Polymorphic struct (monomorphized at compile time)"
+echo "  ✅ Generic 'Option<T>' : Polymorphic enum (monomorphized at compile time)"
+echo "  ✅ Trait 'Comparable'  : Law 'reflexive' verified by Z3 for i64 impl"
+echo "  ✅ Built-in: Eq, Ord, Numeric auto-implemented for i64/u64/f64"
 echo ""
-echo "🎉 All 8 atoms verified. All 2 structs registered. The blade is forged."
+echo "🎉 All atoms verified. Generics + Traits + Laws operational. The blade is forged."

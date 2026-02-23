@@ -1,5 +1,9 @@
-use crate::parser::{Expr, Op, Atom, ImportDecl, EnumDef, StructDef, parse_expression};
-use crate::verification::resolve_base_type;
+use crate::parser::{Expr, Op, Atom, ImportDecl, EnumDef, StructDef, TraitDef, ImplDef, parse_expression};
+
+/// 型名をベース型に解決する（transpiler ローカル版）
+fn resolve_base_type(name: &str) -> String {
+    name.to_string()
+}
 
 /// import 宣言から Go のモジュールヘッダーを生成する
 /// 例: package main\nimport "path/to/math"
@@ -45,11 +49,20 @@ pub fn transpile_enum_go(enum_def: &EnumDef) -> String {
     lines.join("\n")
 }
 
-/// Struct 定義を Go の struct に変換する
+/// Struct 定義を Go の struct に変換する（Go 1.18+ Generics 対応）
 pub fn transpile_struct_go(struct_def: &StructDef) -> String {
     let mut lines = Vec::new();
     lines.push(format!("// Verified Struct: {}", struct_def.name));
-    lines.push(format!("type {} struct {{", struct_def.name));
+    // Generics: 型パラメータがある場合は [T any, U any] を付与（Go 1.18+）
+    let type_params_str = if struct_def.type_params.is_empty() {
+        String::new()
+    } else {
+        let params: Vec<String> = struct_def.type_params.iter()
+            .map(|p| format!("{} any", p))
+            .collect();
+        format!("[{}]", params.join(", "))
+    };
+    lines.push(format!("type {}{} struct {{", struct_def.name, type_params_str));
     for field in &struct_def.fields {
         let go_type = map_type_go(Some(field.type_name.as_str()));
         if let Some(constraint) = &field.constraint {
@@ -69,6 +82,41 @@ fn capitalize_first(s: &str) -> String {
         None => String::new(),
         Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
     }
+}
+
+/// Trait 定義を Go の interface に変換する
+pub fn transpile_trait_go(trait_def: &TraitDef) -> String {
+    let mut lines = Vec::new();
+    for (law_name, law_expr) in &trait_def.laws {
+        lines.push(format!("// Law {}: {}", law_name, law_expr));
+    }
+    lines.push(format!("type {} interface {{", trait_def.name));
+    for method in &trait_def.methods {
+        let go_ret = if method.return_type == "bool" { "bool" } else { "int64" };
+        let params: Vec<String> = method.param_types.iter().enumerate()
+            .map(|(i, _)| {
+                let name = if i == 0 { "a" } else if i == 1 { "b" } else { "c" };
+                format!("{} int64", name)
+            })
+            .collect();
+        lines.push(format!("\t{}({}) {}", capitalize_first(&method.name), params.join(", "), go_ret));
+    }
+    lines.push("}".to_string());
+    lines.join("\n")
+}
+
+/// Impl 定義を Go のメソッドレシーバに変換する
+pub fn transpile_impl_go(impl_def: &ImplDef) -> String {
+    let mut lines = Vec::new();
+    let go_type = map_type_go(Some(&impl_def.target_type));
+    lines.push(format!("// impl {} for {}", impl_def.trait_name, go_type));
+    for (method_name, method_body) in &impl_def.method_bodies {
+        lines.push(format!("func {}{}(a, b {}) {} {{ return {} }}",
+            go_type, capitalize_first(method_name), go_type,
+            if method_body.contains("==") || method_body.contains("<=") { "bool" } else { &go_type },
+            method_body));
+    }
+    lines.join("\n")
 }
 
 pub fn transpile_to_go(atom: &Atom) -> String {

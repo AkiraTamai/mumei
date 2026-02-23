@@ -6,7 +6,7 @@ use inkwell::IntPredicate;
 use inkwell::FloatPredicate;
 use inkwell::AddressSpace;
 use crate::parser::{Atom, Expr, Op, Pattern, parse_expression};
-use crate::verification::{resolve_base_type, get_struct_def, get_atom_def, find_enum_by_variant, MumeiError, MumeiResult};
+use crate::verification::{ModuleEnv, MumeiError, MumeiResult};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -23,10 +23,10 @@ fn array_struct_type<'a>(context: &'a Context) -> inkwell::types::StructType<'a>
 }
 
 /// パラメータの LLVM 型を解決する
-fn resolve_param_type<'a>(context: &'a Context, type_name: Option<&str>) -> inkwell::types::BasicTypeEnum<'a> {
+fn resolve_param_type<'a>(context: &'a Context, type_name: Option<&str>, module_env: &ModuleEnv) -> inkwell::types::BasicTypeEnum<'a> {
     match type_name {
         Some(name) => {
-            let base = resolve_base_type(name);
+            let base = module_env.resolve_base_type(name);
             match base.as_str() {
                 "f64" => context.f64_type().into(),
                 "u64" => context.i64_type().into(),
@@ -38,7 +38,7 @@ fn resolve_param_type<'a>(context: &'a Context, type_name: Option<&str>) -> inkw
     }
 }
 
-pub fn compile(atom: &Atom, output_path: &Path) -> MumeiResult<()> {
+pub fn compile(atom: &Atom, output_path: &Path, module_env: &ModuleEnv) -> MumeiResult<()> {
     let context = Context::create();
     let module = context.create_module(&atom.name);
     let builder = context.create_builder();
@@ -47,7 +47,7 @@ pub fn compile(atom: &Atom, output_path: &Path) -> MumeiResult<()> {
 
     // パラメータ型を精緻型から解決
     let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = atom.params.iter()
-        .map(|p| resolve_param_type(&context, p.type_name.as_deref()).into())
+        .map(|p| resolve_param_type(&context, p.type_name.as_deref(), module_env).into())
         .collect();
     let fn_type = i64_type.fn_type(&param_types, false);
     let function = module.add_function(&atom.name, fn_type, None);
@@ -73,7 +73,7 @@ pub fn compile(atom: &Atom, output_path: &Path) -> MumeiResult<()> {
     }
 
     let body_ast = parse_expression(&atom.body_expr);
-    let result_val = compile_expr(&context, &builder, &module, &function, &body_ast, &mut variables, &array_ptrs)?;
+    let result_val = compile_expr(&context, &builder, &module, &function, &body_ast, &mut variables, &array_ptrs, module_env)?;
 
     llvm!(builder.build_return(Some(&result_val)));
 
@@ -91,6 +91,7 @@ fn compile_expr<'a>(
     expr: &Expr,
     variables: &mut HashMap<String, BasicValueEnum<'a>>,
     array_ptrs: &HashMap<String, (BasicValueEnum<'a>, BasicValueEnum<'a>)>,
+    module_env: &ModuleEnv,
 ) -> MumeiResult<BasicValueEnum<'a>> {
     match expr {
         Expr::Number(n) => Ok(context.i64_type().const_int(*n as u64, true).into()),
@@ -104,7 +105,7 @@ fn compile_expr<'a>(
         Expr::Call(name, args) => {
             match name.as_str() {
                 "sqrt" => {
-                    let arg = compile_expr(context, builder, module, function, &args[0], variables, array_ptrs)?;
+                    let arg = compile_expr(context, builder, module, function, &args[0], variables, array_ptrs, module_env)?;
                     let sqrt_func = module.get_function("llvm.sqrt.f64").unwrap_or_else(|| {
                         let type_f64 = context.f64_type();
                         let fn_type = type_f64.fn_type(&[type_f64.into()], false);
@@ -128,16 +129,16 @@ fn compile_expr<'a>(
                 },
                 _ => {
                     // ユーザー定義関数呼び出し: declare（外部宣言）+ call
-                    if let Some(callee) = get_atom_def(name) {
+                    if let Some(callee) = module_env.get_atom(name) {
                         // 呼び出し先の関数型を構築
                         let callee_param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = callee.params.iter()
-                            .map(|p| resolve_param_type(context, p.type_name.as_deref()).into())
+                            .map(|p| resolve_param_type(context, p.type_name.as_deref(), module_env).into())
                             .collect();
 
                         // 戻り値型の推定: f64 パラメータがあれば f64、なければ i64
                         let has_float = callee.params.iter().any(|p| {
                             p.type_name.as_deref()
-                                .map(|t| resolve_base_type(t) == "f64")
+                                .map(|t| module_env.resolve_base_type(t) == "f64")
                                 .unwrap_or(false)
                         });
                         let callee_fn = if has_float {
@@ -155,7 +156,7 @@ fn compile_expr<'a>(
                         // 引数を評価
                         let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
                         for arg in args {
-                            let val = compile_expr(context, builder, module, function, arg, variables, array_ptrs)?;
+                            let val = compile_expr(context, builder, module, function, arg, variables, array_ptrs, module_env)?;
                             arg_vals.push(val.into());
                         }
 
@@ -175,7 +176,7 @@ fn compile_expr<'a>(
 
         Expr::ArrayAccess(name, index_expr) => {
             // Fat Pointer: data_ptr から GEP + load
-            let idx = compile_expr(context, builder, module, function, index_expr, variables, array_ptrs)?
+            let idx = compile_expr(context, builder, module, function, index_expr, variables, array_ptrs, module_env)?
                 .into_int_value();
             if let Some((len_val, data_ptr_val)) = array_ptrs.get(name) {
                 let data_ptr = data_ptr_val.into_pointer_value();
@@ -218,8 +219,8 @@ fn compile_expr<'a>(
         },
 
         Expr::BinaryOp(left, op, right) => {
-            let lhs = compile_expr(context, builder, module, function, left, variables, array_ptrs)?;
-            let rhs = compile_expr(context, builder, module, function, right, variables, array_ptrs)?;
+            let lhs = compile_expr(context, builder, module, function, left, variables, array_ptrs, module_env)?;
+            let rhs = compile_expr(context, builder, module, function, right, variables, array_ptrs, module_env)?;
 
             if lhs.is_float_value() || rhs.is_float_value() {
                 let l = if lhs.is_float_value() {
@@ -267,7 +268,7 @@ fn compile_expr<'a>(
         },
 
         Expr::IfThenElse { cond, then_branch, else_branch } => {
-            let cond_val = compile_expr(context, builder, module, function, cond, variables, array_ptrs)?.into_int_value();
+            let cond_val = compile_expr(context, builder, module, function, cond, variables, array_ptrs, module_env)?.into_int_value();
             let cond_bool = llvm!(builder.build_int_compare(IntPredicate::NE, cond_val, context.i64_type().const_int(0, false), "if_cond"));
 
             let then_block = context.append_basic_block(*function, "then");
@@ -277,12 +278,12 @@ fn compile_expr<'a>(
             llvm!(builder.build_conditional_branch(cond_bool, then_block, else_block));
 
             builder.position_at_end(then_block);
-            let then_val = compile_expr(context, builder, module, function, then_branch, variables, array_ptrs)?;
+            let then_val = compile_expr(context, builder, module, function, then_branch, variables, array_ptrs, module_env)?;
             let then_end_block = builder.get_insert_block().unwrap();
             llvm!(builder.build_unconditional_branch(merge_block));
 
             builder.position_at_end(else_block);
-            let else_val = compile_expr(context, builder, module, function, else_branch, variables, array_ptrs)?;
+            let else_val = compile_expr(context, builder, module, function, else_branch, variables, array_ptrs, module_env)?;
             let else_end_block = builder.get_insert_block().unwrap();
             llvm!(builder.build_unconditional_branch(merge_block));
 
@@ -311,12 +312,12 @@ fn compile_expr<'a>(
                 variables.insert(name.clone(), phi.as_basic_value());
             }
 
-            let cond_val = compile_expr(context, builder, module, function, cond, variables, array_ptrs)?.into_int_value();
+            let cond_val = compile_expr(context, builder, module, function, cond, variables, array_ptrs, module_env)?.into_int_value();
             let cond_bool = llvm!(builder.build_int_compare(IntPredicate::NE, cond_val, context.i64_type().const_int(0, false), "loop_cond"));
             llvm!(builder.build_conditional_branch(cond_bool, body_block, after_block));
 
             builder.position_at_end(body_block);
-            compile_expr(context, builder, module, function, body, variables, array_ptrs)?;
+            compile_expr(context, builder, module, function, body, variables, array_ptrs, module_env)?;
             let body_end_block = builder.get_insert_block().unwrap();
 
             for (name, phi) in &phi_nodes {
@@ -337,13 +338,13 @@ fn compile_expr<'a>(
         Expr::Block(stmts) => {
             let mut last_val = context.i64_type().const_int(0, false).into();
             for stmt in stmts {
-                last_val = compile_expr(context, builder, module, function, stmt, variables, array_ptrs)?;
+                last_val = compile_expr(context, builder, module, function, stmt, variables, array_ptrs, module_env)?;
             }
             Ok(last_val)
         },
 
         Expr::Let { var, value } | Expr::Assign { var, value } => {
-            let val = compile_expr(context, builder, module, function, value, variables, array_ptrs)?;
+            let val = compile_expr(context, builder, module, function, value, variables, array_ptrs, module_env)?;
             variables.insert(var.clone(), val);
             Ok(val)
         },
@@ -352,16 +353,16 @@ fn compile_expr<'a>(
             // 構造体の各フィールドを評価し、フラットな変数として variables に登録
             // LLVM 上では各フィールドを独立した値として扱う（値渡しセマンティクス）
             let mut last_val: BasicValueEnum = context.i64_type().const_int(0, false).into();
-            if let Some(sdef) = get_struct_def(type_name) {
+            if let Some(sdef) = module_env.get_struct(type_name) {
                 // 構造体定義に基づいてフィールド型を解決
                 for (field_name, field_expr) in fields {
-                    let val = compile_expr(context, builder, module, function, field_expr, variables, array_ptrs)?;
+                    let val = compile_expr(context, builder, module, function, field_expr, variables, array_ptrs, module_env)?;
                     let qualified = format!("__struct_{}_{}", type_name, field_name);
                     variables.insert(qualified, val);
                 }
                 // 構造体定義のフィールド順で LLVM StructType を構築
                 let field_types: Vec<inkwell::types::BasicTypeEnum> = sdef.fields.iter().map(|f| {
-                    let base = resolve_base_type(&f.type_name);
+                    let base = module_env.resolve_base_type(&f.type_name);
                     match base.as_str() {
                         "f64" => context.f64_type().into(),
                         _ => context.i64_type().into(),
@@ -382,7 +383,7 @@ fn compile_expr<'a>(
             } else {
                 // 構造体定義が見つからない場合はフィールドだけ登録
                 for (field_name, field_expr) in fields {
-                    let val = compile_expr(context, builder, module, function, field_expr, variables, array_ptrs)?;
+                    let val = compile_expr(context, builder, module, function, field_expr, variables, array_ptrs, module_env)?;
                     let qualified = format!("__struct_{}_{}", type_name, field_name);
                     variables.insert(qualified, val);
                     last_val = val;
@@ -407,7 +408,7 @@ fn compile_expr<'a>(
             // ネストパターンは再帰的に条件を AND 結合する。
             // これにより CFG が線形な if-else チェーンになり、
             // switch_block の後付け挿入問題を完全に解消する。
-            let target_val = compile_expr(context, builder, module, function, target, variables, array_ptrs)?;
+            let target_val = compile_expr(context, builder, module, function, target, variables, array_ptrs, module_env)?;
 
             let merge_block = context.append_basic_block(*function, "match.merge");
             let unreachable_block = context.append_basic_block(*function, "match.unreachable");
@@ -440,7 +441,7 @@ fn compile_expr<'a>(
 
                 // --- Step 1: パターン条件の生成（再帰的） ---
                 let pattern_matches = compile_pattern_test(
-                    context, builder, &arm.pattern, target_val, variables,
+                    context, builder, &arm.pattern, target_val, variables, module_env,
                 )?;
 
                 // --- Step 2: ガード条件 ---
@@ -448,7 +449,7 @@ fn compile_expr<'a>(
                     // ガード評価のためにパターン変数を一時バインド
                     let mut guard_vars = variables.clone();
                     bind_pattern_variables(&arm.pattern, target_val, &mut guard_vars);
-                    let guard_val = compile_expr(context, builder, module, function, guard, &mut guard_vars, array_ptrs)?.into_int_value();
+                    let guard_val = compile_expr(context, builder, module, function, guard, &mut guard_vars, array_ptrs, module_env)?.into_int_value();
                     let guard_bool = llvm!(builder.build_int_compare(
                         IntPredicate::NE, guard_val,
                         context.i64_type().const_int(0, false), "guard_cond"
@@ -467,7 +468,7 @@ fn compile_expr<'a>(
                 let mut arm_vars = variables.clone();
                 bind_pattern_variables(&arm.pattern, target_val, &mut arm_vars);
 
-                let body_val = compile_expr(context, builder, module, function, &arm.body, &mut arm_vars, array_ptrs)?;
+                let body_val = compile_expr(context, builder, module, function, &arm.body, &mut arm_vars, array_ptrs, module_env)?;
                 let body_end = builder.get_insert_block().unwrap();
                 llvm!(builder.build_unconditional_branch(merge_block));
                 incoming.push((body_val, body_end));
@@ -508,7 +509,7 @@ fn compile_expr<'a>(
                         // 簡易実装: 全登録済み構造体から探す
                         let sv = struct_val.into_struct_value();
                         // フィールド名からインデックスを推定（構造体定義を参照）
-                        if let Some(idx) = find_field_index(var_name, field_name) {
+                        if let Some(idx) = find_field_index(var_name, field_name, module_env) {
                             let extracted = llvm!(builder.build_extract_value(sv, idx, &format!("{}.{}", var_name, field_name)));
                             return Ok(extracted);
                         }
@@ -516,7 +517,7 @@ fn compile_expr<'a>(
                 }
                 Err(MumeiError::CodegenError(format!("Field '{}' not found on '{}'", field_name, var_name)))
             } else {
-                let base_val = compile_expr(context, builder, module, function, expr, variables, array_ptrs)?;
+                let base_val = compile_expr(context, builder, module, function, expr, variables, array_ptrs, module_env)?;
                 if base_val.is_struct_value() {
                     // インデックス 0 をフォールバック
                     let sv = base_val.into_struct_value();
@@ -547,6 +548,7 @@ fn compile_pattern_test<'a>(
     pattern: &Pattern,
     target: BasicValueEnum<'a>,
     _variables: &HashMap<String, BasicValueEnum<'a>>,
+    module_env: &ModuleEnv,
 ) -> MumeiResult<inkwell::values::IntValue<'a>> {
     match pattern {
         Pattern::Wildcard | Pattern::Variable(_) => {
@@ -562,7 +564,7 @@ fn compile_pattern_test<'a>(
         Pattern::Variant { variant_name, fields } => {
             // Enum variant: tag 値で判定
             let target_int = target.into_int_value();
-            let tag_val = if let Some(enum_def) = find_enum_by_variant(variant_name) {
+            let tag_val = if let Some(enum_def) = module_env.find_enum_by_variant(variant_name) {
                 enum_def.variants.iter()
                     .position(|v| v.name == *variant_name)
                     .unwrap_or(0) as u64
@@ -586,7 +588,7 @@ fn compile_pattern_test<'a>(
                         // 将来: payload からフィールド値を取得して再帰
                         // 現在は payload がないため、ダミー値 0 で再帰テスト
                         let dummy_field: BasicValueEnum = context.i64_type().const_int(0, false).into();
-                        let field_test = compile_pattern_test(context, builder, field_pat, dummy_field, _variables)?;
+                        let field_test = compile_pattern_test(context, builder, field_pat, dummy_field, _variables, module_env)?;
                         result = llvm!(builder.build_and(result, field_test, "pat_nested_and"));
                     },
                 }
@@ -639,12 +641,17 @@ fn bind_pattern_variables<'a>(
 }
 
 /// 構造体定義からフィールド名のインデックスを検索
-fn find_field_index(type_or_var_name: &str, field_name: &str) -> Option<u32> {
-    // STRUCT_ENV に登録された全構造体を探索
+fn find_field_index(type_or_var_name: &str, field_name: &str, module_env: &ModuleEnv) -> Option<u32> {
+    // ModuleEnv に登録された構造体を探索
     // var_name が構造体型名と一致する場合、または型名を推定
-    if let Some(sdef) = get_struct_def(type_or_var_name) {
+    if let Some(sdef) = module_env.get_struct(type_or_var_name) {
         return sdef.fields.iter().position(|f| f.name == field_name).map(|i| i as u32);
     }
     // フォールバック: 全構造体定義を走査してフィールド名が一致するものを探す
+    for sdef in module_env.structs.values() {
+        if let Some(pos) = sdef.fields.iter().position(|f| f.name == field_name) {
+            return Some(pos as u32);
+        }
+    }
     None
 }

@@ -1,3 +1,4 @@
+mod ast;
 mod parser;
 mod verification;
 mod codegen;
@@ -7,7 +8,7 @@ mod resolver;
 use clap::Parser;
 use std::fs;
 use std::path::Path;
-use crate::transpiler::{TargetLanguage, transpile, transpile_enum, transpile_struct, transpile_module_header};
+use crate::transpiler::{TargetLanguage, transpile, transpile_enum, transpile_struct, transpile_trait, transpile_impl, transpile_module_header};
 use crate::parser::{Item, ImportDecl};
 
 #[derive(Parser)]
@@ -29,19 +30,34 @@ fn main() {
         std::process::exit(1);
     });
 
-    println!("🗡️  Mumei: Forging the blade (Type System 2.0 enabled)...");
+    println!("🗡️  Mumei: Forging the blade (Type System 2.0 + Generics enabled)...");
 
     // --- 1. Parsing (構文解析) ---
     let items = parser::parse_module(&source);
 
     // --- 1.5 Resolve (依存解決) ---
-    // import 宣言を処理し、依存モジュールの型・構造体・atom を登録
+    // import 宣言を処理し、依存モジュールの型・構造体・atom を ModuleEnv に登録
+    let mut module_env = verification::ModuleEnv::new();
+    // 組み込みトレイト（Eq, Ord, Numeric）+ i64/u64/f64 の自動 impl を登録
+    verification::register_builtin_traits(&mut module_env);
     let input_path = Path::new(&cli.input);
     let base_dir = input_path.parent().unwrap_or(Path::new("."));
-    if let Err(e) = resolver::resolve_imports(&items, base_dir) {
+    if let Err(e) = resolver::resolve_imports(&items, base_dir, &mut module_env) {
         eprintln!("  ❌ Import Resolution Failed: {}", e);
         std::process::exit(1);
     }
+
+    // --- 1.7 Monomorphization (単相化) ---
+    // ジェネリック定義を収集し、使用箇所の具体型で展開する
+    let mut mono = ast::Monomorphizer::new();
+    mono.collect(&items);
+    let items = if mono.has_generics() {
+        let mono_items = mono.monomorphize(&items);
+        println!("  🔬 Monomorphization: {} generic instance(s) expanded.", mono.instances().len());
+        mono_items
+    } else {
+        items
+    };
 
     let output_path = Path::new(&cli.output);
     let output_dir = output_path.parent().unwrap_or(Path::new("."));
@@ -50,18 +66,17 @@ fn main() {
 
     let mut atom_count = 0;
 
-    // --- Phase 0: import 宣言を収集 + 全 Atom を事前登録 ---
+    // --- Phase 0: ModuleEnv に全定義を登録 ---
     let mut imports: Vec<ImportDecl> = Vec::new();
     for item in &items {
         match item {
             Item::Import(decl) => imports.push(decl.clone()),
-            Item::Atom(atom) => {
-                if let Err(e) = verification::register_atom(atom) {
-                    eprintln!("  ❌ Atom Registration Failed: {}", e);
-                    std::process::exit(1);
-                }
-            }
-            _ => {}
+            Item::TypeDef(refined_type) => module_env.register_type(refined_type),
+            Item::StructDef(struct_def) => module_env.register_struct(struct_def),
+            Item::EnumDef(enum_def) => module_env.register_enum(enum_def),
+            Item::Atom(atom) => module_env.register_atom(atom),
+            Item::TraitDef(trait_def) => module_env.register_trait(trait_def),
+            Item::ImplDef(impl_def) => module_env.register_impl(impl_def),
         }
     }
 
@@ -71,7 +86,7 @@ fn main() {
     let mut go_bundle = transpile_module_header(&imports, file_stem, TargetLanguage::Go);
     let mut ts_bundle = transpile_module_header(&imports, file_stem, TargetLanguage::TypeScript);
 
-    for item in items {
+    for item in &items {
         match item {
             // --- import 宣言（resolver で処理済み） ---
             Item::Import(import_decl) => {
@@ -82,26 +97,18 @@ fn main() {
             // --- 精緻型の登録 ---
             Item::TypeDef(refined_type) => {
                 println!("  ✨ Registered Refined Type: '{}' ({})", refined_type.name, refined_type._base_type);
-                if let Err(e) = verification::register_type(&refined_type) {
-                    eprintln!("  ❌ Type Registration Failed: {}", e);
-                    std::process::exit(1);
-                }
             }
 
             // --- 構造体定義の登録 + トランスパイル ---
             Item::StructDef(struct_def) => {
                 let field_names: Vec<&str> = struct_def.fields.iter().map(|f| f.name.as_str()).collect();
                 println!("  🏗️  Registered Struct: '{}' (fields: {})", struct_def.name, field_names.join(", "));
-                if let Err(e) = verification::register_struct(&struct_def) {
-                    eprintln!("  ❌ Struct Registration Failed: {}", e);
-                    std::process::exit(1);
-                }
                 // 構造体定義をトランスパイル出力に含める
-                rust_bundle.push_str(&transpile_struct(&struct_def, TargetLanguage::Rust));
+                rust_bundle.push_str(&transpile_struct(struct_def, TargetLanguage::Rust));
                 rust_bundle.push_str("\n\n");
-                go_bundle.push_str(&transpile_struct(&struct_def, TargetLanguage::Go));
+                go_bundle.push_str(&transpile_struct(struct_def, TargetLanguage::Go));
                 go_bundle.push_str("\n\n");
-                ts_bundle.push_str(&transpile_struct(&struct_def, TargetLanguage::TypeScript));
+                ts_bundle.push_str(&transpile_struct(struct_def, TargetLanguage::TypeScript));
                 ts_bundle.push_str("\n\n");
             }
 
@@ -109,16 +116,47 @@ fn main() {
             Item::EnumDef(enum_def) => {
                 let variant_names: Vec<&str> = enum_def.variants.iter().map(|v| v.name.as_str()).collect();
                 println!("  🔷 Registered Enum: '{}' (variants: {})", enum_def.name, variant_names.join(", "));
-                if let Err(e) = verification::register_enum(&enum_def) {
-                    eprintln!("  ❌ Enum Registration Failed: {}", e);
-                    std::process::exit(1);
-                }
                 // Enum 定義をトランスパイル出力に含める
-                rust_bundle.push_str(&transpile_enum(&enum_def, TargetLanguage::Rust));
+                rust_bundle.push_str(&transpile_enum(enum_def, TargetLanguage::Rust));
                 rust_bundle.push_str("\n\n");
-                go_bundle.push_str(&transpile_enum(&enum_def, TargetLanguage::Go));
+                go_bundle.push_str(&transpile_enum(enum_def, TargetLanguage::Go));
                 go_bundle.push_str("\n\n");
-                ts_bundle.push_str(&transpile_enum(&enum_def, TargetLanguage::TypeScript));
+                ts_bundle.push_str(&transpile_enum(enum_def, TargetLanguage::TypeScript));
+                ts_bundle.push_str("\n\n");
+            }
+
+            // --- トレイト定義 + トランスパイル ---
+            Item::TraitDef(trait_def) => {
+                let method_names: Vec<&str> = trait_def.methods.iter().map(|m| m.name.as_str()).collect();
+                let law_names: Vec<&str> = trait_def.laws.iter().map(|(n, _)| n.as_str()).collect();
+                println!("  📜 Registered Trait: '{}' (methods: {}, laws: {})",
+                    trait_def.name, method_names.join(", "), law_names.join(", "));
+                // トレイト定義をトランスパイル出力に含める
+                rust_bundle.push_str(&transpile_trait(trait_def, TargetLanguage::Rust));
+                rust_bundle.push_str("\n\n");
+                go_bundle.push_str(&transpile_trait(trait_def, TargetLanguage::Go));
+                go_bundle.push_str("\n\n");
+                ts_bundle.push_str(&transpile_trait(trait_def, TargetLanguage::TypeScript));
+                ts_bundle.push_str("\n\n");
+            }
+
+            // --- トレイト実装の登録 + 法則検証 + トランスパイル ---
+            Item::ImplDef(impl_def) => {
+                println!("  🔧 Registered Impl: {} for {}", impl_def.trait_name, impl_def.target_type);
+                // impl が trait の全 law を満たしているか Z3 で検証
+                match verification::verify_impl(impl_def, &module_env) {
+                    Ok(_) => println!("    ✅ Laws verified for impl {} for {}", impl_def.trait_name, impl_def.target_type),
+                    Err(e) => {
+                        eprintln!("    ❌ Law verification failed: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+                // impl 定義をトランスパイル出力に含める
+                rust_bundle.push_str(&transpile_impl(impl_def, TargetLanguage::Rust));
+                rust_bundle.push_str("\n\n");
+                go_bundle.push_str(&transpile_impl(impl_def, TargetLanguage::Go));
+                go_bundle.push_str("\n\n");
+                ts_bundle.push_str(&transpile_impl(impl_def, TargetLanguage::TypeScript));
                 ts_bundle.push_str("\n\n");
             }
 
@@ -129,13 +167,13 @@ fn main() {
 
                 // --- 2. Verification (形式検証: Z3 + StdLib) ---
                 // インポートされた atom は検証済み（契約のみ信頼）なのでスキップ
-                if verification::is_verified(&atom.name) {
+                if module_env.is_verified(&atom.name) {
                     println!("  ⚖️  [2/4] Verification: Skipped (imported, contract-trusted).");
                 } else {
-                    match verification::verify(&atom, output_dir) {
+                    match verification::verify(atom, output_dir, &module_env) {
                         Ok(_) => {
                             println!("  ⚖️  [2/4] Verification: Passed. Logic verified with Z3.");
-                            verification::mark_verified(&atom.name);
+                            module_env.mark_verified(&atom.name);
                         },
                         Err(e) => {
                             eprintln!("  ❌ [2/4] Verification: Failed! Flaw detected: {}", e);
@@ -147,7 +185,7 @@ fn main() {
                 // --- 3. Codegen (LLVM 18 + Floating Point) ---
                 // 各 Atom ごとに .ll ファイルを生成（またはモジュールを統合する拡張も可能）
                 let atom_output_path = output_dir.join(format!("{}_{}", file_stem, atom.name));
-                match codegen::compile(&atom, &atom_output_path) {
+                match codegen::compile(atom, &atom_output_path, &module_env) {
                     Ok(_) => println!("  ⚙️  [3/4] Tempering: Done. Compiled '{}' to LLVM IR.", atom.name),
                     Err(e) => {
                         eprintln!("  ❌ [3/4] Tempering: Failed! Codegen error: {}", e);
@@ -157,13 +195,13 @@ fn main() {
 
                 // --- 4. Transpile (多言語エクスポート) ---
                 // バンドル用に各言語のコードを生成
-                rust_bundle.push_str(&transpile(&atom, TargetLanguage::Rust));
+                rust_bundle.push_str(&transpile(atom, TargetLanguage::Rust));
                 rust_bundle.push_str("\n\n");
 
-                go_bundle.push_str(&transpile(&atom, TargetLanguage::Go));
+                go_bundle.push_str(&transpile(atom, TargetLanguage::Go));
                 go_bundle.push_str("\n\n");
 
-                ts_bundle.push_str(&transpile(&atom, TargetLanguage::TypeScript));
+                ts_bundle.push_str(&transpile(atom, TargetLanguage::TypeScript));
                 ts_bundle.push_str("\n\n");
             }
         }

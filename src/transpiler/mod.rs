@@ -2,7 +2,7 @@ pub mod rust;
 pub mod golang;
 pub mod typescript;
 
-use crate::parser::{Atom, ImportDecl, EnumDef, StructDef};
+use crate::parser::{Atom, ImportDecl, EnumDef, StructDef, TraitDef, ImplDef};
 
 #[derive(Copy, Clone)]
 pub enum TargetLanguage {
@@ -34,6 +34,24 @@ pub fn transpile_struct(struct_def: &StructDef, lang: TargetLanguage) -> String 
         TargetLanguage::Rust => rust::transpile_struct_rust(struct_def),
         TargetLanguage::Go => golang::transpile_struct_go(struct_def),
         TargetLanguage::TypeScript => typescript::transpile_struct_ts(struct_def),
+    }
+}
+
+/// Trait 定義を各言語のインターフェース定義に変換する
+pub fn transpile_trait(trait_def: &TraitDef, lang: TargetLanguage) -> String {
+    match lang {
+        TargetLanguage::Rust => rust::transpile_trait_rust(trait_def),
+        TargetLanguage::Go => golang::transpile_trait_go(trait_def),
+        TargetLanguage::TypeScript => typescript::transpile_trait_ts(trait_def),
+    }
+}
+
+/// Impl 定義を各言語のトレイト実装に変換する
+pub fn transpile_impl(impl_def: &ImplDef, lang: TargetLanguage) -> String {
+    match lang {
+        TargetLanguage::Rust => rust::transpile_impl_rust(impl_def),
+        TargetLanguage::Go => golang::transpile_impl_go(impl_def),
+        TargetLanguage::TypeScript => typescript::transpile_impl_ts(impl_def),
     }
 }
 

@@ -5,20 +5,68 @@ mod codegen;
 mod transpiler;
 mod resolver;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::fs;
 use std::path::Path;
 use crate::transpiler::{TargetLanguage, transpile, transpile_enum, transpile_struct, transpile_trait, transpile_impl, transpile_module_header};
 use crate::parser::{Item, ImportDecl};
 
+// =============================================================================
+// CLI: mumei build / verify / check / init
+// =============================================================================
+//
+// Usage:
+//   mumei build input.mm -o dist/katana   # verify + codegen + transpile (default)
+//   mumei verify input.mm                 # Z3 verification only
+//   mumei check input.mm                  # parse + resolve + monomorphize (no Z3)
+//   mumei init my_project                 # generate project template
+//   mumei input.mm -o dist/katana         # backward compat → same as build
+
 #[derive(Parser)]
-#[command(name = "Mumei Compiler", version = "0.1.0")]
+#[command(
+    name = "mumei",
+    version = env!("CARGO_PKG_VERSION"),
+    about = "🗡️ Mumei — Mathematical Proof-Driven Programming Language",
+    long_about = "Formally verified language: parse → resolve → monomorphize → verify (Z3) → codegen (LLVM IR) → transpile (Rust/Go/TypeScript)"
+)]
 struct Cli {
-    /// Input .mm file (e.g., example.mm)
-    input: String,
+    #[command(subcommand)]
+    command: Option<Command>,
+
+    /// Input .mm file (backward compat: `mumei input.mm` = `mumei build input.mm`)
+    #[arg(global = false)]
+    input: Option<String>,
+
     /// Output base name (for .ll, .rs, .go, .ts)
     #[arg(short, long, default_value = "katana")]
     output: String,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Verify + compile to LLVM IR + transpile to Rust/Go/TypeScript (default)
+    Build {
+        /// Input .mm file
+        input: String,
+        /// Output base name
+        #[arg(short, long, default_value = "katana")]
+        output: String,
+    },
+    /// Z3 formal verification only (no codegen, no transpile)
+    Verify {
+        /// Input .mm file
+        input: String,
+    },
+    /// Parse + resolve + monomorphize only (no Z3, fast syntax check)
+    Check {
+        /// Input .mm file
+        input: String,
+    },
+    /// Generate a new Mumei project template
+    Init {
+        /// Project directory name
+        name: String,
+    },
 }
 
 fn main() {

@@ -10,6 +10,11 @@ use crate::verification::resolve_base_type;
 use std::collections::HashMap;
 use std::path::Path;
 
+/// LLVM Builder の Result を簡潔にアンラップするマクロ
+macro_rules! llvm {
+    ($e:expr) => { $e.map_err(|e| e.to_string())? }
+}
+
 /// Fat Pointer 配列の構造体型 { i64, i64* } を生成するヘルパー
 fn array_struct_type<'a>(context: &'a Context) -> inkwell::types::StructType<'a> {
     let i64_type = context.i64_type();
@@ -58,10 +63,8 @@ pub fn compile(atom: &Atom, output_path: &Path) -> Result<(), String> {
         // Fat Pointer 配列パラメータの場合、len と data_ptr を分解して保持
         if val.is_struct_value() {
             let struct_val = val.into_struct_value();
-            let len_val = builder.build_extract_value(struct_val, 0, &format!("{}_len", param.name))
-                .map_err(|e| e.to_string())?;
-            let data_ptr = builder.build_extract_value(struct_val, 1, &format!("{}_data", param.name))
-                .map_err(|e| e.to_string())?;
+            let len_val = llvm!(builder.build_extract_value(struct_val, 0, &format!("{}_len", param.name)));
+            let data_ptr = llvm!(builder.build_extract_value(struct_val, 1, &format!("{}_data", param.name)));
             array_ptrs.insert(param.name.clone(), (len_val, data_ptr));
             variables.insert(param.name.clone(), len_val); // デフォルトでは len を返す
         } else {
@@ -72,7 +75,7 @@ pub fn compile(atom: &Atom, output_path: &Path) -> Result<(), String> {
     let body_ast = parse_expression(&atom.body_expr);
     let result_val = compile_expr(&context, &builder, &module, &function, &body_ast, &mut variables, &array_ptrs)?;
 
-    builder.build_return(Some(&result_val)).map_err(|e| e.to_string())?;
+    llvm!(builder.build_return(Some(&result_val)));
 
     let path_with_ext = output_path.with_extension("ll");
     module.print_to_file(&path_with_ext).map_err(|e| e.to_string())?;
@@ -107,7 +110,7 @@ fn compile_expr<'a>(
                         let fn_type = type_f64.fn_type(&[type_f64.into()], false);
                         module.add_function("llvm.sqrt.f64", fn_type, None)
                     });
-                    let call = builder.build_call(sqrt_func, &[arg.into()], "sqrt_tmp").map_err(|e| e.to_string())?;
+                    let call = llvm!(builder.build_call(sqrt_func, &[arg.into()], "sqrt_tmp"));
                     let result = call.as_any_value_enum();
                     Ok(result.into_float_value().into())
                 },
@@ -135,36 +138,34 @@ fn compile_expr<'a>(
                 let data_ptr = data_ptr_val.into_pointer_value();
                 // ランタイム境界チェック: idx < len を検証し、違反時は 0 を返す（安全なフォールバック）
                 let len_int = len_val.into_int_value();
-                let in_bounds = builder.build_int_compare(IntPredicate::SLT, idx, len_int, "bounds_check")
-                    .map_err(|e| e.to_string())?;
-                let non_neg = builder.build_int_compare(IntPredicate::SGE, idx, context.i64_type().const_int(0, false), "non_neg_check")
-                    .map_err(|e| e.to_string())?;
-                let safe = builder.build_and(in_bounds, non_neg, "safe_access").map_err(|e| e.to_string())?;
+                let in_bounds = llvm!(builder.build_int_compare(IntPredicate::SLT, idx, len_int, "bounds_check"));
+                let non_neg = llvm!(builder.build_int_compare(IntPredicate::SGE, idx, context.i64_type().const_int(0, false), "non_neg_check"));
+                let safe = llvm!(builder.build_and(in_bounds, non_neg, "safe_access"));
 
                 let safe_block = context.append_basic_block(*function, "arr.safe");
                 let oob_block = context.append_basic_block(*function, "arr.oob");
                 let merge_block = context.append_basic_block(*function, "arr.merge");
 
-                builder.build_conditional_branch(safe, safe_block, oob_block).map_err(|e| e.to_string())?;
+                llvm!(builder.build_conditional_branch(safe, safe_block, oob_block));
 
                 // Safe path: GEP + load
                 builder.position_at_end(safe_block);
                 let elem_ptr = unsafe {
-                    builder.build_gep(context.i64_type(), data_ptr, &[idx], "elem_ptr").map_err(|e| e.to_string())?
+                    llvm!(builder.build_gep(context.i64_type(), data_ptr, &[idx], "elem_ptr"))
                 };
-                let loaded = builder.build_load(context.i64_type(), elem_ptr, "elem_val").map_err(|e| e.to_string())?;
+                let loaded = llvm!(builder.build_load(context.i64_type(), elem_ptr, "elem_val"));
                 let safe_end = builder.get_insert_block().unwrap();
-                builder.build_unconditional_branch(merge_block).map_err(|e| e.to_string())?;
+                llvm!(builder.build_unconditional_branch(merge_block));
 
                 // OOB path: return 0 (safe default)
                 builder.position_at_end(oob_block);
                 let zero_val = context.i64_type().const_int(0, false);
                 let oob_end = builder.get_insert_block().unwrap();
-                builder.build_unconditional_branch(merge_block).map_err(|e| e.to_string())?;
+                llvm!(builder.build_unconditional_branch(merge_block));
 
                 // Merge
                 builder.position_at_end(merge_block);
-                let phi = builder.build_phi(context.i64_type(), "arr_result").map_err(|e| e.to_string())?;
+                let phi = llvm!(builder.build_phi(context.i64_type(), "arr_result"));
                 phi.add_incoming(&[(&loaded, safe_end), (&zero_val, oob_end)]);
                 Ok(phi.as_basic_value())
             } else {
@@ -181,21 +182,21 @@ fn compile_expr<'a>(
                 let l = if lhs.is_float_value() {
                     lhs.into_float_value()
                 } else {
-                    builder.build_signed_int_to_float(lhs.into_int_value(), context.f64_type(), "int_to_float_l").map_err(|e| e.to_string())?
+                    llvm!(builder.build_signed_int_to_float(lhs.into_int_value(), context.f64_type(), "int_to_float_l"))
                 };
                 let r = if rhs.is_float_value() {
                     rhs.into_float_value()
                 } else {
-                    builder.build_signed_int_to_float(rhs.into_int_value(), context.f64_type(), "int_to_float_r").map_err(|e| e.to_string())?
+                    llvm!(builder.build_signed_int_to_float(rhs.into_int_value(), context.f64_type(), "int_to_float_r"))
                 };
                 match op {
-                    Op::Add => Ok(builder.build_float_add(l, r, "fadd_tmp").map_err(|e| e.to_string())?.into()),
-                    Op::Sub => Ok(builder.build_float_sub(l, r, "fsub_tmp").map_err(|e| e.to_string())?.into()),
-                    Op::Mul => Ok(builder.build_float_mul(l, r, "fmul_tmp").map_err(|e| e.to_string())?.into()),
-                    Op::Div => Ok(builder.build_float_div(l, r, "fdiv_tmp").map_err(|e| e.to_string())?.into()),
+                    Op::Add => Ok(llvm!(builder.build_float_add(l, r, "fadd_tmp")).into()),
+                    Op::Sub => Ok(llvm!(builder.build_float_sub(l, r, "fsub_tmp")).into()),
+                    Op::Mul => Ok(llvm!(builder.build_float_mul(l, r, "fmul_tmp")).into()),
+                    Op::Div => Ok(llvm!(builder.build_float_div(l, r, "fdiv_tmp")).into()),
                     Op::Eq  => {
-                        let cmp = builder.build_float_compare(FloatPredicate::OEQ, l, r, "fcmp_tmp").map_err(|e| e.to_string())?;
-                        Ok(builder.build_int_z_extend(cmp, context.i64_type(), "fbool_tmp").map_err(|e| e.to_string())?.into())
+                        let cmp = llvm!(builder.build_float_compare(FloatPredicate::OEQ, l, r, "fcmp_tmp"));
+                        Ok(llvm!(builder.build_int_z_extend(cmp, context.i64_type(), "fbool_tmp")).into())
                     },
                     _ => Err(format!("LLVM Codegen: Unsupported float operator {:?}", op)),
                 }
@@ -203,21 +204,19 @@ fn compile_expr<'a>(
                 let l = lhs.into_int_value();
                 let r = rhs.into_int_value();
                 match op {
-                    Op::Add => Ok(builder.build_int_add(l, r, "add_tmp").map_err(|e| e.to_string())?.into()),
-                    Op::Sub => Ok(builder.build_int_sub(l, r, "sub_tmp").map_err(|e| e.to_string())?.into()),
-                    Op::Mul => Ok(builder.build_int_mul(l, r, "mul_tmp").map_err(|e| e.to_string())?.into()),
-                    Op::Div => Ok(builder.build_int_signed_div(l, r, "div_tmp").map_err(|e| e.to_string())?.into()),
-                    Op::Eq  => {
-                        let cmp = builder.build_int_compare(IntPredicate::EQ, l, r, "eq_tmp").map_err(|e| e.to_string())?;
-                        Ok(builder.build_int_z_extend(cmp, context.i64_type(), "bool_tmp").map_err(|e| e.to_string())?.into())
-                    },
-                    Op::Lt  => {
-                        let cmp = builder.build_int_compare(IntPredicate::SLT, l, r, "lt_tmp").map_err(|e| e.to_string())?;
-                        Ok(builder.build_int_z_extend(cmp, context.i64_type(), "bool_tmp").map_err(|e| e.to_string())?.into())
-                    },
-                    Op::Gt  => {
-                        let cmp = builder.build_int_compare(IntPredicate::SGT, l, r, "gt_tmp").map_err(|e| e.to_string())?;
-                        Ok(builder.build_int_z_extend(cmp, context.i64_type(), "bool_tmp").map_err(|e| e.to_string())?.into())
+                    Op::Add => Ok(llvm!(builder.build_int_add(l, r, "add_tmp")).into()),
+                    Op::Sub => Ok(llvm!(builder.build_int_sub(l, r, "sub_tmp")).into()),
+                    Op::Mul => Ok(llvm!(builder.build_int_mul(l, r, "mul_tmp")).into()),
+                    Op::Div => Ok(llvm!(builder.build_int_signed_div(l, r, "div_tmp")).into()),
+                    Op::Eq | Op::Neq | Op::Lt | Op::Gt | Op::Ge | Op::Le => {
+                        let pred = match op {
+                            Op::Eq => IntPredicate::EQ, Op::Neq => IntPredicate::NE,
+                            Op::Lt => IntPredicate::SLT, Op::Gt => IntPredicate::SGT,
+                            Op::Ge => IntPredicate::SGE, Op::Le => IntPredicate::SLE,
+                            _ => unreachable!(),
+                        };
+                        let cmp = llvm!(builder.build_int_compare(pred, l, r, "cmp_tmp"));
+                        Ok(llvm!(builder.build_int_z_extend(cmp, context.i64_type(), "bool_tmp")).into())
                     },
                     _ => Err(format!("LLVM Codegen: Unsupported int operator {:?}", op)),
                 }
@@ -226,26 +225,26 @@ fn compile_expr<'a>(
 
         Expr::IfThenElse { cond, then_branch, else_branch } => {
             let cond_val = compile_expr(context, builder, module, function, cond, variables, array_ptrs)?.into_int_value();
-            let cond_bool = builder.build_int_compare(IntPredicate::NE, cond_val, context.i64_type().const_int(0, false), "if_cond").map_err(|e| e.to_string())?;
+            let cond_bool = llvm!(builder.build_int_compare(IntPredicate::NE, cond_val, context.i64_type().const_int(0, false), "if_cond"));
 
             let then_block = context.append_basic_block(*function, "then");
             let else_block = context.append_basic_block(*function, "else");
             let merge_block = context.append_basic_block(*function, "merge");
 
-            builder.build_conditional_branch(cond_bool, then_block, else_block).map_err(|e| e.to_string())?;
+            llvm!(builder.build_conditional_branch(cond_bool, then_block, else_block));
 
             builder.position_at_end(then_block);
             let then_val = compile_expr(context, builder, module, function, then_branch, variables, array_ptrs)?;
             let then_end_block = builder.get_insert_block().unwrap();
-            builder.build_unconditional_branch(merge_block).map_err(|e| e.to_string())?;
+            llvm!(builder.build_unconditional_branch(merge_block));
 
             builder.position_at_end(else_block);
             let else_val = compile_expr(context, builder, module, function, else_branch, variables, array_ptrs)?;
             let else_end_block = builder.get_insert_block().unwrap();
-            builder.build_unconditional_branch(merge_block).map_err(|e| e.to_string())?;
+            llvm!(builder.build_unconditional_branch(merge_block));
 
             builder.position_at_end(merge_block);
-            let phi = builder.build_phi(then_val.get_type(), "if_result").map_err(|e| e.to_string())?;
+            let phi = llvm!(builder.build_phi(then_val.get_type(), "if_result"));
             phi.add_incoming(&[(&then_val, then_end_block), (&else_val, else_end_block)]);
             Ok(phi.as_basic_value())
         },
@@ -258,20 +257,20 @@ fn compile_expr<'a>(
             let pre_loop_vars = variables.clone();
             let entry_end_block = builder.get_insert_block().unwrap();
 
-            builder.build_unconditional_branch(header_block).map_err(|e| e.to_string())?;
+            llvm!(builder.build_unconditional_branch(header_block));
 
             builder.position_at_end(header_block);
             let mut phi_nodes: Vec<(String, PhiValue<'a>)> = Vec::new();
             for (name, pre_val) in &pre_loop_vars {
-                let phi = builder.build_phi(pre_val.get_type(), &format!("phi_{}", name)).map_err(|e| e.to_string())?;
+                let phi = llvm!(builder.build_phi(pre_val.get_type(), &format!("phi_{}", name)));
                 phi.add_incoming(&[(pre_val, entry_end_block)]);
                 phi_nodes.push((name.clone(), phi));
                 variables.insert(name.clone(), phi.as_basic_value());
             }
 
             let cond_val = compile_expr(context, builder, module, function, cond, variables, array_ptrs)?.into_int_value();
-            let cond_bool = builder.build_int_compare(IntPredicate::NE, cond_val, context.i64_type().const_int(0, false), "loop_cond").map_err(|e| e.to_string())?;
-            builder.build_conditional_branch(cond_bool, body_block, after_block).map_err(|e| e.to_string())?;
+            let cond_bool = llvm!(builder.build_int_compare(IntPredicate::NE, cond_val, context.i64_type().const_int(0, false), "loop_cond"));
+            llvm!(builder.build_conditional_branch(cond_bool, body_block, after_block));
 
             builder.position_at_end(body_block);
             compile_expr(context, builder, module, function, body, variables, array_ptrs)?;
@@ -283,7 +282,7 @@ fn compile_expr<'a>(
                 }
             }
 
-            builder.build_unconditional_branch(header_block).map_err(|e| e.to_string())?;
+            llvm!(builder.build_unconditional_branch(header_block));
 
             builder.position_at_end(after_block);
             for (name, phi) in &phi_nodes {

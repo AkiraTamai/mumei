@@ -125,6 +125,12 @@ pub enum Item {
 
 pub fn parse_module(source: &str) -> Vec<Item> {
     let mut items = Vec::new();
+
+    // コメント除去: // から行末までを削除（文字列リテラル内は考慮しない簡易実装）
+    let comment_re = Regex::new(r"//[^\n]*").unwrap();
+    let source = comment_re.replace_all(source, "").to_string();
+    let source = source.as_str();
+
     // import 定義: import "path" as alias; または import "path";
     let import_re = Regex::new(r#"(?m)^import\s+"([^"]+)"(?:\s+as\s+(\w+))?\s*;"#).unwrap();
     // type 定義: i64 | u64 | f64 を許容するように変更

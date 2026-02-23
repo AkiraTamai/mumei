@@ -2,6 +2,14 @@
 // Mumei Verification Suite: Comprehensive Feature Demonstration
 // Includes: Refinement Types, Structs, Generics, Traits, Laws
 // ============================================================
+//
+// Standard Library imports:
+//   import "std/option" as option;
+//   import "std/stack" as stack;
+//
+// The definitions below (Option<T>, Pair<T, U>, etc.) are also
+// available via std imports. Inline definitions are used here
+// for self-contained testing.
 
 // --- Refinement Types ---
 type Nat = i64 where v >= 0;
@@ -19,7 +27,7 @@ struct Pair<T, U> {
     second: U
 }
 
-// --- Generics: Option<T> ---
+// --- Generics: Option<T> (also available via: import "std/option") ---
 enum Option<T> {
     Some(T),
     None

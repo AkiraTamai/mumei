@@ -650,7 +650,7 @@ All generated code includes:
 - [x] Circular import detection
 - [x] Inter-atom function calls with contract-based verification (compositional verification)
 - [x] LLVM IR `declare` + `call` for user-defined atom calls
-- [x] `ModuleEnv` structure for future per-module environment isolation
+- [x] `ModuleEnv` architecture: zero global state, all definitions via struct (no Mutex)
 - [x] Verification cache (`.mumei_cache`) with SHA-256 hash-based invalidation
 - [x] Imported atom body re-verification skip (contract-trusted)
 - [x] Transpiler module headers (`mod`/`use` for Rust, `package`/`import` for Go, `import` for TypeScript)
@@ -670,6 +670,17 @@ All generated code includes:
 - [x] Transpiler: Enum definitions → Rust enum / Go const+type / TypeScript const enum + discriminated union
 - [x] Transpiler: Struct definitions → Rust struct / Go struct / TypeScript interface
 - [x] Verified standard library: `std/option.mm`, `std/result.mm`, `std/list.mm`
+- [x] **Generics (Polymorphism)**: `struct Pair<T, U>`, `enum Option<T>`, `atom identity<T>(x: T)` with monomorphization
+- [x] **TypeRef**: Nested generic type references (`Map<String, List<i64>>`) with `substitute()` for type variable replacement
+- [x] **Monomorphizer**: Collects generic instances from usage sites, expands to concrete definitions
+- [x] **Trait system with Laws**: `trait Comparable { fn leq(...); law reflexive: ...; }` — algebraic laws as Z3 axioms
+- [x] **Trait bounds**: `atom min<T: Comparable>(a: T, b: T)` — type constraints with `+` for multiple bounds
+- [x] **impl verification**: Z3 verifies that `impl` satisfies all trait laws (method completeness + law satisfaction)
+- [x] **Built-in traits**: `Eq` (reflexive, symmetric), `Ord` (reflexive, transitive), `Numeric` (commutative_add) — auto-implemented for i64/u64/f64
+- [x] **Transpiler: Trait/Impl**: Rust `trait`/`impl` / Go `interface`/methods / TypeScript `interface`/const objects
+- [x] **codegen ModuleEnv**: LLVM IR codegen uses `ModuleEnv` for all type/atom/struct/enum resolution
+- [ ] `std/prelude.mm`: Generic standard types (`Option<T>`, `Result<T, E>`, `List<T>`, `Pair<T, U>`)
+- [ ] `Vector<T>` / `HashMap<K, V>` standard library with verified invariants
 - [ ] Equality ensures propagation (`ensures: result == n + 1` for chained call verification)
 - [ ] Fully qualified name (FQN) dot-notation in source code (`math.add(x, y)`)
 - [ ] Incremental build (re-verify only changed modules)

@@ -50,33 +50,92 @@ if [ ! -f "sword_test.mm" ]; then
     exit 1
 fi
 
-# --- 5. コンパイル実行 ---
+# --- 5. メイン検証スイート実行 ---
 echo "🚀 Running Mumei Verification Suite..."
-echo "   Features: Refinement Types, Structs, Generics, Traits, Laws, Loop Invariants, Termination"
+echo "   sword_test.mm: Refinement Types, Structs, Generics, Traits, Laws, Termination"
 echo ""
 mkdir -p dist
 rm -f dist/katana* # 古い成果物を削除
 
 if ! ./target/release/mumei sword_test.mm --output dist/katana; then
-    echo "❌ Error: Mumei execution failed."
+    echo "❌ Error: Mumei verification failed on sword_test.mm"
     exit 1
 fi
 
 echo ""
-echo "=== Verification Results ==="
+echo "=== Main Suite Results ==="
 echo "📍 LLVM IR  : $(ls dist/katana_*.ll 2>/dev/null | tr '\n' ' ')"
 echo "📍 Rust     : dist/katana.rs"
 echo "📍 Go       : dist/katana.go"
 echo "📍 TS       : dist/katana.ts"
 echo ""
 
-# --- 6. 生成された Rust コードの構文チェック (オプション) ---
+# --- 6. Example テスト ---
+echo "🧪 Running example tests..."
+EXAMPLES_PASSED=0
+EXAMPLES_FAILED=0
+
+# 6a. Inter-atom call test
+echo -n "  call_test.mm ... "
+if ./target/release/mumei examples/call_test.mm --output dist/call_test 2>/dev/null; then
+    echo "✅"
+    EXAMPLES_PASSED=$((EXAMPLES_PASSED + 1))
+else
+    echo "❌"
+    EXAMPLES_FAILED=$((EXAMPLES_FAILED + 1))
+fi
+
+# 6b. ATM state machine (enum + match + guards)
+echo -n "  match_atm.mm ... "
+if ./target/release/mumei examples/match_atm.mm --output dist/match_atm 2>/dev/null; then
+    echo "✅"
+    EXAMPLES_PASSED=$((EXAMPLES_PASSED + 1))
+else
+    echo "❌"
+    EXAMPLES_FAILED=$((EXAMPLES_FAILED + 1))
+fi
+
+# 6c. Expression evaluator (zero-division detection)
+echo -n "  match_evaluator.mm ... "
+if ./target/release/mumei examples/match_evaluator.mm --output dist/match_evaluator 2>/dev/null; then
+    echo "✅"
+    EXAMPLES_PASSED=$((EXAMPLES_PASSED + 1))
+else
+    echo "❌"
+    EXAMPLES_FAILED=$((EXAMPLES_FAILED + 1))
+fi
+
+# 6d. Multi-file import test
+echo -n "  import_test/main.mm ... "
+if ./target/release/mumei examples/import_test/main.mm --output dist/import_test 2>/dev/null; then
+    echo "✅"
+    EXAMPLES_PASSED=$((EXAMPLES_PASSED + 1))
+else
+    echo "❌"
+    EXAMPLES_FAILED=$((EXAMPLES_FAILED + 1))
+fi
+
+# 6e. Std library import test
+echo -n "  test_std_import.mm ... "
+if ./target/release/mumei tests/test_std_import.mm --output dist/test_std 2>/dev/null; then
+    echo "✅"
+    EXAMPLES_PASSED=$((EXAMPLES_PASSED + 1))
+else
+    echo "❌"
+    EXAMPLES_FAILED=$((EXAMPLES_FAILED + 1))
+fi
+
+echo ""
+echo "  Examples: $EXAMPLES_PASSED passed, $EXAMPLES_FAILED failed"
+
+# --- 7. 生成された Rust コードの構文チェック (オプション) ---
 if command -v rustc >/dev/null 2>&1; then
+    echo ""
     echo "🦀 Checking generated Rust syntax..."
     if rustc --crate-type lib dist/katana.rs --out-dir dist/ 2>/dev/null; then
-        echo "✅ Rust syntax is valid."
+        echo "  ✅ Rust syntax is valid."
     else
-        echo "⚠️  Rust syntax check failed (non-critical for struct types)."
+        echo "  ⚠️  Rust syntax check failed (non-critical)."
     fi
 fi
 
@@ -91,9 +150,14 @@ echo "  ✅ Atom 'robust_push'  : Bounded stack push (0 <= top' <= max)"
 echo "  ✅ Atom 'stack_clear'  : Loop termination (decreases: i) + invariant"
 echo "  ✅ Atom 'dist_squared' : Non-negative distance (dx²+dy² >= 0)"
 echo "  ✅ Struct 'Point'      : Field constraints (x >= 0.0, y >= 0.0)"
-echo "  ✅ Generic 'Pair<T,U>' : Polymorphic struct (monomorphized at compile time)"
-echo "  ✅ Generic 'Option<T>' : Polymorphic enum (monomorphized at compile time)"
-echo "  ✅ Trait 'Comparable'  : Law 'reflexive' verified by Z3 for i64 impl"
-echo "  ✅ Built-in: Eq, Ord, Numeric auto-implemented for i64/u64/f64"
+echo "  ✅ Generic 'Pair<T,U>' : Polymorphic struct (monomorphization)"
+echo "  ✅ Generic 'Option<T>' : Polymorphic enum (monomorphization)"
+echo "  ✅ Trait 'Comparable'  : Law 'reflexive' verified by Z3"
+echo "  ✅ Std Library         : std/option, std/stack, std/result, std/list"
+echo "  ✅ Built-in Traits     : Eq, Ord, Numeric for i64/u64/f64"
 echo ""
-echo "🎉 All atoms verified. Generics + Traits + Laws operational. The blade is forged."
+if [ "$EXAMPLES_FAILED" -gt 0 ]; then
+    echo "⚠️  $EXAMPLES_FAILED example(s) failed. Check output above."
+    exit 1
+fi
+echo "🎉 All verified. The blade is forged."

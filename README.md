@@ -28,7 +28,7 @@ Only atoms that pass formal verification are compiled to LLVM IR and transpiled 
 | **Trait System with Laws** | `trait Comparable { fn leq(...); law reflexive: ...; }` — algebraic laws verified by Z3 |
 | **Built-in Traits** | `Eq`, `Ord`, `Numeric` — auto-implemented for `i64`, `u64`, `f64` |
 | **Multi-target Transpiler** | Enum/Struct/Atom/Trait/Impl → Rust + Go + TypeScript |
-| **Standard Library** | `std/option.mm`, `std/result.mm`, `std/list.mm` — verified core types |
+| **Standard Library** | `std/option.mm`, `std/stack.mm`, `std/result.mm`, `std/list.mm` — verified generic core types |
 | **Module System** | `import "path" as alias;` — multi-file builds with compositional verification |
 | **Inter-atom Calls** | Contract-based verification: caller proves `requires`, assumes `ensures` |
 | **Counter-example Display** | Z3 `get_model()` shows exactly which value is uncovered on exhaustiveness failure |
@@ -58,12 +58,6 @@ Structs support per-field `where` clauses. Constraints are verified at construct
 struct Point {
     x: f64 where v >= 0.0,
     y: f64 where v >= 0.0
-}
-
-struct Circle {
-    cx: f64 where v >= 0.0,
-    cy: f64 where v >= 0.0,
-    r: f64 where v > 0.0
 }
 ```
 
@@ -196,13 +190,15 @@ Mumei supports multi-file projects with `import` declarations and compositional 
 ### Import Syntax
 
 ```mumei
+import "std/option" as option;
+import "std/stack" as stack;
 import "./lib/math.mm" as math;
-import "./types.mm";
 ```
 
+- **Standard library**: `import "std/option"` resolves to `std/option.mm` via automatic path search (project root → compiler directory → `MUMEI_STD_PATH` env var).
 - **Alias (`as`)**: When specified, imported symbols can be referenced via `math::add(x, y)`. Without alias, symbols are imported directly.
 - **Circular import detection**: The resolver detects and rejects circular dependencies.
-- **`.mm` auto-completion**: File extension can be omitted (`import "./lib/math"` resolves to `./lib/math.mm`).
+- **`.mm` auto-completion**: File extension can be omitted (`import "std/option"` resolves to `std/option.mm`).
 
 ### Inter-atom Function Calls (Compositional Verification)
 
@@ -265,18 +261,30 @@ body: {
 Mumei ships with a verified standard library that can be imported into any `.mm` file:
 
 ```mumei
-import "./std/option.mm" as opt;
-import "./std/result.mm" as res;
-import "./std/list.mm" as list;
+import "std/option" as option;
+import "std/stack" as stack;
+import "std/result" as result;
+import "std/list" as list;
 ```
 
 | Module | Types | Atoms |
 |---|---|---|
-| `std/option.mm` | `Option { None, Some(i64) }` | `is_some`, `is_none`, `unwrap_or` |
-| `std/result.mm` | `Result { Ok(i64), Err(i64) }` | `is_ok`, `is_err`, `unwrap_or_default`, `safe_divide` |
+| `std/option.mm` | `Option<T> { None, Some(T) }` | `is_some`, `is_none`, `unwrap_or` |
+| `std/stack.mm` | `Stack<T> { top, max }` | `stack_push`, `stack_pop`, `stack_is_empty`, `stack_is_full`, `stack_clear` |
+| `std/result.mm` | `Result<T, E> { Ok(T), Err(E) }` | `is_ok`, `is_err`, `unwrap_or_default`, `safe_divide` |
 | `std/list.mm` | `List { Nil, Cons(i64, Self) }` | `is_empty`, `head_or`, `is_sorted_pair`, `insert_sorted` |
 
 All atoms in `std/` are formally verified — their `requires`/`ensures` contracts are proven by Z3 at compile time. When imported, only the contracts are trusted (body is not re-verified).
+
+### Std Path Resolution
+
+The resolver searches for `std/` imports in the following order:
+
+1. **Project root** — `base_dir/std/option.mm`
+2. **Compiler binary directory** — alongside the `mumei` executable
+3. **Current working directory** — `cwd/std/option.mm`
+4. **`CARGO_MANIFEST_DIR`** — for development builds
+5. **`MUMEI_STD_PATH` env var** — custom installation path
 
 ---
 
@@ -323,6 +331,9 @@ brew install llvm@18 z3
 
 # Pattern matching: Safe expression evaluator (zero-division detection)
 ./target/release/mumei examples/match_evaluator.mm --output dist/match_evaluator
+
+# Standard library import test
+./target/release/mumei tests/test_std_import.mm --output dist/test_std
 ```
 
 ### Expected Output
@@ -332,7 +343,9 @@ brew install llvm@18 z3
   ✨ Registered Refined Type: 'Nat' (i64)
   ✨ Registered Refined Type: 'Pos' (f64)
   🏗️  Registered Struct: 'Point' (fields: x, y)
-  📜 Registered Trait: 'Comparable' (methods: leq, laws: reflexive, transitive)
+  🏗️  Registered Struct: 'Pair' (fields: first, second)
+  🔷 Registered Enum: 'Option' (variants: Some, None)
+  📜 Registered Trait: 'Comparable' (methods: leq, laws: reflexive)
   🔧 Registered Impl: Comparable for i64
     ✅ Laws verified for impl Comparable for i64
   ✨ [1/4] Polishing Syntax: Atom 'sword_sum' identified.
@@ -346,73 +359,32 @@ brew install llvm@18 z3
 
 ## 📄 Verification Suite (`sword_test.mm`)
 
-The test suite exercises **8 atoms** and **2 structs**, covering every verification feature:
+The test suite exercises **8 atoms**, **2 structs**, **1 generic struct**, **1 generic enum**, **1 trait + impl**, covering every verification feature:
 
 ```mumei
 type Nat = i64 where v >= 0;
 type Pos = f64 where v > 0.0;
 
-struct Circle {
-    cx: f64 where v >= 0.0,
-    cy: f64 where v >= 0.0,
-    r: f64 where v > 0.0
+struct Point { x: f64 where v >= 0.0, y: f64 where v >= 0.0 }
+struct Pair<T, U> { first: T, second: U }
+enum Option<T> { Some(T), None }
+
+trait Comparable {
+    fn leq(a: Self, b: Self) -> bool;
+    law reflexive: leq(x, x) == true;
+}
+impl Comparable for i64 {
+    fn leq(a: i64, b: i64) -> bool { a <= b }
 }
 
-// Loop invariant + termination proof
-atom sword_sum(n: Nat)
-requires:
-    n >= 0;
-ensures:
-    result >= 0;
-body: {
-    let s = 0;
-    let i = 0;
-    while i < n
-    invariant: s >= 0 && i <= n
-    decreases: n - i
-    {
-        s = s + i;
-        i = i + 1;
-    };
-    s
-};
-
-// Stack overflow prevention
-atom stack_push(top: Nat, max: Nat)
-requires:
-    top >= 0 && max >= 0 && top < max;
-ensures:
-    result >= 0 && result <= max;
-body: {
-    top + 1
-};
-
-// Robust Stack: clear loop with termination proof
-atom stack_clear(top: Nat)
-requires:
-    top >= 0;
-ensures:
-    result >= 0;
-body: {
-    let i = top;
-    while i > 0
-    invariant: i >= 0
-    decreases: i
-    {
-        i = i - 1;
-    };
-    i
-};
-
-// Geometric invariant: positive radius => positive area
-atom circle_area(r: Pos)
-requires:
-    r > 0.0;
-ensures:
-    result > 0.0;
-body: {
-    r * r * 3.14159
-};
+atom sword_sum(n: Nat) ...   // Loop invariant + termination
+atom scale(x: Pos) ...       // Float refinement
+atom stack_push(...) ...      // Overflow prevention
+atom stack_pop(...) ...       // Underflow prevention
+atom circle_area(r: Pos) ... // Geometric invariant
+atom robust_push(...) ...     // Bounded stack push
+atom stack_clear(...) ...     // Termination proof
+atom dist_squared(...) ...    // Non-negative guarantee
 ```
 
 ### Verified Properties
@@ -427,6 +399,9 @@ body: {
 | `robust_push` | Bounded stack push (0 ≤ top' ≤ max) |
 | `stack_clear` | Loop **termination** (`decreases: i`) + invariant preservation |
 | `dist_squared` | Non-negative distance (dx² + dy² ≥ 0) |
+| `Pair<T,U>` | Generic struct (monomorphization) |
+| `Option<T>` | Generic enum (monomorphization) |
+| `Comparable` | Trait law `reflexive` verified by Z3 for `impl i64` |
 
 ---
 
@@ -613,8 +588,9 @@ All generated code includes:
 │   │   └── typescript.rs  # TypeScript transpiler (const enum, interface, discriminated union)
 │   └── main.rs            # Compiler orchestrator (parse → resolve → mono → verify → codegen → transpile)
 ├── std/
-│   ├── option.mm          # Option { None, Some(i64) } — verified
-│   ├── result.mm          # Result { Ok(i64), Err(i64) } — verified
+│   ├── option.mm          # Option<T> { None, Some(T) } — generic, verified
+│   ├── stack.mm           # Stack<T> { top, max } + push/pop/clear — generic, verified
+│   ├── result.mm          # Result<T, E> { Ok(T), Err(E) } — generic, verified
 │   └── list.mm            # List { Nil, Cons(i64, Self) } — recursive ADT, verified
 ├── examples/
 │   ├── call_test.mm               # Inter-atom call test (compositional verification)
@@ -624,7 +600,9 @@ All generated code includes:
 │       ├── lib/
 │       │   └── math_utils.mm      # Reusable verified library
 │       └── main.mm                # Multi-file import test
-├── build_and_run.sh               # Build + verification suite runner
+├── tests/
+│   └── test_std_import.mm         # Standard library import integration test
+├── build_and_run.sh               # Build + verification suite runner (with example tests)
 ├── Cargo.toml
 └── README.md
 ```
@@ -669,7 +647,8 @@ All generated code includes:
 - [x] Enhanced counter-example display: Enum variant name + field types on exhaustiveness failure
 - [x] Transpiler: Enum definitions → Rust enum / Go const+type / TypeScript const enum + discriminated union
 - [x] Transpiler: Struct definitions → Rust struct / Go struct / TypeScript interface
-- [x] Verified standard library: `std/option.mm`, `std/result.mm`, `std/list.mm`
+- [x] Verified standard library: `std/option.mm`, `std/stack.mm`, `std/result.mm`, `std/list.mm`
+- [x] **Std path resolution**: `import "std/option"` auto-resolves via project root / compiler dir / `MUMEI_STD_PATH`
 - [x] **Generics (Polymorphism)**: `struct Pair<T, U>`, `enum Option<T>`, `atom identity<T>(x: T)` with monomorphization
 - [x] **TypeRef**: Nested generic type references (`Map<String, List<i64>>`) with `substitute()` for type variable replacement
 - [x] **Monomorphizer**: Collects generic instances from usage sites, expands to concrete definitions

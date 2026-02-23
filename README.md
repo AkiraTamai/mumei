@@ -180,6 +180,16 @@ brew install llvm@18 z3
 ./build_and_run.sh --clean
 ```
 
+### 3) Run Example Tests
+
+```bash
+# Inter-atom call test (compositional verification)
+./target/release/mumei examples/call_test.mm --output dist/call_test
+
+# Multi-file import test
+./target/release/mumei examples/import_test/main.mm --output dist/import_test
+```
+
 ### Expected Output
 
 ```
@@ -379,17 +389,26 @@ With `--output dist/katana`:
 ## 📂 Project Structure
 
 ```
-src/
-├── parser.rs          # AST, tokenizer, parser (import, struct, field access, decreases)
-├── resolver.rs        # Import resolution, dependency graph, circular import detection
-├── verification.rs    # Z3 verification, ModuleEnv, inter-atom call contracts
-├── codegen.rs         # LLVM IR generation (StructType, declare + call, llvm! macro)
-├── transpiler/
-│   ├── mod.rs         # TargetLanguage dispatch + module header generation
-│   ├── rust.rs        # Rust transpiler (mod/use header)
-│   ├── golang.rs      # Go transpiler (package/import header)
-│   └── typescript.rs  # TypeScript transpiler (import/export header)
-└── main.rs            # Compiler orchestrator (parse → resolve → verify → codegen → transpile)
+├── src/
+│   ├── parser.rs          # AST, tokenizer, parser (import, struct, field access, decreases)
+│   ├── resolver.rs        # Import resolution, dependency graph, circular import detection
+│   ├── verification.rs    # Z3 verification, ModuleEnv, inter-atom call contracts
+│   ├── codegen.rs         # LLVM IR generation (StructType, declare + call, llvm! macro)
+│   ├── transpiler/
+│   │   ├── mod.rs         # TargetLanguage dispatch + module header generation
+│   │   ├── rust.rs        # Rust transpiler (mod/use header)
+│   │   ├── golang.rs      # Go transpiler (package/import header)
+│   │   └── typescript.rs  # TypeScript transpiler (import/export header)
+│   └── main.rs            # Compiler orchestrator (parse → resolve → verify → codegen → transpile)
+├── examples/
+│   ├── call_test.mm               # Inter-atom call test (compositional verification)
+│   └── import_test/
+│       ├── lib/
+│       │   └── math_utils.mm      # Reusable verified library
+│       └── main.mm                # Multi-file import test
+├── build_and_run.sh               # Build + verification suite runner
+├── Cargo.toml
+└── README.md
 ```
 
 ---

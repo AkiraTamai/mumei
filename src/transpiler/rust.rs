@@ -56,6 +56,7 @@ fn body_contains_float(expr: &Expr) -> bool {
             body_contains_float(cond) || body_contains_float(then_branch) || body_contains_float(else_branch),
         Expr::While { cond, body, .. } => body_contains_float(cond) || body_contains_float(body),
         Expr::Call(_, args) => args.iter().any(body_contains_float),
+        Expr::Match { target, arms } => body_contains_float(target) || arms.iter().any(|a| body_contains_float(&a.body)),
         _ => false,
     }
 }
@@ -174,6 +175,35 @@ fn format_expr_rust(expr: &Expr) -> String {
 
         Expr::FieldAccess(expr, field) => {
             format!("{}.{}", format_expr_rust(expr), field)
+        },
+
+        Expr::Match { target, arms } => {
+            let target_str = format_expr_rust(target);
+            let arms_str: Vec<String> = arms.iter().map(|arm| {
+                let pat = format_pattern_rust(&arm.pattern);
+                let guard = arm.guard.as_ref()
+                    .map(|g| format!(" if {}", format_expr_rust(g)))
+                    .unwrap_or_default();
+                let body = format_expr_rust(&arm.body);
+                format!("{}{} => {}", pat, guard, body)
+            }).collect();
+            format!("match {} {{ {} }}", target_str, arms_str.join(", "))
+        },
+    }
+}
+
+fn format_pattern_rust(pattern: &crate::parser::Pattern) -> String {
+    match pattern {
+        crate::parser::Pattern::Wildcard => "_".to_string(),
+        crate::parser::Pattern::Literal(n) => n.to_string(),
+        crate::parser::Pattern::Variable(name) => name.clone(),
+        crate::parser::Pattern::Variant { variant_name, fields } => {
+            if fields.is_empty() {
+                variant_name.clone()
+            } else {
+                let field_strs: Vec<String> = fields.iter().map(format_pattern_rust).collect();
+                format!("{}({})", variant_name, field_strs.join(", "))
+            }
         },
     }
 }

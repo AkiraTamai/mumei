@@ -136,7 +136,8 @@ fn resolve_imports_recursive(
                     }
                     Item::TypeDef(t) => type_names.push(t.name.clone()),
                     Item::StructDef(s) => struct_names.push(s.name.clone()),
-                    Item::Import(_) => {}
+                    Item::EnumDef(_) => {},
+                    Item::Import(_) => {},
                 }
             }
 
@@ -182,6 +183,14 @@ fn register_imported_items(items: &[Item], alias: Option<&str>) -> MumeiResult<(
                     let mut fqn_atom = atom.clone();
                     fqn_atom.name = format!("{}::{}", prefix, atom.name);
                     verification::register_atom(&fqn_atom)?;
+                }
+            }
+            Item::EnumDef(enum_def) => {
+                verification::register_enum(enum_def)?;
+                if let Some(prefix) = alias {
+                    let mut fqn_enum = enum_def.clone();
+                    fqn_enum.name = format!("{}::{}", prefix, enum_def.name);
+                    verification::register_enum(&fqn_enum)?;
                 }
             }
             Item::Import(_) => {

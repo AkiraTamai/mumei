@@ -123,5 +123,26 @@ fn format_expr_ts(expr: &Expr) -> String {
         Expr::FieldAccess(expr, field) => {
             format!("{}.{}", format_expr_ts(expr), field)
         },
+
+        Expr::Match { target, arms } => {
+            // TypeScript では switch 文に変換
+            let target_str = format_expr_ts(target);
+            let mut cases = Vec::new();
+            for arm in arms {
+                let body = format_expr_ts(&arm.body);
+                match &arm.pattern {
+                    crate::parser::Pattern::Literal(n) => {
+                        cases.push(format!("case {}: return {};", n, body));
+                    },
+                    crate::parser::Pattern::Variant { variant_name, .. } => {
+                        cases.push(format!("case /* {} */: return {};", variant_name, body));
+                    },
+                    crate::parser::Pattern::Wildcard | crate::parser::Pattern::Variable(_) => {
+                        cases.push(format!("default: return {};", body));
+                    },
+                }
+            }
+            format!("(() => {{ switch ({}) {{ {} }} }})()", target_str, cases.join(" "))
+        },
     }
 }

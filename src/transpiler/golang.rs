@@ -145,5 +145,26 @@ fn format_expr_go(expr: &Expr) -> String {
         Expr::FieldAccess(expr, field) => {
             format!("{}.{}", format_expr_go(expr), field)
         },
+
+        Expr::Match { target, arms } => {
+            // Go には match がないため switch 文に変換
+            let target_str = format_expr_go(target);
+            let mut cases = Vec::new();
+            for arm in arms {
+                let body = format_expr_go(&arm.body);
+                match &arm.pattern {
+                    crate::parser::Pattern::Literal(n) => {
+                        cases.push(format!("case {}:\n        return {}", n, body));
+                    },
+                    crate::parser::Pattern::Variant { variant_name, .. } => {
+                        cases.push(format!("// {}\n        case /* {} */:\n        return {}", variant_name, variant_name, body));
+                    },
+                    crate::parser::Pattern::Wildcard | crate::parser::Pattern::Variable(_) => {
+                        cases.push(format!("default:\n        return {}", body));
+                    },
+                }
+            }
+            format!("switch {} {{\n    {}\n    }}", target_str, cases.join("\n    "))
+        },
     }
 }

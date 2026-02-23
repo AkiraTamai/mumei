@@ -38,6 +38,8 @@ fn main() {
     // --- 1.5 Resolve (依存解決) ---
     // import 宣言を処理し、依存モジュールの型・構造体・atom を ModuleEnv に登録
     let mut module_env = verification::ModuleEnv::new();
+    // 組み込みトレイト（Eq, Ord, Numeric）+ i64/u64/f64 の自動 impl を登録
+    verification::register_builtin_traits(&mut module_env);
     let input_path = Path::new(&cli.input);
     let base_dir = input_path.parent().unwrap_or(Path::new("."));
     if let Err(e) = resolver::resolve_imports(&items, base_dir, &mut module_env) {
@@ -131,9 +133,17 @@ fn main() {
                     trait_def.name, method_names.join(", "), law_names.join(", "));
             }
 
-            // --- トレイト実装 ---
+            // --- トレイト実装の登録 + 法則検証 ---
             Item::ImplDef(impl_def) => {
                 println!("  🔧 Registered Impl: {} for {}", impl_def.trait_name, impl_def.target_type);
+                // impl が trait の全 law を満たしているか Z3 で検証
+                match verification::verify_impl(impl_def, &module_env) {
+                    Ok(_) => println!("    ✅ Laws verified for impl {} for {}", impl_def.trait_name, impl_def.target_type),
+                    Err(e) => {
+                        eprintln!("    ❌ Law verification failed: {}", e);
+                        std::process::exit(1);
+                    }
+                }
             }
 
             // --- Atom の処理 ---

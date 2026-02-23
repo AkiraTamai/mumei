@@ -1,4 +1,4 @@
-use crate::parser::{Expr, Op, Atom, ImportDecl, EnumDef, StructDef, parse_expression};
+use crate::parser::{Expr, Op, Atom, ImportDecl, EnumDef, StructDef, TraitDef, ImplDef, parse_expression};
 
 /// 型名をベース型に解決する（transpiler ローカル版）
 fn resolve_base_type(name: &str) -> String {

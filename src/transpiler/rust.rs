@@ -1,4 +1,4 @@
-use crate::parser::{Expr, Op, Atom, ImportDecl, EnumDef, StructDef, parse_expression};
+use crate::parser::{Expr, Op, Atom, ImportDecl, EnumDef, StructDef, TraitDef, ImplDef, parse_expression};
 
 /// 型名をベース型に解決する（transpiler ローカル版）
 /// 精緻型の解決は ModuleEnv が担当するが、transpiler は単相化後の具体型名を受け取るため、
@@ -72,6 +72,41 @@ pub fn transpile_struct_rust(struct_def: &StructDef) -> String {
             lines.push(format!("    /// where {}", constraint));
         }
         lines.push(format!("    pub {}: {},", field.name, rust_type));
+    }
+    lines.push("}".to_string());
+    lines.join("\n")
+}
+
+/// Trait 定義を Rust の trait に変換する
+pub fn transpile_trait_rust(trait_def: &TraitDef) -> String {
+    let mut lines = Vec::new();
+    // law をドキュメントコメントとして出力
+    for (law_name, law_expr) in &trait_def.laws {
+        lines.push(format!("/// Law {}: {}", law_name, law_expr));
+    }
+    lines.push(format!("pub trait {} {{", trait_def.name));
+    for method in &trait_def.methods {
+        let params: Vec<String> = method.param_types.iter().enumerate()
+            .map(|(i, t)| {
+                let param_name = if i == 0 { "a" } else if i == 1 { "b" } else { "c" };
+                let rust_type = if t == "Self" { "Self" } else { &map_type_rust(Some(t)) };
+                format!("{}: {}", param_name, rust_type)
+            })
+            .collect();
+        let ret = if method.return_type == "bool" { "bool" } else { "Self" };
+        lines.push(format!("    fn {}({}) -> {};", method.name, params.join(", "), ret));
+    }
+    lines.push("}".to_string());
+    lines.join("\n")
+}
+
+/// Impl 定義を Rust の impl に変換する
+pub fn transpile_impl_rust(impl_def: &ImplDef) -> String {
+    let mut lines = Vec::new();
+    let rust_type = map_type_rust(Some(&impl_def.target_type));
+    lines.push(format!("impl {} for {} {{", impl_def.trait_name, rust_type));
+    for (method_name, method_body) in &impl_def.method_bodies {
+        lines.push(format!("    fn {}(a: {0}, b: {0}) -> {0} {{ {} }}", method_name, rust_type, method_body));
     }
     lines.push("}".to_string());
     lines.join("\n")

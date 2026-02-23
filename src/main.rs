@@ -156,13 +156,13 @@ fn main() {
 
                 // --- 4. Transpile (多言語エクスポート) ---
                 // バンドル用に各言語のコードを生成
-                rust_bundle.push_str(&transpile(&atom, TargetLanguage::Rust));
+                rust_bundle.push_str(&transpile(atom, TargetLanguage::Rust));
                 rust_bundle.push_str("\n\n");
 
-                go_bundle.push_str(&transpile(&atom, TargetLanguage::Go));
+                go_bundle.push_str(&transpile(atom, TargetLanguage::Go));
                 go_bundle.push_str("\n\n");
 
-                ts_bundle.push_str(&transpile(&atom, TargetLanguage::TypeScript));
+                ts_bundle.push_str(&transpile(atom, TargetLanguage::TypeScript));
                 ts_bundle.push_str("\n\n");
             }
         }

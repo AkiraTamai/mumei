@@ -76,6 +76,17 @@ pub fn verify(atom: &Atom, output_dir: &Path) -> Result<(), String> {
         }
     }
 
+    // 2b. 全パラメータに対して配列長シンボルを事前生成
+    // パラメータ名が配列として使われる可能性があるため、len_<name> >= 0 を暗黙的に生成
+    for param in &atom.params {
+        let len_name = format!("len_{}", param.name);
+        if !env.contains_key(&len_name) {
+            let len_var = Int::new_const(&ctx, len_name.as_str());
+            solver.assert(&len_var.ge(&Int::from_i64(&ctx, 0)));
+            env.insert(len_name, len_var.into());
+        }
+    }
+
     // 3. 前提条件 (requires)
     if atom.requires.trim() != "true" {
         let req_ast = parse_expression(&atom.requires);
@@ -163,7 +174,20 @@ fn expr_to_z3<'a>(
         },
         Expr::Call(name, args) => {
             match name.as_str() {
-                "len" => Ok(Int::new_const(ctx, "arr_len").into()),
+                "len" => {
+                    // len(arr_name) → 配列名に紐づくシンボリック長を返す
+                    // len_<name> >= 0 の制約を自動付与
+                    let arr_name = if !args.is_empty() {
+                        if let Expr::Variable(name) = &args[0] { name.clone() } else { "arr".to_string() }
+                    } else { "arr".to_string() };
+                    let len_name = format!("len_{}", arr_name);
+                    let len_var = Int::new_const(ctx, len_name.as_str());
+                    if let Some(solver) = solver_opt {
+                        solver.assert(&len_var.ge(&Int::from_i64(ctx, 0)));
+                    }
+                    env.insert(len_name, len_var.clone().into());
+                    Ok(len_var.into())
+                },
                 "sqrt" => {
                     // Z3 0.12 の Float には sqrt メソッドがないため、
                     // シンボリック変数として扱い、sqrt(x) >= 0 の制約を付与
@@ -187,15 +211,23 @@ fn expr_to_z3<'a>(
             let idx = expr_to_z3(ctx, arr, index_expr, env, solver_opt)?
                 .as_int().ok_or("Index must be integer")?;
 
-            // Standard Library: 境界チェックの自動挿入
+            // 配列名に紐づく長さシンボルを使った境界チェック
             if let Some(solver) = solver_opt {
-                let len = Int::new_const(ctx, "arr_len");
+                let len_name = format!("len_{}", name);
+                let len = if let Some(existing) = env.get(&len_name) {
+                    existing.as_int().unwrap_or(Int::new_const(ctx, len_name.as_str()))
+                } else {
+                    let l = Int::new_const(ctx, len_name.as_str());
+                    solver.assert(&l.ge(&Int::from_i64(ctx, 0)));
+                    env.insert(len_name.clone(), l.clone().into());
+                    l
+                };
                 let safe = Bool::and(ctx, &[&idx.ge(&Int::from_i64(ctx, 0)), &idx.lt(&len)]);
                 solver.push();
                 solver.assert(&safe.not());
                 if solver.check() == SatResult::Sat {
                     solver.pop(1);
-                    return Err(format!("Verification Error: Potential Out-of-Bounds on '{}'", name));
+                    return Err(format!("Verification Error: Potential Out-of-Bounds on '{}' (index may be < 0 or >= len_{})", name, name));
                 }
                 solver.pop(1);
             }
@@ -219,8 +251,8 @@ fn expr_to_z3<'a>(
                     Op::Eq  => Ok(lf._eq(&rf).into()),
                     Op::Neq => Ok(lf._eq(&rf).not().into()),
                     Op::Add | Op::Sub | Op::Mul | Op::Div => {
-                        // z3 0.12 では丸めモード API が利用できないため、
-                        // シンボリック Float を返し、基本的な符号制約を付与する
+                        // シンボリック Float + 符号伝播制約
+                        // (z3 crate 0.12 は内部フィールドが非公開のため z3-sys 直接呼び出し不可)
                         static FLOAT_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
                         let id = FLOAT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         let result = Float::new_const(ctx, format!("float_arith_{}", id), 11, 53);
@@ -228,13 +260,23 @@ fn expr_to_z3<'a>(
                         if let Some(solver) = solver_opt {
                             match op {
                                 Op::Mul => {
-                                    // pos * pos => pos, neg * neg => pos
                                     let both_pos = Bool::and(ctx, &[&lf.gt(&zero), &rf.gt(&zero)]);
                                     solver.assert(&both_pos.implies(&result.gt(&zero)));
+                                    let both_neg = Bool::and(ctx, &[&lf.lt(&zero), &rf.lt(&zero)]);
+                                    solver.assert(&both_neg.implies(&result.gt(&zero)));
                                 },
                                 Op::Add => {
-                                    // pos + pos => pos
                                     let both_pos = Bool::and(ctx, &[&lf.gt(&zero), &rf.ge(&zero)]);
+                                    solver.assert(&both_pos.implies(&result.gt(&zero)));
+                                    let both_pos2 = Bool::and(ctx, &[&lf.ge(&zero), &rf.gt(&zero)]);
+                                    solver.assert(&both_pos2.implies(&result.gt(&zero)));
+                                },
+                                Op::Sub => {
+                                    let a_gt_b = Bool::and(ctx, &[&lf.gt(&rf), &rf.ge(&zero)]);
+                                    solver.assert(&a_gt_b.implies(&result.ge(&zero)));
+                                },
+                                Op::Div => {
+                                    let both_pos = Bool::and(ctx, &[&lf.gt(&zero), &rf.gt(&zero)]);
                                     solver.assert(&both_pos.implies(&result.gt(&zero)));
                                 },
                                 _ => {}

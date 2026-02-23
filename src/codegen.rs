@@ -4,9 +4,34 @@ use inkwell::builder::Builder;
 use inkwell::module::Module;
 use inkwell::IntPredicate;
 use inkwell::FloatPredicate;
+use inkwell::AddressSpace;
 use crate::parser::{Atom, Expr, Op, parse_expression};
+use crate::verification::resolve_base_type;
 use std::collections::HashMap;
 use std::path::Path;
+
+/// Fat Pointer 配列の構造体型 { i64, i64* } を生成するヘルパー
+fn array_struct_type<'a>(context: &'a Context) -> inkwell::types::StructType<'a> {
+    let i64_type = context.i64_type();
+    let ptr_type = context.ptr_type(AddressSpace::default());
+    context.struct_type(&[i64_type.into(), ptr_type.into()], false)
+}
+
+/// パラメータの LLVM 型を解決する
+fn resolve_param_type<'a>(context: &'a Context, type_name: Option<&str>) -> inkwell::types::BasicTypeEnum<'a> {
+    match type_name {
+        Some(name) => {
+            let base = resolve_base_type(name);
+            match base.as_str() {
+                "f64" => context.f64_type().into(),
+                "u64" => context.i64_type().into(),
+                "[i64]" => array_struct_type(context).into(),
+                _ => context.i64_type().into(),
+            }
+        },
+        None => context.i64_type().into(),
+    }
+}
 
 pub fn compile(atom: &Atom, output_path: &Path) -> Result<(), String> {
     let context = Context::create();
@@ -14,8 +39,11 @@ pub fn compile(atom: &Atom, output_path: &Path) -> Result<(), String> {
     let builder = context.create_builder();
 
     let i64_type = context.i64_type();
-    // デフォルトは i64 とするが、将来的に精緻型の _base_type に基づいてシグネチャを動的に生成可能
-    let param_types = vec![i64_type.into(); atom.params.len()];
+
+    // パラメータ型を精緻型から解決
+    let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = atom.params.iter()
+        .map(|p| resolve_param_type(&context, p.type_name.as_deref()).into())
+        .collect();
     let fn_type = i64_type.fn_type(&param_types, false);
     let function = module.add_function(&atom.name, fn_type, None);
 
@@ -23,13 +51,26 @@ pub fn compile(atom: &Atom, output_path: &Path) -> Result<(), String> {
     builder.position_at_end(entry_block);
 
     let mut variables = HashMap::new();
+    let mut array_ptrs: HashMap<String, (BasicValueEnum, BasicValueEnum)> = HashMap::new(); // name -> (len, data_ptr)
+
     for (i, param) in atom.params.iter().enumerate() {
         let val = function.get_nth_param(i as u32).unwrap();
-        variables.insert(param.name.clone(), val);
+        // Fat Pointer 配列パラメータの場合、len と data_ptr を分解して保持
+        if val.is_struct_value() {
+            let struct_val = val.into_struct_value();
+            let len_val = builder.build_extract_value(struct_val, 0, &format!("{}_len", param.name))
+                .map_err(|e| e.to_string())?;
+            let data_ptr = builder.build_extract_value(struct_val, 1, &format!("{}_data", param.name))
+                .map_err(|e| e.to_string())?;
+            array_ptrs.insert(param.name.clone(), (len_val, data_ptr));
+            variables.insert(param.name.clone(), len_val); // デフォルトでは len を返す
+        } else {
+            variables.insert(param.name.clone(), val);
+        }
     }
 
     let body_ast = parse_expression(&atom.body_expr);
-    let result_val = compile_expr(&context, &builder, &module, &function, &body_ast, &mut variables)?;
+    let result_val = compile_expr(&context, &builder, &module, &function, &body_ast, &mut variables, &array_ptrs)?;
 
     builder.build_return(Some(&result_val)).map_err(|e| e.to_string())?;
 
@@ -46,6 +87,7 @@ fn compile_expr<'a>(
     function: &FunctionValue<'a>,
     expr: &Expr,
     variables: &mut HashMap<String, BasicValueEnum<'a>>,
+    array_ptrs: &HashMap<String, (BasicValueEnum<'a>, BasicValueEnum<'a>)>,
 ) -> Result<BasicValueEnum<'a>, String> {
     match expr {
         Expr::Number(n) => Ok(context.i64_type().const_int(*n as u64, true).into()),
@@ -59,7 +101,7 @@ fn compile_expr<'a>(
         Expr::Call(name, args) => {
             match name.as_str() {
                 "sqrt" => {
-                    let arg = compile_expr(context, builder, module, function, &args[0], variables)?;
+                    let arg = compile_expr(context, builder, module, function, &args[0], variables, array_ptrs)?;
                     let sqrt_func = module.get_function("llvm.sqrt.f64").unwrap_or_else(|| {
                         let type_f64 = context.f64_type();
                         let fn_type = type_f64.fn_type(&[type_f64.into()], false);
@@ -70,16 +112,70 @@ fn compile_expr<'a>(
                     Ok(result.into_float_value().into())
                 },
                 "len" => {
-                    // 標準ライブラリ: 配列長を返す（現状は検証用ダミー定数10）
-                    Ok(context.i64_type().const_int(10, false).into())
+                    // Fat Pointer: 配列名から長さフィールドを取得
+                    if !args.is_empty() {
+                        if let Expr::Variable(arr_name) = &args[0] {
+                            if let Some((len_val, _)) = array_ptrs.get(arr_name) {
+                                return Ok(*len_val);
+                            }
+                        }
+                    }
+                    // フォールバック: 配列が見つからない場合はダミー定数
+                    Ok(context.i64_type().const_int(0, false).into())
                 },
                 _ => Err(format!("LLVM Codegen: Unknown function {}", name)),
             }
         },
 
+        Expr::ArrayAccess(name, index_expr) => {
+            // Fat Pointer: data_ptr から GEP + load
+            let idx = compile_expr(context, builder, module, function, index_expr, variables, array_ptrs)?
+                .into_int_value();
+            if let Some((len_val, data_ptr_val)) = array_ptrs.get(name) {
+                let data_ptr = data_ptr_val.into_pointer_value();
+                // ランタイム境界チェック: idx < len を検証し、違反時は 0 を返す（安全なフォールバック）
+                let len_int = len_val.into_int_value();
+                let in_bounds = builder.build_int_compare(IntPredicate::SLT, idx, len_int, "bounds_check")
+                    .map_err(|e| e.to_string())?;
+                let non_neg = builder.build_int_compare(IntPredicate::SGE, idx, context.i64_type().const_int(0, false), "non_neg_check")
+                    .map_err(|e| e.to_string())?;
+                let safe = builder.build_and(in_bounds, non_neg, "safe_access").map_err(|e| e.to_string())?;
+
+                let safe_block = context.append_basic_block(*function, "arr.safe");
+                let oob_block = context.append_basic_block(*function, "arr.oob");
+                let merge_block = context.append_basic_block(*function, "arr.merge");
+
+                builder.build_conditional_branch(safe, safe_block, oob_block).map_err(|e| e.to_string())?;
+
+                // Safe path: GEP + load
+                builder.position_at_end(safe_block);
+                let elem_ptr = unsafe {
+                    builder.build_gep(context.i64_type(), data_ptr, &[idx], "elem_ptr").map_err(|e| e.to_string())?
+                };
+                let loaded = builder.build_load(context.i64_type(), elem_ptr, "elem_val").map_err(|e| e.to_string())?;
+                let safe_end = builder.get_insert_block().unwrap();
+                builder.build_unconditional_branch(merge_block).map_err(|e| e.to_string())?;
+
+                // OOB path: return 0 (safe default)
+                builder.position_at_end(oob_block);
+                let zero_val = context.i64_type().const_int(0, false);
+                let oob_end = builder.get_insert_block().unwrap();
+                builder.build_unconditional_branch(merge_block).map_err(|e| e.to_string())?;
+
+                // Merge
+                builder.position_at_end(merge_block);
+                let phi = builder.build_phi(context.i64_type(), "arr_result").map_err(|e| e.to_string())?;
+                phi.add_incoming(&[(&loaded, safe_end), (&zero_val, oob_end)]);
+                Ok(phi.as_basic_value())
+            } else {
+                // 配列が Fat Pointer として登録されていない場合はエラー
+                Err(format!("LLVM Codegen: Array '{}' not found as fat pointer parameter", name))
+            }
+        },
+
         Expr::BinaryOp(left, op, right) => {
-            let lhs = compile_expr(context, builder, module, function, left, variables)?;
-            let rhs = compile_expr(context, builder, module, function, right, variables)?;
+            let lhs = compile_expr(context, builder, module, function, left, variables, array_ptrs)?;
+            let rhs = compile_expr(context, builder, module, function, right, variables, array_ptrs)?;
 
             if lhs.is_float_value() || rhs.is_float_value() {
                 let l = if lhs.is_float_value() {
@@ -129,7 +225,7 @@ fn compile_expr<'a>(
         },
 
         Expr::IfThenElse { cond, then_branch, else_branch } => {
-            let cond_val = compile_expr(context, builder, module, function, cond, variables)?.into_int_value();
+            let cond_val = compile_expr(context, builder, module, function, cond, variables, array_ptrs)?.into_int_value();
             let cond_bool = builder.build_int_compare(IntPredicate::NE, cond_val, context.i64_type().const_int(0, false), "if_cond").map_err(|e| e.to_string())?;
 
             let then_block = context.append_basic_block(*function, "then");
@@ -139,12 +235,12 @@ fn compile_expr<'a>(
             builder.build_conditional_branch(cond_bool, then_block, else_block).map_err(|e| e.to_string())?;
 
             builder.position_at_end(then_block);
-            let then_val = compile_expr(context, builder, module, function, then_branch, variables)?;
+            let then_val = compile_expr(context, builder, module, function, then_branch, variables, array_ptrs)?;
             let then_end_block = builder.get_insert_block().unwrap();
             builder.build_unconditional_branch(merge_block).map_err(|e| e.to_string())?;
 
             builder.position_at_end(else_block);
-            let else_val = compile_expr(context, builder, module, function, else_branch, variables)?;
+            let else_val = compile_expr(context, builder, module, function, else_branch, variables, array_ptrs)?;
             let else_end_block = builder.get_insert_block().unwrap();
             builder.build_unconditional_branch(merge_block).map_err(|e| e.to_string())?;
 
@@ -173,12 +269,12 @@ fn compile_expr<'a>(
                 variables.insert(name.clone(), phi.as_basic_value());
             }
 
-            let cond_val = compile_expr(context, builder, module, function, cond, variables)?.into_int_value();
+            let cond_val = compile_expr(context, builder, module, function, cond, variables, array_ptrs)?.into_int_value();
             let cond_bool = builder.build_int_compare(IntPredicate::NE, cond_val, context.i64_type().const_int(0, false), "loop_cond").map_err(|e| e.to_string())?;
             builder.build_conditional_branch(cond_bool, body_block, after_block).map_err(|e| e.to_string())?;
 
             builder.position_at_end(body_block);
-            compile_expr(context, builder, module, function, body, variables)?;
+            compile_expr(context, builder, module, function, body, variables, array_ptrs)?;
             let body_end_block = builder.get_insert_block().unwrap();
 
             for (name, phi) in &phi_nodes {
@@ -199,17 +295,17 @@ fn compile_expr<'a>(
         Expr::Block(stmts) => {
             let mut last_val = context.i64_type().const_int(0, false).into();
             for stmt in stmts {
-                last_val = compile_expr(context, builder, module, function, stmt, variables)?;
+                last_val = compile_expr(context, builder, module, function, stmt, variables, array_ptrs)?;
             }
             Ok(last_val)
         },
 
         Expr::Let { var, value } | Expr::Assign { var, value } => {
-            let val = compile_expr(context, builder, module, function, value, variables)?;
+            let val = compile_expr(context, builder, module, function, value, variables, array_ptrs)?;
             variables.insert(var.clone(), val);
             Ok(val)
         },
 
-        _ => Err(format!("LLVM Codegen: Unimplemented expression type {:?}", expr)),
+
     }
 }

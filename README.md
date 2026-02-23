@@ -148,7 +148,8 @@ With `--output dist/katana`:
 - [x] `while` + loop invariant verification
 - [x] `f64` literals / `u64` base type support (basic constraints only)
 - [x] Standard library function calls (`sqrt`, `len`, etc.)
-- [ ] Stricter float arithmetic verification (currently partially symbolic)
-- [ ] Array length model (`len()` materialization, enhanced bounds checking)
+- [x] Float arithmetic sign propagation (pos*pos→pos, pos+non-neg→pos, pos/pos→pos, etc.)
+- [x] Per-array length model (`len(arr)` → `len_arr` symbolic constant, auto-generated for all params)
+- [x] Array bounds checking uses per-array `len_<name>` symbols
 - [ ] Editor integration (LSP / VS Code Extension)
 

@@ -50,20 +50,26 @@ fn main() {
 
     let mut atom_count = 0;
 
-    // 全ての Atom のコードを結合して出力するためのバッファ (Transpiler用)
-    let mut rust_bundle = String::new();
-    let mut go_bundle = String::new();
-    let mut ts_bundle = String::new();
-
-    // --- Phase 0: 全 Atom を事前登録（同一モジュール内の関数呼び出し解決用） ---
+    // --- Phase 0: import 宣言を収集 + 全 Atom を事前登録 ---
+    let mut imports: Vec<ImportDecl> = Vec::new();
     for item in &items {
-        if let Item::Atom(atom) = item {
-            if let Err(e) = verification::register_atom(atom) {
-                eprintln!("  ❌ Atom Registration Failed: {}", e);
-                std::process::exit(1);
+        match item {
+            Item::Import(decl) => imports.push(decl.clone()),
+            Item::Atom(atom) => {
+                if let Err(e) = verification::register_atom(atom) {
+                    eprintln!("  ❌ Atom Registration Failed: {}", e);
+                    std::process::exit(1);
+                }
             }
+            _ => {}
         }
     }
+
+    // 全ての Atom のコードを結合して出力するためのバッファ (Transpiler用)
+    // import 宣言がある場合、各言語のモジュールヘッダーを先頭に挿入
+    let mut rust_bundle = transpile_module_header(&imports, file_stem, TargetLanguage::Rust);
+    let mut go_bundle = transpile_module_header(&imports, file_stem, TargetLanguage::Go);
+    let mut ts_bundle = transpile_module_header(&imports, file_stem, TargetLanguage::TypeScript);
 
     for item in items {
         match item {

@@ -7,8 +7,8 @@ mod resolver;
 use clap::Parser;
 use std::fs;
 use std::path::Path;
-use crate::transpiler::{TargetLanguage, transpile};
-use crate::parser::Item;
+use crate::transpiler::{TargetLanguage, transpile, transpile_module_header};
+use crate::parser::{Item, ImportDecl};
 
 #[derive(Parser)]
 #[command(name = "Mumei Compiler", version = "0.1.0")]

@@ -1,4 +1,25 @@
-use crate::parser::{Expr, Op, Atom, parse_expression};
+use crate::parser::{Expr, Op, Atom, ImportDecl, parse_expression};
+
+/// import 宣言から TypeScript のモジュールヘッダーを生成する
+/// 例: import { add } from "./lib/math";
+pub fn transpile_module_header_ts(imports: &[ImportDecl]) -> String {
+    let mut lines = Vec::new();
+    for import in imports {
+        let module_path = import.path.trim_end_matches(".mm");
+        if let Some(alias) = &import.alias {
+            lines.push(format!("import * as {} from \"{}\";", alias, module_path));
+        } else {
+            // エイリアスなしの場合、ワイルドカードインポート（モジュール名を推定）
+            let mod_name = import.path.rsplit('/').next().unwrap_or(&import.path)
+                .trim_end_matches(".mm");
+            lines.push(format!("import * as {} from \"{}\";", mod_name, module_path));
+        }
+    }
+    if !lines.is_empty() {
+        lines.push(String::new()); // 空行で区切り
+    }
+    lines.join("\n")
+}
 
 pub fn transpile_to_ts(atom: &Atom) -> String {
     // TSでは number (f64/i64) または bigint (u64的な扱い) ですが、

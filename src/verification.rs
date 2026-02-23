@@ -43,21 +43,20 @@ pub type MumeiResult<T> = Result<T, MumeiError>;
 type Env<'a> = HashMap<String, Dynamic<'a>>;
 type DynResult<'a> = MumeiResult<Dynamic<'a>>;
 
-/// 検証時に共有するコンテキスト（ctx, arr を束ねて引数を削減）
+/// 検証時に共有するコンテキスト（ctx, arr, module_env を束ねて引数を削減）
 struct VCtx<'a> {
     ctx: &'a Context,
     arr: &'a Array<'a>,
+    module_env: &'a ModuleEnv,
 }
 
 // =============================================================================
 // モジュール環境: グローバル static Mutex から構造体ベースの管理に移行
 // =============================================================================
 
-/// モジュール単位の環境。型定義・構造体定義・atom 定義を保持する。
-/// モジュールシステム導入時は、モジュールごとに独立した ModuleEnv を持ち、
-/// Resolver が完全修飾名（FQN）でフラット化して VerificationContext に渡す。
-/// 現在はグローバル環境からの段階的移行中のため、一部メソッドは未使用。
-#[allow(dead_code)]
+/// モジュール単位の環境。型定義・構造体定義・atom 定義・enum 定義を保持する。
+/// グローバル static Mutex を廃止し、この構造体で一元管理する。
+/// main.rs で構築し、verify() / codegen / transpiler に参照渡しする。
 #[derive(Debug, Clone, Default)]
 pub struct ModuleEnv {
     /// 精緻型定義（FQN キー: 例 "math::Nat" or 自モジュールなら "Nat"）
@@ -66,11 +65,12 @@ pub struct ModuleEnv {
     pub structs: HashMap<String, StructDef>,
     /// Atom 定義（FQN キー）。契約による検証で requires/ensures のみ参照する。
     pub atoms: HashMap<String, Atom>,
-    /// 検証済みフラグ（モジュール単位）
-    pub verified: bool,
+    /// Enum 定義（FQN キー）
+    pub enums: HashMap<String, EnumDef>,
+    /// 検証済み Atom 名のキャッシュ
+    pub verified_cache: HashSet<String>,
 }
 
-#[allow(dead_code)]
 impl ModuleEnv {
     pub fn new() -> Self {
         Self::default()
@@ -88,6 +88,10 @@ impl ModuleEnv {
         self.atoms.insert(atom.name.clone(), atom.clone());
     }
 
+    pub fn register_enum(&mut self, enum_def: &EnumDef) {
+        self.enums.insert(enum_def.name.clone(), enum_def.clone());
+    }
+
     pub fn get_type(&self, name: &str) -> Option<&RefinedType> {
         self.types.get(name)
     }
@@ -100,12 +104,31 @@ impl ModuleEnv {
         self.atoms.get(name)
     }
 
+    pub fn get_enum(&self, name: &str) -> Option<&EnumDef> {
+        self.enums.get(name)
+    }
+
+    /// Variant 名から所属する Enum 定義を逆引きする
+    pub fn find_enum_by_variant(&self, variant_name: &str) -> Option<&EnumDef> {
+        self.enums.values().find(|e| e.variants.iter().any(|v| v.name == variant_name))
+    }
+
     /// 精緻型名からベース型名を解決する（例: "Nat" -> "i64", "Pos" -> "f64"）
     pub fn resolve_base_type(&self, type_name: &str) -> String {
         if let Some(refined) = self.types.get(type_name) {
             return refined._base_type.clone();
         }
         type_name.to_string()
+    }
+
+    /// Atom を検証済みとしてマークする
+    pub fn mark_verified(&mut self, atom_name: &str) {
+        self.verified_cache.insert(atom_name.to_string());
+    }
+
+    /// Atom が検証済みかどうかを確認する
+    pub fn is_verified(&self, atom_name: &str) -> bool {
+        self.verified_cache.contains(atom_name)
     }
 }
 
@@ -218,7 +241,7 @@ pub fn is_verified(atom_name: &str) -> bool {
         .unwrap_or(false)
 }
 
-pub fn verify(atom: &Atom, output_dir: &Path) -> MumeiResult<()> {
+pub fn verify(atom: &Atom, output_dir: &Path, module_env: &ModuleEnv) -> MumeiResult<()> {
     let mut cfg = Config::new();
     cfg.set_timeout_msec(10000);
     let ctx = Context::new(&cfg);
@@ -226,7 +249,7 @@ pub fn verify(atom: &Atom, output_dir: &Path) -> MumeiResult<()> {
 
     let int_sort = z3::Sort::int(&ctx);
     let arr = Array::new_const(&ctx, "arr", &int_sort, &int_sort);
-    let vc = VCtx { ctx: &ctx, arr: &arr };
+    let vc = VCtx { ctx: &ctx, arr: &arr, module_env };
 
     let mut env: Env = HashMap::new();
 
@@ -253,45 +276,39 @@ pub fn verify(atom: &Atom, output_dir: &Path) -> MumeiResult<()> {
     }
 
     // 2. 引数（params）に対する精緻型制約の自動適用
-    {
-        let type_defs = TYPE_ENV.lock().map_err(|_| MumeiError::TypeError("Failed to lock TYPE_ENV".into()))?;
-        for param in &atom.params {
-            if let Some(type_name) = &param.type_name {
-                if let Some(refined) = type_defs.get(type_name) {
-                    apply_refinement_constraint(&vc, &solver, &param.name, refined, &mut env)?;
-                }
+    for param in &atom.params {
+        if let Some(type_name) = &param.type_name {
+            if let Some(refined) = module_env.get_type(type_name) {
+                apply_refinement_constraint(&vc, &solver, &param.name, refined, &mut env)?;
             }
         }
     }
 
     // 2b. 引数（params）に対する構造体フィールド制約の自動適用
-    {
-        let struct_defs = STRUCT_ENV.lock().map_err(|_| MumeiError::TypeError("Failed to lock STRUCT_ENV".into()))?;
-        for param in &atom.params {
-            if let Some(type_name) = &param.type_name {
-                if let Some(sdef) = struct_defs.get(type_name) {
-                    // 構造体の各フィールドをシンボリック変数として env に登録し、制約を適用
-                    for field in &sdef.fields {
-                        let field_var_name = format!("{}_{}", param.name, field.name);
-                        let base = resolve_base_type(&field.type_name);
-                        let field_z3: Dynamic = match base.as_str() {
-                            "f64" => Float::new_const(&ctx, field_var_name.as_str(), 11, 53).into(),
-                            _ => Int::new_const(&ctx, field_var_name.as_str()).into(),
-                        };
-                        env.insert(field_var_name.clone(), field_z3.clone());
-                        // qualified name も登録
-                        let qualified = format!("__struct_{}_{}", param.name, field.name);
-                        env.insert(qualified, field_z3.clone());
+    for param in &atom.params {
+        if let Some(type_name) = &param.type_name {
+            if let Some(sdef) = module_env.get_struct(type_name) {
+                // 構造体の各フィールドをシンボリック変数として env に登録し、制約を適用
+                for field in &sdef.fields {
+                    let field_var_name = format!("{}_{}", param.name, field.name);
+                    let base = module_env.resolve_base_type(&field.type_name);
+                    let field_z3: Dynamic = match base.as_str() {
+                        "f64" => Float::new_const(&ctx, field_var_name.as_str(), 11, 53).into(),
+                        _ => Int::new_const(&ctx, field_var_name.as_str()).into(),
+                    };
+                    env.insert(field_var_name.clone(), field_z3.clone());
+                    // qualified name も登録
+                    let qualified = format!("__struct_{}_{}", param.name, field.name);
+                    env.insert(qualified, field_z3.clone());
 
-                        // フィールド制約を solver に assert
-                        if let Some(constraint_raw) = &field.constraint {
-                            let mut local_env = env.clone();
-                            local_env.insert("v".to_string(), field_z3);
-                            let constraint_ast = parse_expression(constraint_raw);
-                            let constraint_z3 = expr_to_z3(&vc, &constraint_ast, &mut local_env, None)?;
-                            if let Some(constraint_bool) = constraint_z3.as_bool() {
-                                solver.assert(&constraint_bool);
-                            }
+                    // フィールド制約を solver に assert
+                    if let Some(constraint_raw) = &field.constraint {
+                        let mut local_env = env.clone();
+                        local_env.insert("v".to_string(), field_z3);
+                        let constraint_ast = parse_expression(constraint_raw);
+                        let constraint_z3 = expr_to_z3(&vc, &constraint_ast, &mut local_env, None)?;
+                        if let Some(constraint_bool) = constraint_z3.as_bool() {
+                            solver.assert(&constraint_bool);
                         }
                     }
                 }
@@ -431,7 +448,7 @@ fn expr_to_z3<'a>(
                     // ユーザー定義関数呼び出し: 契約による検証（Compositional Verification）
                     // 呼び出し先の requires を現在のコンテキストで証明し、
                     // 成功すれば ensures を事実として追加する
-                    if let Some(callee) = get_atom_def(name) {
+                    if let Some(callee) = vc.module_env.get_atom(name).cloned() {
                         // 引数を評価
                         let mut arg_vals = Vec::new();
                         for arg in args {
@@ -447,15 +464,12 @@ fn expr_to_z3<'a>(
                         }
 
                         // 呼び出し先の精緻型制約を call_env に適用
-                        {
-                            let type_defs = TYPE_ENV.lock().map_err(|_| MumeiError::TypeError("Failed to lock TYPE_ENV".into()))?;
-                            for (i, param) in callee.params.iter().enumerate() {
-                                if let Some(type_name) = &param.type_name {
-                                    if let Some(refined) = type_defs.get(type_name) {
-                                        // 実引数値を精緻型の述語変数に束縛して制約を検証
-                                        if let Some(val) = arg_vals.get(i) {
-                                            call_env.insert(refined.operand.clone(), val.clone());
-                                        }
+                        for (i, param) in callee.params.iter().enumerate() {
+                            if let Some(type_name) = &param.type_name {
+                                if let Some(refined) = vc.module_env.get_type(type_name) {
+                                    // 実引数値を精緻型の述語変数に束縛して制約を検証
+                                    if let Some(val) = arg_vals.get(i) {
+                                        call_env.insert(refined.operand.clone(), val.clone());
                                     }
                                 }
                             }
@@ -488,7 +502,7 @@ fn expr_to_z3<'a>(
                         // 戻り値型の推定: 呼び出し先パラメータに f64 型があれば Float、なければ Int
                         let has_float = callee.params.iter().any(|p| {
                             p.type_name.as_deref()
-                                .map(|t| resolve_base_type(t) == "f64")
+                                .map(|t| vc.module_env.resolve_base_type(t) == "f64")
                                 .unwrap_or(false)
                         });
                         let result_z3: Dynamic = if has_float {
@@ -767,7 +781,7 @@ fn expr_to_z3<'a>(
                 last = val.clone();
 
                 // フィールド制約の検証: 構造体定義から constraint を取得
-                if let Some(sdef) = get_struct_def(type_name) {
+                if let Some(sdef) = vc.module_env.get_struct(type_name) {
                     if let Some(sfield) = sdef.fields.iter().find(|f| f.name == *field_name) {
                         if let Some(constraint_raw) = &sfield.constraint {
                             // constraint 内の "v" をフィールド値に置き換えて検証
@@ -987,7 +1001,7 @@ fn pattern_to_z3_condition<'a>(
             Ok(target_int._eq(&lit))
         },
         Pattern::Variant { variant_name, fields } => {
-            if let Some(enum_def) = find_enum_by_variant(variant_name) {
+            if let Some(enum_def) = vc.module_env.find_enum_by_variant(variant_name) {
                 let variant_idx = enum_def.variants.iter()
                     .position(|v| v.name == *variant_name)
                     .unwrap_or(0) as i64;
@@ -1008,7 +1022,7 @@ fn pattern_to_z3_condition<'a>(
                         let base = if *field_type == enum_def.name {
                             "i64".to_string() // 再帰フィールドは tag 値
                         } else {
-                            resolve_base_type(field_type)
+                            vc.module_env.resolve_base_type(field_type)
                         };
                         match base.as_str() {
                             "f64" => Float::new_const(ctx, proj_name.as_str(), 11, 53).into(),
@@ -1059,13 +1073,14 @@ fn pattern_bind_variables<'a>(
     pattern: &Pattern,
     target: &Dynamic<'a>,
     env: &mut Env<'a>,
+    module_env: &ModuleEnv,
 ) {
     match pattern {
         Pattern::Variable(name) => {
             env.insert(name.clone(), target.clone());
         },
         Pattern::Variant { variant_name, fields } => {
-            if let Some(enum_def) = find_enum_by_variant(variant_name) {
+            if let Some(enum_def) = module_env.find_enum_by_variant(variant_name) {
                 if let Some(variant_def) = enum_def.variants.iter().find(|v| v.name == *variant_name) {
                     for (i, field_pattern) in fields.iter().enumerate() {
                         let proj_name = format!("__proj_{}_{}", variant_name, i);
@@ -1074,7 +1089,7 @@ fn pattern_bind_variables<'a>(
                             let base = if *field_type == enum_def.name {
                                 "i64".to_string()
                             } else {
-                                resolve_base_type(field_type)
+                                module_env.resolve_base_type(field_type)
                             };
                             match base.as_str() {
                                 "f64" => Float::new_const(ctx, proj_name.as_str(), 11, 53).into(),
@@ -1092,7 +1107,7 @@ fn pattern_bind_variables<'a>(
                             },
                             Pattern::Variant { .. } => {
                                 // ネストした Variant: 再帰的にバインド
-                                pattern_bind_variables(ctx, field_pattern, &field_sym, env);
+                                pattern_bind_variables(ctx, field_pattern, &field_sym, env, module_env);
                             },
                             _ => {}
                         }

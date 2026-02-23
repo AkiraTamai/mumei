@@ -435,6 +435,7 @@ With `--output dist/katana`:
 - [x] Verification cache (`.mumei_cache`) with SHA-256 hash-based invalidation
 - [x] Imported atom body re-verification skip (contract-trusted)
 - [x] Transpiler module headers (`mod`/`use` for Rust, `package`/`import` for Go, `import` for TypeScript)
+- [ ] Equality ensures propagation (`ensures: result == n + 1` for chained call verification)
 - [ ] Fully qualified name (FQN) dot-notation in source code (`math.add(x, y)`)
 - [ ] Incremental build (re-verify only changed modules)
 - [ ] Struct method definitions (`atom` attached to struct)

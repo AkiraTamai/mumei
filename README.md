@@ -4,7 +4,7 @@
 
 **Mumei (無銘)** is a formally verified language that processes source code through the pipeline:
 
-> parse → verify (Z3) → codegen (LLVM IR) → transpile (Rust / Go / TypeScript)
+> parse → resolve (imports) → verify (Z3) → codegen (LLVM IR) → transpile (Rust / Go / TypeScript)
 
 Only atoms that pass formal verification are compiled to LLVM IR and transpiled to multi-language source code. Every function's preconditions, postconditions, loop invariants, and termination are mathematically proven before a single line of machine code is emitted.
 
@@ -305,15 +305,16 @@ With `--output dist/katana`:
 
 ```
 src/
-├── parser.rs          # AST, tokenizer, parser (struct, field access, decreases)
-├── verification.rs    # Z3 verification, MumeiError, VCtx, struct/type registries
-├── codegen.rs         # LLVM IR generation (StructType, llvm! macro)
+├── parser.rs          # AST, tokenizer, parser (import, struct, field access, decreases)
+├── resolver.rs        # Import resolution, dependency graph, circular import detection
+├── verification.rs    # Z3 verification, ModuleEnv, inter-atom call contracts
+├── codegen.rs         # LLVM IR generation (StructType, declare + call, llvm! macro)
 ├── transpiler/
 │   ├── mod.rs         # TargetLanguage dispatch
 │   ├── rust.rs        # Rust transpiler
 │   ├── golang.rs      # Go transpiler
 │   └── typescript.rs  # TypeScript transpiler
-└── main.rs            # Compiler orchestrator
+└── main.rs            # Compiler orchestrator (parse → resolve → verify → codegen → transpile)
 ```
 
 ---
@@ -333,6 +334,13 @@ src/
 - [x] `VCtx` context object for verification (reduced function signatures)
 - [x] `llvm!` macro for codegen boilerplate reduction
 - [x] Comprehensive verification suite (8 atoms: stack ops, geometry, termination)
+- [x] Module system (`import "path" as alias;` with recursive resolution)
+- [x] Circular import detection
+- [x] Inter-atom function calls with contract-based verification (compositional verification)
+- [x] LLVM IR `declare` + `call` for user-defined atom calls
+- [x] `ModuleEnv` structure for future per-module environment isolation
+- [ ] Fully qualified name (FQN) dot-notation in source code (`math.add(x, y)`)
+- [ ] Incremental build (re-verify only changed modules)
 - [ ] Struct method definitions (`atom` attached to struct)
 - [ ] Nested struct support
 - [ ] Negative test suite (intentional constraint violations)

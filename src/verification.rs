@@ -56,6 +56,8 @@ struct VCtx<'a> {
 /// モジュール単位の環境。型定義・構造体定義・atom 定義を保持する。
 /// モジュールシステム導入時は、モジュールごとに独立した ModuleEnv を持ち、
 /// Resolver が完全修飾名（FQN）でフラット化して VerificationContext に渡す。
+/// 現在はグローバル環境からの段階的移行中のため、一部メソッドは未使用。
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct ModuleEnv {
     /// 精緻型定義（FQN キー: 例 "math::Nat" or 自モジュールなら "Nat"）
@@ -160,6 +162,7 @@ pub fn resolve_base_type(type_name: &str) -> String {
 }
 
 /// グローバル環境をクリアする（テスト用）
+#[allow(dead_code)]
 pub fn clear_global_env() {
     if let Ok(mut env) = TYPE_ENV.lock() { env.clear(); }
     if let Ok(mut env) = STRUCT_ENV.lock() { env.clear(); }

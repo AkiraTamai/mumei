@@ -1,10 +1,21 @@
 [package]
 name = "mumei"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
+description = "Mathematical Proof-Driven Programming Language — formally verified with Z3, compiled to LLVM IR, transpiled to Rust/Go/TypeScript"
+license = "MIT"
+repository = "https://github.com/akiratamai/mumei"
+keywords = ["formal-verification", "z3", "llvm", "programming-language", "proof"]
+categories = ["compilers", "development-tools"]
+readme = "README.md"
+
+# cargo install mumei で mumei バイナリがインストールされる
+[[bin]]
+name = "mumei"
+path = "src/main.rs"
 
 [dependencies]
-# CLI解析: 刀を振るうためのコマンドラインインターフェース
+# CLI解析: サブコマンド対応（build, verify, init, check）
 clap = { version = "4.4", features = ["derive"] }
 
 # 構文解析: 正規表現ベースの高速な字句解析
@@ -15,7 +26,6 @@ regex = "1.10"
 z3 = "0.12"
 
 # コード生成: LLVM IR 生成用の低レイヤライブラリ
-# バージョン指定ではなく git から直接取得するように変更
 inkwell = { git = "https://github.com/TheDan64/inkwell", branch = "master", features = ["llvm17-0"] }
 
 # レポート出力: 検証結果の JSON 書き出し
@@ -26,6 +36,3 @@ serde = { version = "1.0", features = ["derive"] }
 
 # ハッシュ: ソースファイルの変更検出
 sha2 = "0.10"
-
-# ※ once_cell は Phase 4 (ModuleEnv 移行) でグローバル static Mutex を廃止したため不要になりました
-# ※ 以前使用していた pest は regex ベースの自作パーサーに移行したため依存関係から削除していますが、必要に応じて残すことも可能

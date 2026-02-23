@@ -87,6 +87,7 @@ pub struct EnumVariant {
     /// パーサーは "Self" を Enum 自身の名前に自動展開する。
     pub fields: Vec<String>,
     /// このバリアントが再帰的か（フィールドに自身の Enum 名を含むか）
+    #[allow(dead_code)]
     pub is_recursive: bool,
 }
 
@@ -96,6 +97,7 @@ pub struct EnumDef {
     pub name: String,
     pub variants: Vec<EnumVariant>,
     /// この Enum が再帰的データ型か（いずれかの Variant が自身を参照するか）
+    #[allow(dead_code)]
     pub is_recursive: bool,
 }
 

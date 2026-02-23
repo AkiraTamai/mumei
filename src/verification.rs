@@ -1141,7 +1141,7 @@ fn format_counterexample(
                         // フィールド値も model から取得を試みる
                         let mut field_vals = Vec::new();
                         for (i, field_type) in variant.fields.iter().enumerate() {
-                            let field_sym_name = format!("__variant_{}_{}", variant.name, i);
+                            let _field_sym_name = format!("__proj_{}_{}", variant.name, i);
                             // model 内のシンボルを探す（存在すれば具体値を表示）
                             let field_str = format!("{}=?", field_type);
                             field_vals.push(field_str);

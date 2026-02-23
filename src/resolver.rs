@@ -6,11 +6,43 @@
 //! ## 設計方針
 //! - Phase 1: ファイルベースの単純な import 解決
 //! - Phase 2+: 完全修飾名（FQN）による名前空間分離、ModuleEnv ベースの管理
+//!
+//! ## 検証キャッシュ
+//! インポートされたモジュールの atom は「検証済み」としてマークされ、
+//! main.rs での body 再検証がスキップされる。呼び出し時は requires/ensures
+//! の契約のみを信頼する（Compositional Verification）。
+//!
+//! キャッシュファイル (.mumei_cache) にはソースハッシュと検証結果を永続化し、
+//! ソースが変更されていなければ再パース・再検証をスキップする。
+
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use sha2::{Sha256, Digest};
+use serde::{Serialize, Deserialize};
+
 use crate::parser::{self, Item};
 use crate::verification::{self, MumeiError, MumeiResult};
+
+/// 検証キャッシュのエントリ
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CacheEntry {
+    /// ソースファイルの SHA-256 ハッシュ
+    source_hash: String,
+    /// 検証済み atom 名のリスト
+    verified_atoms: Vec<String>,
+    /// 型定義名のリスト
+    type_names: Vec<String>,
+    /// 構造体定義名のリスト
+    struct_names: Vec<String>,
+}
+
+/// キャッシュファイル全体
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct VerificationCache {
+    /// ファイルパス → キャッシュエントリ
+    entries: HashMap<String, CacheEntry>,
+}
 /// ロード済みモジュールのキャッシュ
 struct ResolverContext {
     /// ロード中のモジュールパス集合（循環参照検出用）
@@ -28,9 +60,14 @@ impl ResolverContext {
 }
 /// items 内の Import 宣言を処理し、依存モジュールの定義をグローバル環境に登録する。
 /// base_dir はインポート元ファイルの親ディレクトリ。
+/// キャッシュファイルが存在し、ソースハッシュが一致する場合は再パースをスキップする。
 pub fn resolve_imports(items: &[Item], base_dir: &Path) -> MumeiResult<()> {
+    let cache_path = base_dir.join(".mumei_cache");
+    let mut cache = load_cache(&cache_path);
     let mut ctx = ResolverContext::new();
-    resolve_imports_recursive(items, base_dir, &mut ctx)
+    resolve_imports_recursive(items, base_dir, &mut ctx, &mut cache)?;
+    save_cache(&cache_path, &cache);
+    Ok(())
 }
 /// 再帰的にインポートを解決する内部関数
 fn resolve_imports_recursive(

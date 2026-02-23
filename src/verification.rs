@@ -5,7 +5,7 @@ use std::fs;
 use std::path::Path;
 use std::fmt;
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use once_cell::sync::Lazy;
 
@@ -123,6 +123,13 @@ static ATOM_ENV: Lazy<Mutex<HashMap<String, Atom>>> = Lazy::new(|| {
     Mutex::new(HashMap::new())
 });
 
+/// 検証済み Atom のキャッシュ（ソースハッシュ → 検証済みフラグ）
+/// インポートされたモジュールの atom は body 再検証をスキップし、
+/// requires/ensures の契約のみを信頼する。
+static VERIFIED_CACHE: Lazy<Mutex<HashSet<String>>> = Lazy::new(|| {
+    Mutex::new(HashSet::new())
+});
+
 pub fn register_type(refined_type: &RefinedType) -> MumeiResult<()> {
     let mut env = TYPE_ENV.lock().map_err(|_| MumeiError::TypeError("Failed to lock TYPE_ENV".into()))?;
     env.insert(refined_type.name.clone(), refined_type.clone());
@@ -168,6 +175,21 @@ pub fn clear_global_env() {
     if let Ok(mut env) = TYPE_ENV.lock() { env.clear(); }
     if let Ok(mut env) = STRUCT_ENV.lock() { env.clear(); }
     if let Ok(mut env) = ATOM_ENV.lock() { env.clear(); }
+    if let Ok(mut cache) = VERIFIED_CACHE.lock() { cache.clear(); }
+}
+
+/// Atom を検証済みとしてマークする（インポートされたモジュールの atom 用）
+pub fn mark_verified(atom_name: &str) {
+    if let Ok(mut cache) = VERIFIED_CACHE.lock() {
+        cache.insert(atom_name.to_string());
+    }
+}
+
+/// Atom が検証済みかどうかを確認する
+pub fn is_verified(atom_name: &str) -> bool {
+    VERIFIED_CACHE.lock().ok()
+        .map(|cache| cache.contains(atom_name))
+        .unwrap_or(false)
 }
 
 pub fn verify(atom: &Atom, output_dir: &Path) -> MumeiResult<()> {

@@ -1,38 +1,19 @@
 // ============================================================
-// Mumei Call Test: Inter-atom Calls + Generics + Traits
+// Mumei Call Test: Inter-atom Calls (Compositional Verification)
 // ============================================================
+// Demonstrates contract-based verification across atom calls.
+// The verifier proves each caller's postcondition using only
+// the callee's ensures contract — without re-verifying the body.
 
-// --- Refinement Types ---
 type Nat = i64 where v >= 0;
 
-// --- Generics: Pair<T, U> ---
-struct Pair<T, U> {
-    first: T,
-    second: U
-}
-
-// --- Generics: Option<T> ---
-enum Option<T> {
-    Some(T),
-    None
-}
-
-// --- Trait with Laws ---
-trait Comparable {
-    fn leq(a: Self, b: Self) -> bool;
-    law reflexive: leq(x, x) == true;
-}
-
-impl Comparable for i64 {
-    fn leq(a: i64, b: i64) -> bool { a <= b }
-}
-
-// --- Basic Atoms ---
+// --- Base atom ---
 atom increment(n: Nat)
 requires: n >= 0;
 ensures: result >= 1;
 body: { n + 1 };
 
+// --- Chained calls: verifier uses increment's ensures ---
 atom double_increment(n: Nat)
 requires: n >= 0;
 ensures: result >= 1;
@@ -41,6 +22,7 @@ body: {
     increment(x)
 };
 
+// --- Call with expression argument ---
 atom safe_add_one(a: Nat, b: Nat)
 requires: a >= 0 && b >= 0;
 ensures: result >= 1;

@@ -1,6 +1,5 @@
 use inkwell::context::Context;
-use inkwell::types::BasicType;
-use inkwell::values::{AnyValue, BasicValueEnum, FunctionValue, PhiValue, PointerValue};
+use inkwell::values::{AnyValue, BasicValueEnum, FunctionValue, PhiValue};
 use inkwell::builder::Builder;
 use inkwell::module::Module;
 use inkwell::IntPredicate;
@@ -14,7 +13,7 @@ use std::path::Path;
 /// Fat Pointer 配列の構造体型 { i64, i64* } を生成するヘルパー
 fn array_struct_type<'a>(context: &'a Context) -> inkwell::types::StructType<'a> {
     let i64_type = context.i64_type();
-    let ptr_type = i64_type.ptr_type(AddressSpace::default());
+    let ptr_type = context.ptr_type(AddressSpace::default());
     context.struct_type(&[i64_type.into(), ptr_type.into()], false)
 }
 
@@ -296,13 +295,13 @@ fn compile_expr<'a>(
         Expr::Block(stmts) => {
             let mut last_val = context.i64_type().const_int(0, false).into();
             for stmt in stmts {
-                last_val = compile_expr(context, builder, module, function, stmt, variables)?;
+                last_val = compile_expr(context, builder, module, function, stmt, variables, array_ptrs)?;
             }
             Ok(last_val)
         },
 
         Expr::Let { var, value } | Expr::Assign { var, value } => {
-            let val = compile_expr(context, builder, module, function, value, variables)?;
+            let val = compile_expr(context, builder, module, function, value, variables, array_ptrs)?;
             variables.insert(var.clone(), val);
             Ok(val)
         },

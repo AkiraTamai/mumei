@@ -146,7 +146,7 @@ fn main() {
                 // --- 3. Codegen (LLVM 18 + Floating Point) ---
                 // 各 Atom ごとに .ll ファイルを生成（またはモジュールを統合する拡張も可能）
                 let atom_output_path = output_dir.join(format!("{}_{}", file_stem, atom.name));
-                match codegen::compile(atom, &atom_output_path) {
+                match codegen::compile(atom, &atom_output_path, &module_env) {
                     Ok(_) => println!("  ⚙️  [3/4] Tempering: Done. Compiled '{}' to LLVM IR.", atom.name),
                     Err(e) => {
                         eprintln!("  ❌ [3/4] Tempering: Failed! Codegen error: {}", e);

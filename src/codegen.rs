@@ -509,7 +509,7 @@ fn compile_expr<'a>(
                         // 簡易実装: 全登録済み構造体から探す
                         let sv = struct_val.into_struct_value();
                         // フィールド名からインデックスを推定（構造体定義を参照）
-                        if let Some(idx) = find_field_index(var_name, field_name) {
+                        if let Some(idx) = find_field_index(var_name, field_name, module_env) {
                             let extracted = llvm!(builder.build_extract_value(sv, idx, &format!("{}.{}", var_name, field_name)));
                             return Ok(extracted);
                         }
@@ -517,7 +517,7 @@ fn compile_expr<'a>(
                 }
                 Err(MumeiError::CodegenError(format!("Field '{}' not found on '{}'", field_name, var_name)))
             } else {
-                let base_val = compile_expr(context, builder, module, function, expr, variables, array_ptrs)?;
+                let base_val = compile_expr(context, builder, module, function, expr, variables, array_ptrs, module_env)?;
                 if base_val.is_struct_value() {
                     // インデックス 0 をフォールバック
                     let sv = base_val.into_struct_value();
@@ -548,6 +548,7 @@ fn compile_pattern_test<'a>(
     pattern: &Pattern,
     target: BasicValueEnum<'a>,
     _variables: &HashMap<String, BasicValueEnum<'a>>,
+    module_env: &ModuleEnv,
 ) -> MumeiResult<inkwell::values::IntValue<'a>> {
     match pattern {
         Pattern::Wildcard | Pattern::Variable(_) => {
@@ -563,7 +564,7 @@ fn compile_pattern_test<'a>(
         Pattern::Variant { variant_name, fields } => {
             // Enum variant: tag 値で判定
             let target_int = target.into_int_value();
-            let tag_val = if let Some(enum_def) = find_enum_by_variant(variant_name) {
+            let tag_val = if let Some(enum_def) = module_env.find_enum_by_variant(variant_name) {
                 enum_def.variants.iter()
                     .position(|v| v.name == *variant_name)
                     .unwrap_or(0) as u64
@@ -587,7 +588,7 @@ fn compile_pattern_test<'a>(
                         // 将来: payload からフィールド値を取得して再帰
                         // 現在は payload がないため、ダミー値 0 で再帰テスト
                         let dummy_field: BasicValueEnum = context.i64_type().const_int(0, false).into();
-                        let field_test = compile_pattern_test(context, builder, field_pat, dummy_field, _variables)?;
+                        let field_test = compile_pattern_test(context, builder, field_pat, dummy_field, _variables, module_env)?;
                         result = llvm!(builder.build_and(result, field_test, "pat_nested_and"));
                     },
                 }
@@ -640,12 +641,17 @@ fn bind_pattern_variables<'a>(
 }
 
 /// 構造体定義からフィールド名のインデックスを検索
-fn find_field_index(type_or_var_name: &str, field_name: &str) -> Option<u32> {
-    // STRUCT_ENV に登録された全構造体を探索
+fn find_field_index(type_or_var_name: &str, field_name: &str, module_env: &ModuleEnv) -> Option<u32> {
+    // ModuleEnv に登録された構造体を探索
     // var_name が構造体型名と一致する場合、または型名を推定
-    if let Some(sdef) = get_struct_def(type_or_var_name) {
+    if let Some(sdef) = module_env.get_struct(type_or_var_name) {
         return sdef.fields.iter().position(|f| f.name == field_name).map(|i| i as u32);
     }
     // フォールバック: 全構造体定義を走査してフィールド名が一致するものを探す
+    for sdef in module_env.structs.values() {
+        if let Some(pos) = sdef.fields.iter().position(|f| f.name == field_name) {
+            return Some(pos as u32);
+        }
+    }
     None
 }

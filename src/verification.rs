@@ -130,30 +130,8 @@ impl ModuleEnv {
     }
 }
 
-// グローバル static Mutex は廃止済み。全ての状態は ModuleEnv で管理する。
-// 以下は codegen.rs からの後方互換用ヘルパー（ModuleEnv 未対応の間のみ使用）
-
-/// 精緻型名からベース型名を解決する（codegen 後方互換用）
-/// TODO: codegen を ModuleEnv 対応に移行後、削除する
-pub fn resolve_base_type(type_name: &str) -> String {
-    // codegen からの呼び出し用フォールバック: プリミティブ型はそのまま返す
-    type_name.to_string()
-}
-
-/// 構造体定義を取得する（codegen 後方互換用）
-pub fn get_struct_def(_name: &str) -> Option<StructDef> {
-    None
-}
-
-/// Atom 定義を取得する（codegen 後方互換用）
-pub fn get_atom_def(_name: &str) -> Option<Atom> {
-    None
-}
-
-/// Variant 名から所属する Enum 定義を逆引きする（codegen 後方互換用）
-pub fn find_enum_by_variant(_variant_name: &str) -> Option<EnumDef> {
-    None
-}
+// グローバル static Mutex は完全に廃止済み。
+// 全ての状態は ModuleEnv で一元管理する。
 
 pub fn verify(atom: &Atom, output_dir: &Path, module_env: &ModuleEnv) -> MumeiResult<()> {
     let mut cfg = Config::new();

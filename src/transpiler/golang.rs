@@ -1,5 +1,9 @@
 use crate::parser::{Expr, Op, Atom, ImportDecl, EnumDef, StructDef, parse_expression};
-use crate::verification::resolve_base_type;
+
+/// 型名をベース型に解決する（transpiler ローカル版）
+fn resolve_base_type(name: &str) -> String {
+    name.to_string()
+}
 
 /// import 宣言から Go のモジュールヘッダーを生成する
 /// 例: package main\nimport "path/to/math"

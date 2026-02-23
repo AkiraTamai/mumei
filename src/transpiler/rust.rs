@@ -1,5 +1,12 @@
 use crate::parser::{Expr, Op, Atom, ImportDecl, EnumDef, StructDef, parse_expression};
-use crate::verification::resolve_base_type;
+
+/// 型名をベース型に解決する（transpiler ローカル版）
+/// 精緻型の解決は ModuleEnv が担当するが、transpiler は単相化後の具体型名を受け取るため、
+/// プリミティブ型のマッピングのみで十分。
+fn resolve_base_type(name: &str) -> String {
+    // プリミティブ型はそのまま返す。精緻型名は単相化後に具体型名に置換済み。
+    name.to_string()
+}
 
 /// import 宣言から Rust のモジュールヘッダーを生成する
 /// 例: mod math; use math::*;

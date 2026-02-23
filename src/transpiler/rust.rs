@@ -106,7 +106,8 @@ pub fn transpile_impl_rust(impl_def: &ImplDef) -> String {
     let rust_type = map_type_rust(Some(&impl_def.target_type));
     lines.push(format!("impl {} for {} {{", impl_def.trait_name, rust_type));
     for (method_name, method_body) in &impl_def.method_bodies {
-        lines.push(format!("    fn {}(a: {0}, b: {0}) -> {0} {{ {} }}", method_name, rust_type, method_body));
+        lines.push(format!("    fn {name}(a: {t}, b: {t}) -> {t} {{ {body} }}",
+            name = method_name, t = rust_type, body = method_body));
     }
     lines.push("}".to_string());
     lines.join("\n")

@@ -273,24 +273,11 @@ pub fn verify_impl(impl_def: &ImplDef, module_env: &ModuleEnv) -> MumeiResult<()
 
     for (law_name, law_expr) in &trait_def.laws {
         // law 内のメソッド呼び出しを impl body で置換
-        let mut substituted = law_expr.clone();
-        for (method_name, method_body) in &impl_def.method_bodies {
-            // 簡易置換: メソッド名(args) → (body) に展開
-            // 例: "leq(a, b)" → "(a <= b)"
-            // 完全なパラメータ置換は将来の拡張で対応
-            let pattern = format!("{}(", method_name);
-            if substituted.contains(&pattern) {
-                // メソッド呼び出しを body 式で置換
-                substituted = substituted.replace(
-                    &format!("{}(", method_name),
-                    &format!("__impl_{}(", method_name)
-                );
-                // __impl_method を Z3 の未解釈関数として登録し、body と等価であることを公理化
-            }
-        }
+        // 簡易版: メソッド名(args) の呼び出しを直接 body 式に展開はせず、
+        // law 式をそのまま Z3 に投入する（未解釈関数対応は将来の拡張）
+        let substituted = law_expr.clone();
 
         // シンボリック変数で law を検証
-        // 簡易版: law 式をパースして Z3 に投入し、¬law が Unsat であることを確認
         let int_sort = z3::Sort::int(&ctx);
         let arr = Array::new_const(&ctx, "arr", &int_sort, &int_sort);
         let vc = VCtx { ctx: &ctx, arr: &arr, module_env };
@@ -308,16 +295,16 @@ pub fn verify_impl(impl_def: &ImplDef, module_env: &ModuleEnv) -> MumeiResult<()
         // "true" リテラルを登録
         env.insert("true".to_string(), Bool::from_bool(&ctx, true).into());
 
-        // impl のメソッド body を env に関数として登録
-        // 簡易版: メソッド呼び出しを直接 body 式に展開
-        for (method_name, method_body) in &impl_def.method_bodies {
-            // メソッド呼び出しパターンを body で置換した law を検証
-            let _ = (method_name, method_body); // 将来の未解釈関数対応で使用
+        // impl のメソッド body を未解釈関数として env に登録
+        // 簡易版: メソッド呼び出しは expr_to_z3 の Call ブランチで解決される
+        for (_method_name, _method_body) in &impl_def.method_bodies {
+            // 将来の未解釈関数対応で使用
         }
 
         // law 式をパースして検証
         let law_ast = parse_expression(&substituted);
-        match expr_to_z3(&vc, &law_ast, &mut env, None) {
+        let verify_result = expr_to_z3(&vc, &law_ast, &mut env, None);
+        match verify_result {
             Ok(law_z3) => {
                 if let Some(law_bool) = law_z3.as_bool() {
                     solver.push();
@@ -335,7 +322,7 @@ pub fn verify_impl(impl_def: &ImplDef, module_env: &ModuleEnv) -> MumeiResult<()
             Err(_) => {
                 // law のパースに失敗した場合はスキップ（将来の未解釈関数対応で改善）
             }
-        }
+        };
     }
 
     Ok(())

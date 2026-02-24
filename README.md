@@ -663,20 +663,26 @@ body: {
 
 ## 🧪 Negative Test Suite
 
-The following intentional constraint violations should be detected by the verifier. Create test files in `tests/negative/` — each should **fail** `mumei verify`:
+Intentional constraint violations that the verifier **must reject**. Each file in `tests/negative/` should fail `mumei verify`:
 
-| Test Case | Expected Error | Category |
+| File | Expected Error | Category |
 |---|---|---|
-| `ensures: result > 0` with `body: { 0 }` | Postcondition violated | Basic |
-| `body: { a / b }` without `b != 0` | Potential division by zero | Safety |
-| `body: { arr[n] }` without `n < len` | Potential Out-of-Bounds | Safety |
-| `match x { 0 => 1 }` (missing default) | Match is not exhaustive | Completeness |
-| `consume x; consume x;` | Double-free detected | Ownership |
-| Use variable after `consume` | Use-after-free detected | Ownership |
-| `ref x` + `consume x` | Cannot consume ref parameter | Ownership |
-| `consume` borrowed variable | Cannot consume: currently borrowed | Borrowing |
+| `postcondition_fail.mm` | Postcondition (ensures) is not satisfied | Basic |
+| `division_by_zero.mm` | Potential division by zero | Safety |
+| `array_oob.mm` | Potential Out-of-Bounds | Safety |
+| `match_non_exhaustive.mm` | Match is not exhaustive | Completeness |
+| `consume_ref_conflict.mm` | Cannot consume ref parameter | Ownership |
+| `invariant_fail.mm` | Invariant fails initially | Loop |
+| `requires_not_met.mm` | Precondition (requires) not satisfied at call site | Inter-atom |
+| `termination_fail.mm` | Decreases expression does not strictly decrease | Termination |
 
-Run negative tests with: `mumei verify tests/negative/<test>.mm` — expect verification failure.
+```bash
+# Run all negative tests (each should FAIL verification)
+for f in tests/negative/*.mm; do
+    echo "--- $f ---"
+    mumei verify "$f" && echo "UNEXPECTED PASS" || echo "EXPECTED FAIL ✓"
+done
+```
 
 ---
 
@@ -729,7 +735,16 @@ All generated code includes:
 │       │   └── math_utils.mm      # Reusable verified library
 │       └── main.mm                # Multi-file import test
 ├── tests/
-│   └── test_std_import.mm         # Standard library import integration test
+│   ├── test_std_import.mm         # Standard library import integration test
+│   └── negative/                  # Negative tests (intentional verification failures)
+│       ├── postcondition_fail.mm  # ensures violation
+│       ├── division_by_zero.mm    # potential division by zero
+│       ├── array_oob.mm           # out-of-bounds access
+│       ├── match_non_exhaustive.mm # non-exhaustive match
+│       ├── consume_ref_conflict.mm # ref + consume conflict
+│       ├── invariant_fail.mm      # loop invariant fails initially
+│       ├── requires_not_met.mm    # inter-atom precondition violation
+│       └── termination_fail.mm    # decreases does not strictly decrease
 ├── build_and_run.sh               # Build + verification suite runner (with example tests)
 ├── Cargo.toml
 └── README.md

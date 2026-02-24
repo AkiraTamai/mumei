@@ -138,6 +138,10 @@ pub struct Param {
     pub type_name: Option<String>,
     /// Generics: 型参照（TypeRef 版）。type_name との後方互換性のため両方保持。
     pub type_ref: Option<TypeRef>,
+    /// 参照渡し修飾子（Borrowing）: `ref v: Vector<T>` の場合 true。
+    /// ref パラメータは読み取り専用で貸し出され、所有権は移動しない。
+    /// 借用中は所有者が free/consume できないことを Z3 で保証する。
+    pub is_ref: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -154,6 +158,11 @@ pub struct Atom {
     pub forall_constraints: Vec<Quantifier>,
     pub ensures: String,
     pub body_expr: String,
+    /// 所有権の消費対象パラメータ名リスト（Linear Types）
+    /// `atom take(x: T) consume x;` の場合: consumed_params = ["x"]
+    /// consume されたパラメータは body 内で使用後、再利用不可となる。
+    /// LinearityCtx が Z3 と連携して二重使用・Use-After-Free を検出する。
+    pub consumed_params: Vec<String>,
 }
 
 /// 構造体フィールド定義（オプションで精緻型制約を保持）
@@ -174,6 +183,11 @@ pub struct StructDef {
     /// Generics: 型パラメータリスト（例: ["T"]）。非ジェネリックなら空。
     pub type_params: Vec<String>,
     pub fields: Vec<StructField>,
+    /// 構造体に紐付けられた Atom（メソッド）の名前リスト。
+    /// `impl Stack { atom push(...) ... }` で定義されたメソッドを追跡する。
+    /// 実際の Atom 定義は ModuleEnv.atoms に "Stack::push" のような FQN で登録される。
+    #[allow(dead_code)]
+    pub method_names: Vec<String>,
 }
 
 /// インポート宣言
@@ -203,6 +217,11 @@ pub struct TraitMethod {
     pub param_types: Vec<String>,
     /// 戻り値型名（例: "bool", "i64"）
     pub return_type: String,
+    /// パラメータごとの精緻型制約（例: "v != 0"）。制約がないパラメータは None。
+    /// `fn div(a: Self, b: Self where v != 0) -> Self;` の場合:
+    /// param_constraints = [None, Some("v != 0")]
+    #[allow(dead_code)]
+    pub param_constraints: Vec<Option<String>>,
 }
 
 /// トレイト定義
@@ -424,7 +443,7 @@ pub fn parse_module(source: &str) -> Vec<Item> {
                 }
             })
             .collect();
-        items.push(Item::StructDef(StructDef { name, type_params, fields }));
+        items.push(Item::StructDef(StructDef { name, type_params, fields, method_names: vec![] }));
     }
 
     // enum 定義: enum Name { ... } または enum Name<T> { ... }
@@ -489,22 +508,35 @@ pub fn parse_module(source: &str) -> Vec<Item> {
 
             if line.starts_with("fn ") {
                 // fn leq(a: Self, b: Self) -> bool;
+                // fn div(a: Self, b: Self where v != 0) -> Self;
                 let fn_re = Regex::new(r"fn\s+(\w+)\s*\(([^)]*)\)\s*->\s*(\w+)").unwrap();
                 if let Some(fcap) = fn_re.captures(line) {
                     let method_name = fcap[1].to_string();
                     let params_str = &fcap[2];
                     let return_type = fcap[3].to_string();
-                    let param_types: Vec<String> = params_str.split(',')
-                        .map(|p| {
-                            if let Some((_, t)) = p.split_once(':') {
+                    let mut param_types: Vec<String> = Vec::new();
+                    let mut param_constraints: Vec<Option<String>> = Vec::new();
+                    for p in params_str.split(',') {
+                        let p = p.trim();
+                        if p.is_empty() { continue; }
+                        // "b: Self where v != 0" → type="Self", constraint=Some("v != 0")
+                        if let Some((before_where, constraint)) = p.split_once("where") {
+                            let type_str = if let Some((_, t)) = before_where.split_once(':') {
                                 t.trim().to_string()
                             } else {
-                                p.trim().to_string()
-                            }
-                        })
-                        .filter(|s| !s.is_empty())
-                        .collect();
-                    methods.push(TraitMethod { name: method_name, param_types, return_type });
+                                before_where.trim().to_string()
+                            };
+                            param_types.push(type_str);
+                            param_constraints.push(Some(constraint.trim().to_string()));
+                        } else if let Some((_, t)) = p.split_once(':') {
+                            param_types.push(t.trim().to_string());
+                            param_constraints.push(None);
+                        } else {
+                            param_types.push(p.to_string());
+                            param_constraints.push(None);
+                        }
+                    }
+                    methods.push(TraitMethod { name: method_name, param_types, return_type, param_constraints });
                 }
             } else if line.starts_with("law ") {
                 // law reflexive: leq(x, x) == true;
@@ -602,16 +634,23 @@ pub fn parse_atom(source: &str) -> Atom {
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .map(|s| {
-            if let Some((param_name, type_name)) = s.split_once(':') {
+            // ref 修飾子の検出: "ref v: Vector<T>" → is_ref=true, name="v"
+            let (is_ref, s_stripped) = if s.starts_with("ref ") {
+                (true, s[4..].trim())
+            } else {
+                (false, s)
+            };
+            if let Some((param_name, type_name)) = s_stripped.split_once(':') {
                 let type_name_str = type_name.trim().to_string();
                 let type_ref = parse_type_ref(&type_name_str);
                 Param {
                     name: param_name.trim().to_string(),
                     type_name: Some(type_name_str),
                     type_ref: Some(type_ref),
+                    is_ref,
                 }
             } else {
-                Param { name: s.to_string(), type_name: None, type_ref: None }
+                Param { name: s_stripped.to_string(), type_name: None, type_ref: None, is_ref }
             }
         })
         .collect();
@@ -646,6 +685,18 @@ pub fn parse_atom(source: &str) -> Atom {
         forall_constraints.push(Quantifier { q_type: QuantifierType::Exists, var: cap[1].to_string(), start: cap[2].trim().to_string(), end: cap[3].trim().to_string(), condition: cap[4].trim().to_string() });
     }
 
+    // consume 句のパース: "consume x, y;" または "consume x;"
+    // body: の前に出現する consume 宣言を検出
+    let consume_re = Regex::new(r"consume\s+([^;]+);").unwrap();
+    let consumed_params: Vec<String> = consume_re.captures_iter(source)
+        .flat_map(|cap| {
+            cap[1].split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
     Atom {
         name,
         type_params,
@@ -655,6 +706,7 @@ pub fn parse_atom(source: &str) -> Atom {
         forall_constraints,
         ensures,
         body_expr: body_raw,
+        consumed_params,
     }
 }
 

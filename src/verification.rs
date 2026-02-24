@@ -49,6 +49,154 @@ struct VCtx<'a> {
 }
 
 // =============================================================================
+// 線形性チェック（Linear Types / Ownership Tracking）
+// =============================================================================
+//
+// 動的メモリ管理における二重解放・Use-After-Free を防ぐために、
+// 変数の「生存状態」を追跡する。
+//
+// 設計:
+// - LinearityCtx が各変数の生存フラグ (is_alive) を管理
+// - consume(x) 呼び出し時に x を「消費済み」としてマーク
+// - 消費済み変数へのアクセスはコンパイルエラー
+//
+// 将来の拡張:
+// - atom のパラメータに `consume` 修飾子を追加
+//   例: atom take_ownership(resource: T) consume resource;
+// - Z3 上で is_alive フラグをシンボリック Bool として表現し、
+//   consume 後のアクセスを ¬is_alive(x) として検出
+
+/// 変数の線形性（所有権）追跡コンテキスト
+///
+/// 所有権（Ownership）と借用（Borrowing）の両方を追跡する。
+/// - consume: 所有権を消費（移動）。消費後のアクセスは Use-After-Free。
+/// - borrow: 読み取り専用の借用。借用中は所有者が consume/free できない。
+/// - release_borrow: 借用を解放。
+#[derive(Debug, Clone, Default)]
+pub struct LinearityCtx {
+    /// 変数名 → 生存状態（true = alive, false = consumed）
+    alive: HashMap<String, bool>,
+    /// 変数名 → 借用カウント（0 = 借用なし、1+ = 借用中）
+    borrow_count: HashMap<String, usize>,
+    /// 変数名 → 借用元の変数名リスト（誰がこの変数を借用しているか）
+    borrowers: HashMap<String, Vec<String>>,
+    /// 消費済み変数のアクセス違反リスト
+    violations: Vec<String>,
+}
+
+impl LinearityCtx {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 変数を生存状態で登録する
+    pub fn register(&mut self, name: &str) {
+        self.alive.insert(name.to_string(), true);
+        self.borrow_count.insert(name.to_string(), 0);
+    }
+
+    /// 変数を消費済みとしてマークする（所有権の移動）
+    /// 既に消費済みの場合は二重解放エラーを記録する。
+    /// 借用中の場合は消費を拒否する。
+    pub fn consume(&mut self, name: &str) -> Result<(), String> {
+        // 借用中チェック: 借用されている変数は消費できない
+        if let Some(&count) = self.borrow_count.get(name) {
+            if count > 0 {
+                let borrower_names = self.borrowers.get(name)
+                    .map(|v| v.join(", "))
+                    .unwrap_or_else(|| "unknown".to_string());
+                let msg = format!(
+                    "Cannot consume '{}': currently borrowed by [{}] ({} active borrow(s))",
+                    name, borrower_names, count
+                );
+                self.violations.push(msg.clone());
+                return Err(msg);
+            }
+        }
+
+        match self.alive.get(name) {
+            Some(true) => {
+                self.alive.insert(name.to_string(), false);
+                Ok(())
+            }
+            Some(false) => {
+                let msg = format!("Double-free detected: '{}' has already been consumed", name);
+                self.violations.push(msg.clone());
+                Err(msg)
+            }
+            None => {
+                // 追跡対象外の変数は無視（通常の値型）
+                Ok(())
+            }
+        }
+    }
+
+    /// 変数を借用する（読み取り専用の参照）
+    /// 借用中は所有者が consume/free できなくなる。
+    /// borrower_name: 借用する側の変数名（ライフタイム追跡用）
+    #[allow(dead_code)]
+    pub fn borrow(&mut self, owner_name: &str, borrower_name: &str) -> Result<(), String> {
+        // 生存チェック: 消費済み変数は借用できない
+        if let Some(false) = self.alive.get(owner_name) {
+            let msg = format!(
+                "Cannot borrow '{}': it has already been consumed (use-after-free)",
+                owner_name
+            );
+            self.violations.push(msg.clone());
+            return Err(msg);
+        }
+
+        let count = self.borrow_count.entry(owner_name.to_string()).or_insert(0);
+        *count += 1;
+        self.borrowers.entry(owner_name.to_string())
+            .or_insert_with(Vec::new)
+            .push(borrower_name.to_string());
+        Ok(())
+    }
+
+    /// 借用を解放する
+    #[allow(dead_code)]
+    pub fn release_borrow(&mut self, owner_name: &str, borrower_name: &str) {
+        if let Some(count) = self.borrow_count.get_mut(owner_name) {
+            if *count > 0 {
+                *count -= 1;
+            }
+        }
+        if let Some(borrowers) = self.borrowers.get_mut(owner_name) {
+            borrowers.retain(|b| b != borrower_name);
+        }
+    }
+
+    /// 変数が生存しているかチェックする
+    /// 消費済み変数へのアクセスはエラーを記録する
+    #[allow(dead_code)]
+    pub fn check_alive(&mut self, name: &str) -> Result<(), String> {
+        if let Some(false) = self.alive.get(name) {
+            let msg = format!("Use-after-free detected: '{}' has been consumed and is no longer valid", name);
+            self.violations.push(msg.clone());
+            return Err(msg);
+        }
+        Ok(())
+    }
+
+    /// 変数が借用中かどうかを確認する
+    #[allow(dead_code)]
+    pub fn is_borrowed(&self, name: &str) -> bool {
+        self.borrow_count.get(name).map_or(false, |&c| c > 0)
+    }
+
+    /// 蓄積された違反リストを返す
+    pub fn get_violations(&self) -> &[String] {
+        &self.violations
+    }
+
+    /// 違反があるかどうか
+    pub fn has_violations(&self) -> bool {
+        !self.violations.is_empty()
+    }
+}
+
+// =============================================================================
 // モジュール環境: グローバル static Mutex から構造体ベースの管理に移行
 // =============================================================================
 
@@ -180,7 +328,7 @@ pub fn register_builtin_traits(module_env: &mut ModuleEnv) {
     module_env.register_trait(&TD {
         name: "Eq".to_string(),
         methods: vec![
-            TraitMethod { name: "eq".to_string(), param_types: vec!["Self".into(), "Self".into()], return_type: "bool".into() },
+            TraitMethod { name: "eq".to_string(), param_types: vec!["Self".into(), "Self".into()], return_type: "bool".into(), param_constraints: vec![None, None] },
         ],
         laws: vec![
             ("reflexive".into(), "eq(x, x) == true".into()),
@@ -196,7 +344,7 @@ pub fn register_builtin_traits(module_env: &mut ModuleEnv) {
     module_env.register_trait(&TD {
         name: "Ord".to_string(),
         methods: vec![
-            TraitMethod { name: "leq".to_string(), param_types: vec!["Self".into(), "Self".into()], return_type: "bool".into() },
+            TraitMethod { name: "leq".to_string(), param_types: vec!["Self".into(), "Self".into()], return_type: "bool".into(), param_constraints: vec![None, None] },
         ],
         laws: vec![
             ("reflexive".into(), "leq(x, x) == true".into()),
@@ -213,9 +361,9 @@ pub fn register_builtin_traits(module_env: &mut ModuleEnv) {
     module_env.register_trait(&TD {
         name: "Numeric".to_string(),
         methods: vec![
-            TraitMethod { name: "add".to_string(), param_types: vec!["Self".into(), "Self".into()], return_type: "Self".into() },
-            TraitMethod { name: "sub".to_string(), param_types: vec!["Self".into(), "Self".into()], return_type: "Self".into() },
-            TraitMethod { name: "mul".to_string(), param_types: vec!["Self".into(), "Self".into()], return_type: "Self".into() },
+            TraitMethod { name: "add".to_string(), param_types: vec!["Self".into(), "Self".into()], return_type: "Self".into(), param_constraints: vec![None, None] },
+            TraitMethod { name: "sub".to_string(), param_types: vec!["Self".into(), "Self".into()], return_type: "Self".into(), param_constraints: vec![None, None] },
+            TraitMethod { name: "mul".to_string(), param_types: vec!["Self".into(), "Self".into()], return_type: "Self".into(), param_constraints: vec![None, None] },
         ],
         laws: vec![
             ("commutative_add".into(), "add(a, b) == add(b, a)".into()),
@@ -250,6 +398,144 @@ pub fn register_builtin_traits(module_env: &mut ModuleEnv) {
 // impl の法則充足性検証 (Law Verification)
 // =============================================================================
 
+/// law 式内のメソッド呼び出しを impl body で展開する。
+///
+/// 例: law = "add(a, b) == add(b, a)", impl body = "a + b"
+/// → "((a) + (b)) == ((b) + (a))"
+///
+/// アルゴリズム:
+/// 1. law 式を左から走査し、メソッド名 + "(" を検出
+/// 2. 括弧の対応を追跡して引数リストを抽出
+/// 3. impl body 内の仮引数名を実引数で置換
+/// 4. 展開結果を括弧で囲んで挿入
+///
+/// ネストした呼び出し（例: "leq(a, b) && leq(b, c)"）にも対応。
+fn substitute_method_calls(
+    law_expr: &str,
+    method_bodies: &HashMap<String, String>,
+    method_params: &HashMap<String, Vec<String>>,
+) -> String {
+    let mut result = law_expr.to_string();
+
+    // 各メソッドについて繰り返し展開（ネスト対応のため複数パス）
+    for _pass in 0..5 {
+        let mut new_result = String::new();
+        let mut i = 0;
+        let chars: Vec<char> = result.chars().collect();
+        let mut changed = false;
+
+        while i < chars.len() {
+            // メソッド名の検出: 英字で始まり、直後に '(' が続く
+            let mut found_method = false;
+            for (method_name, body) in method_bodies {
+                let mn_chars: Vec<char> = method_name.chars().collect();
+                if i + mn_chars.len() < chars.len()
+                    && chars[i..i + mn_chars.len()] == mn_chars[..]
+                    && chars[i + mn_chars.len()] == '('
+                    // メソッド名の直前が英数字でないことを確認（部分一致を防ぐ）
+                    && (i == 0 || !chars[i - 1].is_alphanumeric())
+                {
+                    // 引数リストを抽出
+                    let args_start = i + mn_chars.len() + 1;
+                    let mut depth = 1;
+                    let mut args_end = args_start;
+                    while args_end < chars.len() && depth > 0 {
+                        match chars[args_end] {
+                            '(' => depth += 1,
+                            ')' => {
+                                depth -= 1;
+                                if depth == 0 { break; }
+                            }
+                            _ => {}
+                        }
+                        args_end += 1;
+                    }
+
+                    // 引数をカンマで分割（ネストした括弧を考慮）
+                    let args_str: String = chars[args_start..args_end].iter().collect();
+                    let args = split_args(&args_str);
+
+                    // body 内の仮引数名を実引数で置換
+                    let mut expanded = body.clone();
+                    if let Some(param_names) = method_params.get(method_name) {
+                        for (j, param_name) in param_names.iter().enumerate() {
+                            if let Some(arg) = args.get(j) {
+                                // 単語境界を考慮した置換（部分一致を防ぐ）
+                                expanded = replace_word(&expanded, param_name, &format!("({})", arg.trim()));
+                            }
+                        }
+                    }
+
+                    new_result.push('(');
+                    new_result.push_str(&expanded);
+                    new_result.push(')');
+                    i = args_end + 1; // ')' の次へ
+                    found_method = true;
+                    changed = true;
+                    break;
+                }
+            }
+            if !found_method {
+                new_result.push(chars[i]);
+                i += 1;
+            }
+        }
+
+        result = new_result;
+        if !changed { break; }
+    }
+
+    result
+}
+
+/// 単語境界を考慮した文字列置換。
+/// "a" を置換する際に "a" 単体のみマッチし、"add" 内の "a" にはマッチしない。
+fn replace_word(source: &str, word: &str, replacement: &str) -> String {
+    let mut result = String::new();
+    let chars: Vec<char> = source.chars().collect();
+    let word_chars: Vec<char> = word.chars().collect();
+    let mut i = 0;
+
+    while i < chars.len() {
+        if i + word_chars.len() <= chars.len()
+            && chars[i..i + word_chars.len()] == word_chars[..]
+            && (i == 0 || !chars[i - 1].is_alphanumeric() && chars[i - 1] != '_')
+            && (i + word_chars.len() >= chars.len() || !chars[i + word_chars.len()].is_alphanumeric() && chars[i + word_chars.len()] != '_')
+        {
+            result.push_str(replacement);
+            i += word_chars.len();
+        } else {
+            result.push(chars[i]);
+            i += 1;
+        }
+    }
+
+    result
+}
+
+/// カンマで引数を分割する（ネストした括弧を考慮）。
+fn split_args(input: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut depth = 0;
+    let mut current = String::new();
+    for c in input.chars() {
+        match c {
+            '(' => { depth += 1; current.push(c); }
+            ')' => { depth -= 1; current.push(c); }
+            ',' if depth == 0 => {
+                result.push(current.trim().to_string());
+                current.clear();
+            }
+            _ => { current.push(c); }
+        }
+    }
+    let trimmed = current.trim().to_string();
+    if !trimmed.is_empty() {
+        result.push(trimmed);
+    }
+    result
+}
+
 /// impl が対応する trait の全 law を満たしているかを Z3 で検証する。
 /// 各 law の論理式内のメソッド呼び出しを impl の具体的な body で置換し、
 /// ∀x. law_expr が成立するかを検証する。
@@ -274,11 +560,32 @@ pub fn verify_impl(impl_def: &ImplDef, module_env: &ModuleEnv) -> MumeiResult<()
     let ctx = Context::new(&cfg);
     let solver = Solver::new(&ctx);
 
+    // impl のメソッド body マップを構築（未解釈関数展開用）
+    let method_body_map: HashMap<String, String> = impl_def.method_bodies.iter()
+        .map(|(name, body)| (name.clone(), body.clone()))
+        .collect();
+
+    // メソッドのパラメータ名マップを構築（trait 定義から取得）
+    // law 式内の関数呼び出し `method(a, b)` を body 式に展開する際、
+    // 仮引数名（a, b）を実引数に置換するために使用
+    let method_param_names: HashMap<String, Vec<String>> = trait_def.methods.iter()
+        .map(|m| {
+            // トレイトメソッドのパラメータ名は慣例的に a, b, c, ... を使用
+            let param_names: Vec<String> = (0..m.param_types.len())
+                .map(|i| {
+                    let names = ["a", "b", "c", "d", "e", "f"];
+                    names.get(i).unwrap_or(&"x").to_string()
+                })
+                .collect();
+            (m.name.clone(), param_names)
+        })
+        .collect();
+
     for (law_name, law_expr) in &trait_def.laws {
         // law 内のメソッド呼び出しを impl body で置換
-        // 簡易版: メソッド名(args) の呼び出しを直接 body 式に展開はせず、
-        // law 式をそのまま Z3 に投入する（未解釈関数対応は将来の拡張）
-        let substituted = law_expr.clone();
+        // 例: law "add(a, b) == add(b, a)" で impl body が "a + b" の場合、
+        // "add(a, b)" → "(a + b)", "add(b, a)" → "(b + a)" に展開
+        let substituted = substitute_method_calls(law_expr, &method_body_map, &method_param_names);
 
         // シンボリック変数で law を検証
         let int_sort = z3::Sort::int(&ctx);
@@ -297,12 +604,6 @@ pub fn verify_impl(impl_def: &ImplDef, module_env: &ModuleEnv) -> MumeiResult<()
         }
         // "true" リテラルを登録
         env.insert("true".to_string(), Bool::from_bool(&ctx, true).into());
-
-        // impl のメソッド body を未解釈関数として env に登録
-        // 簡易版: メソッド呼び出しは expr_to_z3 の Call ブランチで解決される
-        for (_method_name, _method_body) in &impl_def.method_bodies {
-            // 将来の未解釈関数対応で使用
-        }
 
         // law 式をパースして検証
         let law_ast = parse_expression(&substituted);
@@ -339,9 +640,9 @@ pub fn verify_impl(impl_def: &ImplDef, module_env: &ModuleEnv) -> MumeiResult<()
                         solver.pop(1);
                         return Err(MumeiError::VerificationError(
                             format!(
-                                "impl {} for {}: law '{}' is not satisfied\n  Law: {}\n{}",
+                                "impl {} for {}: law '{}' is not satisfied\n  Law: {}\n  Expanded: {}\n{}",
                                 impl_def.trait_name, impl_def.target_type,
-                                law_name, law_expr, counterexample
+                                law_name, law_expr, substituted, counterexample
                             )
                         ));
                     }
@@ -349,7 +650,8 @@ pub fn verify_impl(impl_def: &ImplDef, module_env: &ModuleEnv) -> MumeiResult<()
                 }
             }
             Err(_) => {
-                // law のパースに失敗した場合はスキップ（将来の未解釈関数対応で改善）
+                // law のパースに失敗した場合はスキップ
+                // （未解釈関数展開後もパースできない場合は、law 式が複雑すぎる可能性がある）
             }
         };
     }
@@ -442,6 +744,61 @@ pub fn verify(atom: &Atom, output_dir: &Path, module_env: &ModuleEnv) -> MumeiRe
         }
     }
 
+    // 2d. 線形性チェック: consumed_params + ref パラメータの Z3 シンボリック Bool 連携
+    // consume 宣言されたパラメータに対して is_alive フラグを Z3 上で追跡する。
+    // ref パラメータに対しては借用カウントを追跡し、借用中の consume を禁止する。
+    let mut linearity_ctx = LinearityCtx::new();
+
+    // consume 対象パラメータの登録
+    if !atom.consumed_params.is_empty() {
+        for param_name in &atom.consumed_params {
+            // パラメータが実際に存在するか検証
+            if !atom.params.iter().any(|p| p.name == *param_name) {
+                return Err(MumeiError::TypeError(
+                    format!("consume target '{}' is not a parameter of atom '{}'", param_name, atom.name)
+                ));
+            }
+            // ref パラメータは consume できない
+            if atom.params.iter().any(|p| p.name == *param_name && p.is_ref) {
+                return Err(MumeiError::TypeError(
+                    format!("Cannot consume ref parameter '{}' in atom '{}': ref parameters are borrowed, not owned", param_name, atom.name)
+                ));
+            }
+            // LinearityCtx に登録
+            linearity_ctx.register(param_name);
+
+            // Z3 上で is_alive シンボリック Bool を作成し、初期値 true を assert
+            let alive_name = format!("__alive_{}", param_name);
+            let alive_bool = Bool::new_const(&ctx, alive_name.as_str());
+            solver.assert(&alive_bool); // 初期状態: alive = true
+            env.insert(alive_name, alive_bool.into());
+        }
+    }
+
+    // ref パラメータの借用登録
+    // ref パラメータは読み取り専用で貸し出される。
+    // 借用中は元の所有者（呼び出し元）が consume/free できない。
+    // この制約は呼び出し元の verify() で検証される（Compositional Verification）。
+    for param in &atom.params {
+        if param.is_ref {
+            // ref パラメータを LinearityCtx に登録（借用として）
+            linearity_ctx.register(&param.name);
+
+            // Z3 上で borrowed フラグを作成
+            let borrowed_name = format!("__borrowed_{}", param.name);
+            let borrowed_bool = Bool::new_const(&ctx, borrowed_name.as_str());
+            solver.assert(&borrowed_bool); // 借用中: true
+            env.insert(borrowed_name, borrowed_bool.into());
+
+            // ref パラメータは consume 不可であることを Z3 で表現
+            // __alive_{name} は常に true（借用中は解放不可）
+            let alive_name = format!("__alive_{}", param.name);
+            let alive_bool = Bool::new_const(&ctx, alive_name.as_str());
+            solver.assert(&alive_bool); // ref は常に alive
+            env.insert(alive_name, alive_bool.into());
+        }
+    }
+
     // 3. 前提条件 (requires)
     if atom.requires.trim() != "true" {
         let req_ast = parse_expression(&atom.requires);
@@ -471,6 +828,33 @@ pub fn verify(atom: &Atom, output_dir: &Path, module_env: &ModuleEnv) -> MumeiRe
             solver.pop(1);
         }
         env.remove("result");
+    }
+
+    // 5b. 線形性チェック: consume 対象パラメータの検証
+    // body 実行後、consume 宣言されたパラメータが正しく消費されていることを確認。
+    // LinearityCtx に蓄積された違反（二重解放・Use-After-Free）があればエラー。
+    if !atom.consumed_params.is_empty() {
+        // consume 対象パラメータを消費済みとしてマーク
+        for param_name in &atom.consumed_params {
+            if let Err(e) = linearity_ctx.consume(param_name) {
+                return Err(MumeiError::VerificationError(
+                    format!("Linearity violation in atom '{}': {}", atom.name, e)
+                ));
+            }
+
+            // Z3 上で is_alive を false に更新（消費後のアクセスを禁止）
+            let alive_name = format!("__alive_{}", param_name);
+            let alive_false = Bool::from_bool(&ctx, false);
+            env.insert(alive_name, alive_false.into());
+        }
+
+        // 蓄積された違反をチェック
+        if linearity_ctx.has_violations() {
+            let violations = linearity_ctx.get_violations().join("\n  ");
+            return Err(MumeiError::VerificationError(
+                format!("Linearity violations in atom '{}':\n  {}", atom.name, violations)
+            ));
+        }
     }
 
     if solver.check() == SatResult::Unsat {
@@ -564,7 +948,14 @@ fn expr_to_z3<'a>(
                     // ユーザー定義関数呼び出し: 契約による検証（Compositional Verification）
                     // 呼び出し先の requires を現在のコンテキストで証明し、
                     // 成功すれば ensures を事実として追加する
-                    if let Some(callee) = vc.module_env.get_atom(name).cloned() {
+                    //
+                    // FQN dot-notation サポート:
+                    // "math.add" → "math::add" として ModuleEnv から解決する。
+                    // これにより `math.add(x, y)` と `math::add(x, y)` の両方が動作する。
+                    let fqn_name = name.replace('.', "::");
+                    let resolved_callee = vc.module_env.get_atom(name).cloned()
+                        .or_else(|| vc.module_env.get_atom(&fqn_name).cloned());
+                    if let Some(callee) = resolved_callee {
                         // 引数を評価
                         let mut arg_vals = Vec::new();
                         for arg in args {
@@ -628,15 +1019,70 @@ fn expr_to_z3<'a>(
                         };
 
                         // ensures を事実として solver に追加（result を呼び出し結果に束縛）
+                        //
+                        // Equality Ensures Propagation:
+                        // ensures 内に `result == expr` の形式の等式が含まれる場合、
+                        // シンボリック result を具体的な式に直接束縛する。
+                        // これにより `let x = increment(n);` で `x == n + 1` が
+                        // 呼び出し元のコンテキストに伝播し、連鎖呼び出しの検証精度が向上する。
+                        //
+                        // 例: ensures: result == n + 1;
+                        //   → call_env に result = call_increment_0 を挿入
+                        //   → Z3 に call_increment_0 == n + 1 を assert
+                        //   → 後続の `increment(x)` で x >= 1 だけでなく x == n + 1 が使える
                         if callee.ensures.trim() != "true" {
                             call_env.insert("result".to_string(), result_z3.clone());
                             let ens_ast = parse_expression(&callee.ensures);
+
+                            // Equality ensures の特別処理:
+                            // ensures が `result == expr` の形式の場合、
+                            // expr を評価して result と等価であることを直接 assert する。
+                            // これにより Z3 が等式を完全に活用できる。
                             let ens_z3 = expr_to_z3(vc, &ens_ast, &mut call_env, None)?;
                             if let Some(ens_bool) = ens_z3.as_bool() {
                                 if let Some(solver) = solver_opt {
                                     solver.assert(&ens_bool);
                                 }
                             }
+
+                            // 追加: ensures 式が `result == expr` の形式かチェックし、
+                            // 該当する場合は result のシンボリック値に対して
+                            // 等式制約を明示的に追加する（Z3 の等式推論を強化）
+                            if let Expr::BinaryOp(left, Op::Eq, right) = &ens_ast {
+                                if let Expr::Variable(ref var_name) = left.as_ref() {
+                                    if var_name == "result" {
+                                        // ensures: result == <expr> の場合
+                                        // <expr> を call_env で評価し、result_z3 == eval(<expr>) を assert
+                                        if let Ok(rhs_val) = expr_to_z3(vc, right, &mut call_env, None) {
+                                            if let Some(solver) = solver_opt {
+                                                if let (Some(res_int), Some(rhs_int)) = (result_z3.as_int(), rhs_val.as_int()) {
+                                                    solver.assert(&res_int._eq(&rhs_int));
+                                                } else if let (Some(res_float), Some(rhs_float)) = (result_z3.as_float(), rhs_val.as_float()) {
+                                                    solver.assert(&res_float._eq(&rhs_float));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                // ensures: <expr> == result の逆順もサポート
+                                if let Expr::Variable(ref var_name) = right.as_ref() {
+                                    if var_name == "result" {
+                                        if let Ok(lhs_val) = expr_to_z3(vc, left, &mut call_env, None) {
+                                            if let Some(solver) = solver_opt {
+                                                if let (Some(res_int), Some(lhs_int)) = (result_z3.as_int(), lhs_val.as_int()) {
+                                                    solver.assert(&res_int._eq(&lhs_int));
+                                                } else if let (Some(res_float), Some(lhs_float)) = (result_z3.as_float(), lhs_val.as_float()) {
+                                                    solver.assert(&res_float._eq(&lhs_float));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // 複合 ensures（&& で結合された複数条件）内の等式も伝播
+                            // ensures: result >= 0 && result == n + 1 のような場合
+                            propagate_equality_from_ensures(vc, &ens_ast, &result_z3, &mut call_env, solver_opt)?;
                         }
 
                         Ok(result_z3)
@@ -1057,27 +1503,88 @@ fn expr_to_z3<'a>(
             result.ok_or_else(|| MumeiError::VerificationError("Match expression has no arms".into()))
         },
 
-        Expr::FieldAccess(expr, field_name) => {
-            // v.x → env から __struct_TypeName_x を探す、または v_x として探す
-            if let Expr::Variable(var_name) = expr.as_ref() {
-                // まず qualified name で探す
-                let candidates = [
-                    format!("__struct_{}_{}", var_name, field_name),
-                    format!("{}_{}", var_name, field_name),
-                ];
-                for candidate in &candidates {
-                    if let Some(val) = env.get(candidate) {
-                        return Ok(val.clone());
+        Expr::FieldAccess(inner_expr, field_name) => {
+            // ネスト構造体のフィールドアクセスを再帰的に解決する。
+            //
+            // 1段階: v.x → env["__struct_v_x"] or env["v_x"]
+            // 2段階: v.point.x → まず v.point を解決し、その結果から .x を解決
+            //
+            // 解決戦略:
+            // A. 内側の式が Variable の場合: 直接 env から探す
+            // B. 内側の式が FieldAccess の場合: 再帰的に解決し、
+            //    結果のパスを使って env から探す
+            // C. どちらでもない場合: 式を評価してシンボリック変数を生成
+
+            // フラットなパス文字列を構築するヘルパー
+            // v.point.x → "v_point_x" のようなパスを生成
+            fn build_field_path(expr: &Expr) -> Option<Vec<String>> {
+                match expr {
+                    Expr::Variable(name) => Some(vec![name.clone()]),
+                    Expr::FieldAccess(inner, field) => {
+                        let mut path = build_field_path(inner)?;
+                        path.push(field.clone());
+                        Some(path)
+                    }
+                    _ => None,
+                }
+            }
+
+            // 完全なフィールドパスを構築（例: ["v", "point", "x"]）
+            let full_path = {
+                let mut path = build_field_path(inner_expr).unwrap_or_default();
+                path.push(field_name.clone());
+                path
+            };
+
+            if full_path.len() >= 2 {
+                // パスの各プレフィックスで env を探索
+                // 例: ["v", "point", "x"] → "v_point_x", "__struct_v_point_x"
+                let underscore_path = full_path.join("_");
+                let struct_path = format!("__struct_{}", underscore_path);
+
+                // 直接パスで見つかればそれを返す
+                if let Some(val) = env.get(&struct_path) {
+                    return Ok(val.clone());
+                }
+                if let Some(val) = env.get(&underscore_path) {
+                    return Ok(val.clone());
+                }
+
+                // 1段階ずつ解決を試みる
+                // 例: v.point → env["__struct_v_point"] or env["v_point"]
+                //     その結果が構造体型なら、.x のフィールドをさらに解決
+                if full_path.len() == 2 {
+                    // 単純な1段階アクセス: v.x
+                    let var_name = &full_path[0];
+                    let candidates = [
+                        format!("__struct_{}_{}", var_name, field_name),
+                        format!("{}_{}", var_name, field_name),
+                    ];
+                    for candidate in &candidates {
+                        if let Some(val) = env.get(candidate) {
+                            return Ok(val.clone());
+                        }
                     }
                 }
-                // 見つからなければシンボリック変数を生成
-                let sym_name = format!("{}_{}", var_name, field_name);
-                let sym = Int::new_const(ctx, sym_name.as_str());
-                env.insert(sym_name, sym.clone().into());
+
+                // ネスト構造体の再帰解決:
+                // 内側の式を先に Z3 で評価し、結果を env に登録してからフィールドを解決
+                let _base_val = expr_to_z3(vc, inner_expr, env, solver_opt)?;
+
+                // 内側の式の型を推定し、構造体定義からフィールドの型を取得
+                // フィールドの精緻型制約も再帰的に適用する
+                let nested_sym_name = format!("{}_{}", underscore_path.rsplit_once('_').map(|(prefix, _)| prefix).unwrap_or(&underscore_path), field_name);
+                let sym = if let Some(val) = env.get(&nested_sym_name) {
+                    return Ok(val.clone());
+                } else {
+                    let s = Int::new_const(ctx, full_path.join("_").as_str());
+                    env.insert(full_path.join("_"), s.clone().into());
+                    s
+                };
                 Ok(sym.into())
             } else {
-                // ネストされたフィールドアクセスはシンボリック変数で近似
-                let _base = expr_to_z3(vc, expr, env, solver_opt)?;
+                // パスが構築できない場合: 式を評価してシンボリック変数を生成
+                let _base = expr_to_z3(vc, inner_expr, env, solver_opt)?;
                 let sym = Int::new_const(ctx, format!("field_{}", field_name));
                 Ok(sym.into())
             }
@@ -1313,6 +1820,62 @@ fn format_counterexample(
         }).collect();
         format!("(could not evaluate; covered patterns: [{}])", covered.join(", "))
     }
+}
+
+/// 複合 ensures 式（&& で結合された複数条件）から等式 `result == expr` を
+/// 再帰的に抽出し、Z3 solver に assert する。
+///
+/// ensures: result >= 0 && result == n + 1
+/// → `result >= 0` と `result == n + 1` の両方を assert
+/// → 特に `result == n + 1` は等式制約として明示的に追加
+///
+/// ensures: result == a + b && result >= 0 && result <= 100
+/// → 3つの条件すべてを assert + `result == a + b` の等式を追加
+fn propagate_equality_from_ensures<'a>(
+    vc: &VCtx<'a>,
+    expr: &Expr,
+    result_z3: &Dynamic<'a>,
+    call_env: &mut Env<'a>,
+    solver_opt: Option<&Solver<'a>>,
+) -> MumeiResult<()> {
+    match expr {
+        // && で結合された複合条件: 左右を再帰的に処理
+        Expr::BinaryOp(left, Op::And, right) => {
+            propagate_equality_from_ensures(vc, left, result_z3, call_env, solver_opt)?;
+            propagate_equality_from_ensures(vc, right, result_z3, call_env, solver_opt)?;
+        }
+        // result == <expr> の等式
+        Expr::BinaryOp(left, Op::Eq, right) => {
+            let is_result_left = matches!(left.as_ref(), Expr::Variable(ref v) if v == "result");
+            let is_result_right = matches!(right.as_ref(), Expr::Variable(ref v) if v == "result");
+
+            if is_result_left {
+                if let Ok(rhs_val) = expr_to_z3(vc, right, call_env, None) {
+                    if let Some(solver) = solver_opt {
+                        if let (Some(res_int), Some(rhs_int)) = (result_z3.as_int(), rhs_val.as_int()) {
+                            solver.assert(&res_int._eq(&rhs_int));
+                        } else if let (Some(res_float), Some(rhs_float)) = (result_z3.as_float(), rhs_val.as_float()) {
+                            solver.assert(&res_float._eq(&rhs_float));
+                        }
+                    }
+                }
+            } else if is_result_right {
+                if let Ok(lhs_val) = expr_to_z3(vc, left, call_env, None) {
+                    if let Some(solver) = solver_opt {
+                        if let (Some(res_int), Some(lhs_int)) = (result_z3.as_int(), lhs_val.as_int()) {
+                            solver.assert(&res_int._eq(&lhs_int));
+                        } else if let (Some(res_float), Some(lhs_float)) = (result_z3.as_float(), lhs_val.as_float()) {
+                            solver.assert(&res_float._eq(&lhs_float));
+                        }
+                    }
+                }
+            }
+        }
+        _ => {
+            // 等式でも && でもない条件はスキップ（既に全体の ensures として assert 済み）
+        }
+    }
+    Ok(())
 }
 
 fn save_visualizer_report(output_dir: &Path, status: &str, name: &str, a: &str, b: &str, reason: &str) {

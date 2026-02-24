@@ -18,8 +18,10 @@ Developers and AI agents must define **Immutable Truths (requires/ensures)** bef
 All logic must be encapsulated within an `atom`.
 
 * **requires**: Conditions that must be satisfied *before* execution.
-* **ensures**: Outcomes that are guaranteed *after* execution.
+* **ensures**: Outcomes that are guaranteed *after* execution. Use `result == expr` for precise equality propagation across chained calls.
 * **body**: The implementation of the algorithm. Using `{}` block syntax and `let` variable bindings is highly recommended.
+* **consume**: Declares ownership transfer. `consume x;` marks parameter `x` as consumed — it cannot be used after the atom returns.
+* **ref**: Declares read-only borrowing. `ref v: T` allows access without taking ownership. The owner cannot `consume` during the borrow.
 
 ### 2.2 Ironclad Rules for Control Flow
 
@@ -44,6 +46,32 @@ When handling arrays or ranges, use `forall` to define boundary conditions.
 
 *Example*: `requires: forall(i, 0, len, arr[i] > 0);`
 
+### 3.3 Ownership and Borrowing
+
+When working with heap-allocated resources (`Vector<T>`, `HashMap<K, V>`), follow these rules:
+
+* **consume**: Use `consume x;` to declare that a parameter's ownership is transferred. After consumption, the variable is dead — any subsequent access is a compile-time error.
+* **ref**: Use `ref v: T` for read-only access. The caller retains ownership, and the callee cannot free or consume the resource.
+* **No double-free**: The compiler's `LinearityCtx` tracks liveness via Z3 symbolic Bools. Consuming an already-consumed variable triggers: `Double-free detected`.
+* **No use-after-free**: Accessing a consumed variable triggers: `Use-after-free detected`.
+* **No consume during borrow**: Attempting to consume a borrowed variable triggers: `Cannot consume: currently borrowed`.
+
+> **Bad**: `atom drop(ref v: i64) consume v;` — ref and consume conflict
+> **Good**: `atom drop(v: i64) consume v;` — ownership transfer without borrow
+
+### 3.4 Trait Laws and Verification
+
+When defining traits with `law` clauses, the compiler expands method calls using `impl` bodies and verifies with Z3:
+
+* `law commutative_add: add(a, b) == add(b, a)` → expanded to `(a + b) == (b + a)` → Z3 proves directly.
+* Use `where` constraints on trait method parameters: `fn div(a: Self, b: Self where v != 0) -> Self;`
+
+### 3.5 Standard Library Usage
+
+* **Prelude** (`std/prelude.mm`): Auto-imported. Provides `Eq`, `Ord`, `Numeric`, `Option<T>`, `Result<T, E>`.
+* **Alloc** (`std/alloc.mm`): Import with `import "std/alloc" as alloc;`. Provides `Vector<T>`, `HashMap<K, V>`, `alloc_raw`, `dealloc_raw`.
+* **FQN dot-notation**: `math.add(x, y)` is equivalent to `math::add(x, y)`.
+
 ---
 
 ## 4. Self-Healing Protocol (Handling Verification Failure)
@@ -61,20 +89,21 @@ If verification is marked as `Failed`, the developer or AI agent should follow t
 
 Understand the following characteristics of the code exported by Mumei:
 
-| Language | Characteristics | Primary Use Case |
-| --- | --- | --- |
-| **LLVM IR** | Fast, Native Execution | Performance-critical core logic |
-| **Rust** | Ownership & Type Safety | Integration into high-reliability systems |
-| **Go** | Simplicity & Concurrency | Microservices and Backend systems |
-| **TypeScript** | Flexible & Web-Friendly | Frontend and Edge computing |
+| Language | Characteristics | Ownership Mapping | Primary Use Case |
+| --- | --- | --- | --- |
+| **LLVM IR** | Fast, Native Execution | `alloc_raw` → `malloc`, `dealloc_raw` → `free` | Performance-critical core logic |
+| **Rust** | Ownership & Type Safety | `ref` → `&T`, `consume` → move semantics | Integration into high-reliability systems |
+| **Go** | Simplicity & Concurrency | Comment-based documentation | Microservices and Backend systems |
+| **TypeScript** | Flexible & Web-Friendly | `ref` → `/* readonly */` annotation | Frontend and Edge computing |
 
 ---
 
 ## 6. Numeric Safety
 
-* **Optimization for i64**: The current verification engine is optimized for `i64` (Int64).
-* **Overflow Responsibility**: If there is a risk of overflow in arithmetic operations, limit the value range in the `requires` clause. *Note: In future updates, boundary checking will be automated, making these explicit constraints unnecessary.*
-* **Precision Alternatives**: Until floating-point support is implemented, using a "fixed-point" approach (e.g., multiplying by 1000 and treating as an integer) is recommended. Once `f64` support is added, rigorous verification including rounding errors will be possible.
+* **Optimization for i64**: The current verification engine is optimized for `i64` (Int64). `u64` and `f64` are also supported.
+* **Overflow Responsibility**: If there is a risk of overflow in arithmetic operations, limit the value range in the `requires` clause.
+* **Float Verification**: `f64` is supported with sign propagation (pos×pos→pos, etc.). Use `type Pos = f64 where v > 0.0;` for positive-only floats.
+* **Zero-Division Prevention**: The `Numeric` trait's `div` method carries `where v != 0` on the divisor. Z3 checks this at every call site automatically.
 
 ---
 
@@ -96,7 +125,32 @@ Mumei serves as a bridge between heavyweight formal proof assistants and modern 
 | **Verif. Engine** | Custom Kernel / Lean Checker | Coq Kernel | **Z3 SMT Solver (Automated priority)** |
 | **Automation** | Partially automated, mainly manual | Mainly manual (via Ltac, etc.) | **Fully Automated (requires/ensures)** |
 | **Target Output** | Lean runtime, C | OCaml, Haskell, Scheme, etc. | **LLVM IR, Rust, Go, TypeScript** |
+| **Memory Safety** | GC / managed | GC / extracted | **Ownership + Borrowing (Z3-verified)** |
 | **AI Synergy** | Research stage (LLM tactics) | Research stage | **Native (JSON reports / Self-healing)** |
 | **Design Logic** | Expressing math through code | Building proofs as programs | **Preventing "unforged" (unsafe) code** |
+
+---
+
+## 9. Incremental Build
+
+Mumei caches verification results per-atom in `.mumei_build_cache`:
+
+* Each atom's hash is computed from `name | requires | ensures | body_expr | consume | ref`.
+* If the hash matches the cached value, Z3 verification is **skipped** — significantly reducing build times.
+* If verification **fails**, the atom is removed from cache and will be re-verified next time.
+
+> On the second run: `✅ Verification passed: 2 verified, 6 skipped (unchanged) ⚡`
+
+---
+
+## 10. Documentation
+
+| Document | Purpose |
+| --- | --- |
+| `README.md` | Language overview, features, quickstart |
+| `docs/ARCHITECTURE.md` | Compiler internals, pipeline, ModuleEnv, LinearityCtx |
+| `docs/STDLIB.md` | Standard library reference (all modules + atoms) |
+| `docs/CHANGELOG.md` | PR #16 change history |
+| `instruction.md` | This file — forging guidelines for developers and AI agents |
 
 ---

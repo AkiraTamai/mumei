@@ -123,6 +123,14 @@ fn load_and_prepare(input: &str) -> (Vec<Item>, verification::ModuleEnv, Vec<Imp
     verification::register_builtin_traits(&mut module_env);
     let input_path = Path::new(input);
     let base_dir = input_path.parent().unwrap_or(Path::new("."));
+
+    // std/prelude.mm の自動ロード（Eq, Ord, Numeric, Option<T>, Result<T, E> 等）
+    // prelude が見つからない場合は組み込みトレイトがフォールバックとして機能する
+    if let Err(e) = resolver::resolve_prelude(base_dir, &mut module_env) {
+        eprintln!("  ⚠️  Prelude load warning: {}", e);
+        // prelude のロード失敗は致命的ではない（組み込みトレイトが代替）
+    }
+
     if let Err(e) = resolver::resolve_imports(&items, base_dir, &mut module_env) {
         eprintln!("  ❌ Import Resolution Failed: {}", e);
         std::process::exit(1);
@@ -194,8 +202,15 @@ fn cmd_verify(input: &str) {
     let (items, mut module_env, _imports) = load_and_prepare(input);
 
     let output_dir = Path::new(".");
+    let input_path = Path::new(input);
+    let base_dir = input_path.parent().unwrap_or(Path::new("."));
     let mut verified = 0;
     let mut failed = 0;
+    let mut skipped = 0;
+
+    // Incremental Build: ビルドキャッシュをロード
+    let build_cache = resolver::load_build_cache(base_dir);
+    let mut new_cache = std::collections::HashMap::new();
 
     for item in &items {
         match item {
@@ -216,6 +231,19 @@ fn cmd_verify(input: &str) {
                 if module_env.is_verified(&atom.name) {
                     println!("  ⚖️  '{}': skipped (imported, contract-trusted)", atom.name);
                 } else {
+                    // Incremental Build: atom のハッシュを計算してキャッシュと比較
+                    let atom_hash = resolver::compute_atom_hash(atom);
+                    new_cache.insert(atom.name.clone(), atom_hash.clone());
+
+                    if let Some(cached_hash) = build_cache.get(&atom.name) {
+                        if *cached_hash == atom_hash {
+                            println!("  ⚖️  '{}': skipped (unchanged, cached) ⏩", atom.name);
+                            module_env.mark_verified(&atom.name);
+                            skipped += 1;
+                            continue;
+                        }
+                    }
+
                     match verification::verify(atom, output_dir, &module_env) {
                         Ok(_) => {
                             println!("  ⚖️  '{}': verified ✅", atom.name);
@@ -224,6 +252,8 @@ fn cmd_verify(input: &str) {
                         }
                         Err(e) => {
                             eprintln!("  ❌ '{}': verification failed: {}", atom.name, e);
+                            // 検証失敗した atom はキャッシュから除外
+                            new_cache.remove(&atom.name);
                             failed += 1;
                         }
                     }
@@ -233,12 +263,19 @@ fn cmd_verify(input: &str) {
         }
     }
 
+    // Incremental Build: キャッシュを保存
+    resolver::save_build_cache(base_dir, &new_cache);
+
     println!("");
     if failed > 0 {
-        eprintln!("❌ Verification: {} passed, {} failed", verified, failed);
+        eprintln!("❌ Verification: {} passed, {} failed, {} skipped (cached)", verified, failed, skipped);
         std::process::exit(1);
     }
-    println!("✅ Verification passed: {} item(s) verified", verified);
+    if skipped > 0 {
+        println!("✅ Verification passed: {} verified, {} skipped (unchanged) ⚡", verified, skipped);
+    } else {
+        println!("✅ Verification passed: {} item(s) verified", verified);
+    }
 }
 
 // =============================================================================
@@ -315,6 +352,12 @@ fn cmd_build(input: &str, output: &str) {
     let output_path = Path::new(output);
     let output_dir = output_path.parent().unwrap_or(Path::new("."));
     let file_stem = output_path.file_stem().and_then(|s| s.to_str()).unwrap_or(output);
+    let input_path = Path::new(input);
+    let build_base_dir = input_path.parent().unwrap_or(Path::new("."));
+
+    // Incremental Build: ビルドキャッシュをロード
+    let build_cache = resolver::load_build_cache(build_base_dir);
+    let mut build_cache_new = std::collections::HashMap::new();
 
     let mut atom_count = 0;
 
@@ -407,14 +450,27 @@ fn cmd_build(input: &str, output: &str) {
                 if module_env.is_verified(&atom.name) {
                     println!("  ⚖️  [2/4] Verification: Skipped (imported, contract-trusted).");
                 } else {
-                    match verification::verify(atom, output_dir, &module_env) {
-                        Ok(_) => {
-                            println!("  ⚖️  [2/4] Verification: Passed. Logic verified with Z3.");
-                            module_env.mark_verified(&atom.name);
-                        },
-                        Err(e) => {
-                            eprintln!("  ❌ [2/4] Verification: Failed! Flaw detected: {}", e);
-                            std::process::exit(1);
+                    // Incremental Build: atom ハッシュでキャッシュ比較
+                    let atom_hash = resolver::compute_atom_hash(atom);
+                    build_cache_new.insert(atom.name.clone(), atom_hash.clone());
+
+                    let cache_hit = build_cache.get(&atom.name)
+                        .map_or(false, |cached| *cached == atom_hash);
+
+                    if cache_hit {
+                        println!("  ⚖️  [2/4] Verification: Skipped (unchanged, cached) ⏩");
+                        module_env.mark_verified(&atom.name);
+                    } else {
+                        match verification::verify(atom, output_dir, &module_env) {
+                            Ok(_) => {
+                                println!("  ⚖️  [2/4] Verification: Passed. Logic verified with Z3.");
+                                module_env.mark_verified(&atom.name);
+                            },
+                            Err(e) => {
+                                eprintln!("  ❌ [2/4] Verification: Failed! Flaw detected: {}", e);
+                                build_cache_new.remove(&atom.name);
+                                std::process::exit(1);
+                            }
                         }
                     }
                 }
@@ -467,6 +523,9 @@ fn cmd_build(input: &str, output: &str) {
     } else {
         println!("⚠️  Warning: No atoms found in the source file.");
     }
+
+    // Incremental Build: ビルドキャッシュを保存
+    resolver::save_build_cache(build_base_dir, &build_cache_new);
 }
 
 // end of src/main.rs

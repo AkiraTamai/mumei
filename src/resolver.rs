@@ -35,6 +35,11 @@ struct CacheEntry {
     type_names: Vec<String>,
     /// 構造体定義名のリスト
     struct_names: Vec<String>,
+    /// Incremental Build: atom ごとの契約+body ハッシュ
+    /// atom の requires/ensures/body_expr が変更されていなければ再検証をスキップする。
+    /// キー: atom 名、値: SHA-256(name + requires + ensures + body_expr)
+    #[serde(default)]
+    atom_hashes: HashMap<String, String>,
 }
 
 /// キャッシュファイル全体
@@ -67,6 +72,53 @@ pub fn resolve_imports(items: &[Item], base_dir: &Path, module_env: &mut ModuleE
     let mut ctx = ResolverContext::new();
     resolve_imports_recursive(items, base_dir, &mut ctx, &mut cache, module_env)?;
     save_cache(&cache_path, &cache);
+    Ok(())
+}
+
+/// std/prelude.mm を自動的にロードし、ModuleEnv に登録する。
+/// ユーザーが `import "std/prelude"` を書かなくても、
+/// Eq, Ord, Numeric, Option<T>, Result<T, E> 等が利用可能になる。
+///
+/// prelude の定義はトレイト・ADT のみを登録し、atom は検証済みとしてマークする。
+/// prelude が見つからない場合はスキップする（組み込みトレイトがフォールバックとして機能）。
+pub fn resolve_prelude(base_dir: &Path, module_env: &mut ModuleEnv) -> MumeiResult<()> {
+    // prelude のパスを解決（見つからなければスキップ）
+    let prelude_path = match resolve_path("std/prelude", base_dir) {
+        Ok(path) => path,
+        Err(_) => {
+            // prelude が見つからない場合は静かにスキップ
+            // （組み込みトレイト register_builtin_traits が代替として機能）
+            return Ok(());
+        }
+    };
+
+    // prelude を読み込み・パース
+    let source = match fs::read_to_string(&prelude_path) {
+        Ok(s) => s,
+        Err(_) => return Ok(()), // 読み込み失敗もスキップ
+    };
+
+    let prelude_items = parser::parse_module(&source);
+
+    // prelude 内の import を再帰的に解決（prelude 自身が他モジュールに依存する場合）
+    let prelude_base_dir = prelude_path.parent().unwrap_or(Path::new("."));
+    let cache_path = prelude_base_dir.join(".mumei_cache");
+    let mut cache = load_cache(&cache_path);
+    let mut ctx = ResolverContext::new();
+    ctx.loading.insert(prelude_path.clone());
+    resolve_imports_recursive(&prelude_items, prelude_base_dir, &mut ctx, &mut cache, module_env)?;
+    save_cache(&cache_path, &cache);
+
+    // prelude の定義を ModuleEnv に登録（alias なし = グローバルスコープ）
+    register_imported_items(&prelude_items, None, module_env);
+
+    // prelude の atom を検証済みとしてマーク
+    for item in &prelude_items {
+        if let Item::Atom(atom) = item {
+            module_env.mark_verified(&atom.name);
+        }
+    }
+
     Ok(())
 }
 /// 再帰的にインポートを解決する内部関数
@@ -150,6 +202,7 @@ fn resolve_imports_recursive(
                 verified_atoms,
                 type_names,
                 struct_names,
+                atom_hashes: HashMap::new(),
             });
 
             // ロード完了
@@ -304,6 +357,50 @@ fn compute_hash(source: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(source.as_bytes());
     format!("{:x}", hasher.finalize())
+}
+
+/// Atom の契約+body のハッシュを計算する（Incremental Build 用）
+/// name + requires + ensures + body_expr を結合してハッシュ化する。
+/// このハッシュが一致すれば、atom の検証結果は変わらないため再検証をスキップできる。
+pub fn compute_atom_hash(atom: &crate::parser::Atom) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(atom.name.as_bytes());
+    hasher.update(b"|");
+    hasher.update(atom.requires.as_bytes());
+    hasher.update(b"|");
+    hasher.update(atom.ensures.as_bytes());
+    hasher.update(b"|");
+    hasher.update(atom.body_expr.as_bytes());
+    // consumed_params も含める（所有権制約の変更を検出）
+    for cp in &atom.consumed_params {
+        hasher.update(b"|consume:");
+        hasher.update(cp.as_bytes());
+    }
+    // ref パラメータも含める
+    for p in &atom.params {
+        if p.is_ref {
+            hasher.update(b"|ref:");
+            hasher.update(p.name.as_bytes());
+        }
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+/// Incremental Build 用: メインファイルのビルドキャッシュをロードする
+pub fn load_build_cache(base_dir: &Path) -> HashMap<String, String> {
+    let cache_path = base_dir.join(".mumei_build_cache");
+    fs::read_to_string(&cache_path)
+        .ok()
+        .and_then(|content| serde_json::from_str(&content).ok())
+        .unwrap_or_default()
+}
+
+/// Incremental Build 用: メインファイルのビルドキャッシュを保存する
+pub fn save_build_cache(base_dir: &Path, cache: &HashMap<String, String>) {
+    let cache_path = base_dir.join(".mumei_build_cache");
+    if let Ok(json) = serde_json::to_string_pretty(cache) {
+        let _ = fs::write(cache_path, json);
+    }
 }
 
 /// キャッシュファイルを読み込む。存在しない場合は空のキャッシュを返す。

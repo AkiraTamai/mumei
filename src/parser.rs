@@ -186,6 +186,7 @@ pub struct StructDef {
     /// 構造体に紐付けられた Atom（メソッド）の名前リスト。
     /// `impl Stack { atom push(...) ... }` で定義されたメソッドを追跡する。
     /// 実際の Atom 定義は ModuleEnv.atoms に "Stack::push" のような FQN で登録される。
+    #[allow(dead_code)]
     pub method_names: Vec<String>,
 }
 
@@ -219,6 +220,7 @@ pub struct TraitMethod {
     /// パラメータごとの精緻型制約（例: "v != 0"）。制約がないパラメータは None。
     /// `fn div(a: Self, b: Self where v != 0) -> Self;` の場合:
     /// param_constraints = [None, Some("v != 0")]
+    #[allow(dead_code)]
     pub param_constraints: Vec<Option<String>>,
 }
 

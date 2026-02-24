@@ -134,6 +134,7 @@ impl LinearityCtx {
     /// 変数を借用する（読み取り専用の参照）
     /// 借用中は所有者が consume/free できなくなる。
     /// borrower_name: 借用する側の変数名（ライフタイム追跡用）
+    #[allow(dead_code)]
     pub fn borrow(&mut self, owner_name: &str, borrower_name: &str) -> Result<(), String> {
         // 生存チェック: 消費済み変数は借用できない
         if let Some(false) = self.alive.get(owner_name) {
@@ -154,6 +155,7 @@ impl LinearityCtx {
     }
 
     /// 借用を解放する
+    #[allow(dead_code)]
     pub fn release_borrow(&mut self, owner_name: &str, borrower_name: &str) {
         if let Some(count) = self.borrow_count.get_mut(owner_name) {
             if *count > 0 {
@@ -167,6 +169,7 @@ impl LinearityCtx {
 
     /// 変数が生存しているかチェックする
     /// 消費済み変数へのアクセスはエラーを記録する
+    #[allow(dead_code)]
     pub fn check_alive(&mut self, name: &str) -> Result<(), String> {
         if let Some(false) = self.alive.get(name) {
             let msg = format!("Use-after-free detected: '{}' has been consumed and is no longer valid", name);

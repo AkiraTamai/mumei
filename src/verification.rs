@@ -1566,7 +1566,7 @@ fn expr_to_z3<'a>(
 
                 // ネスト構造体の再帰解決:
                 // 内側の式を先に Z3 で評価し、結果を env に登録してからフィールドを解決
-                let base_val = expr_to_z3(vc, inner_expr, env, solver_opt)?;
+                let _base_val = expr_to_z3(vc, inner_expr, env, solver_opt)?;
 
                 // 内側の式の型を推定し、構造体定義からフィールドの型を取得
                 // フィールドの精緻型制約も再帰的に適用する

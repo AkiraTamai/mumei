@@ -202,6 +202,7 @@ fn resolve_imports_recursive(
                 verified_atoms,
                 type_names,
                 struct_names,
+                atom_hashes: HashMap::new(),
             });
 
             // ロード完了

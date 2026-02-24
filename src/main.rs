@@ -209,7 +209,7 @@ fn cmd_verify(input: &str) {
     let mut skipped = 0;
 
     // Incremental Build: ビルドキャッシュをロード
-    let mut build_cache = resolver::load_build_cache(base_dir);
+    let build_cache = resolver::load_build_cache(base_dir);
     let mut new_cache = std::collections::HashMap::new();
 
     for item in &items {

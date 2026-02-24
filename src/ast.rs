@@ -306,6 +306,7 @@ impl Monomorphizer {
             name: mono_name,
             type_params: vec![], // 単相化後は型パラメータなし
             fields,
+            method_names: vec![],
         })
     }
 
@@ -352,6 +353,7 @@ impl Monomorphizer {
                     name: p.name.clone(),
                     type_name: Some(new_type_ref.display_name()),
                     type_ref: Some(new_type_ref),
+                    is_ref: p.is_ref,
                 }
             } else {
                 p.clone()
@@ -367,6 +369,7 @@ impl Monomorphizer {
             forall_constraints: generic.forall_constraints.clone(),
             ensures: generic.ensures.clone(),
             body_expr: generic.body_expr.clone(),
+            consumed_params: generic.consumed_params.clone(),
         })
     }
 

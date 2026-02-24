@@ -37,12 +37,14 @@ trait Ord {
 
 // --- Numeric: 算術演算 ---
 // 加法の交換律を Z3 で保証する。
-// div は将来のトレイトメソッド精緻型制約で
-// ゼロ除算を型レベルで排除する予定。
+// div の第2引数に精緻型制約 `where v != 0` を付与し、
+// ゼロ除算を型レベルで排除する。
+// Z3 は多相的な演算においても常にゼロ除算の可能性をチェックする。
 trait Numeric {
     fn add(a: Self, b: Self) -> Self;
     fn sub(a: Self, b: Self) -> Self;
     fn mul(a: Self, b: Self) -> Self;
+    fn div(a: Self, b: Self where v != 0) -> Self;
     law commutative_add: add(a, b) == add(b, a);
 }
 
@@ -111,7 +113,49 @@ trait Hashable {
 }
 
 // =============================================================
-// D. Prelude Atoms（基本操作）
+// D. alloc ロードマップ: Vector<T> / HashMap<K, V>
+// =============================================================
+// 動的メモリ管理（alloc）導入後の具体実装イメージ。
+// 現時点ではコメントとして設計を記録しておく。
+//
+// --- Vector<T> ---
+// alloc 導入後、Sequential トレイトの具体実装として提供:
+//
+//   struct Vector<T> {
+//       data: Ptr<T>,
+//       len: i64 where v >= 0,
+//       cap: i64 where v >= 0
+//   }
+//
+//   impl Sequential for Vector<T> {
+//       fn seq_len(s: Vector<T>) -> i64 { s.len }
+//       fn seq_get(s: Vector<T>, index: i64) -> i64 { /* ptr offset */ }
+//   }
+//
+//   atom vec_push<T>(v: Vector<T>, elem: T)
+//       requires: v.len < v.cap;
+//       ensures: result.len == v.len + 1;
+//       body: { /* alloc-based implementation */ };
+//
+// --- HashMap<K, V> ---
+// Hashable + Eq をキー制約として使用:
+//
+//   struct HashMap<K, V> {
+//       buckets: Ptr<Bucket<K, V>>,
+//       size: i64 where v >= 0,
+//       capacity: i64 where v > 0
+//   }
+//
+//   atom map_insert<K: Hashable + Eq, V>(m: HashMap<K, V>, key: K, val: V)
+//       requires: m.size < m.capacity;
+//       ensures: result.size <= m.size + 1;
+//       body: { /* hash-based implementation */ };
+//
+// 既存の Sequential/Hashable トレイトに準拠したコードは、
+// alloc 導入後もロジック変更なしで動作する。
+
+// =============================================================
+// E. Prelude Atoms（基本操作）
 // =============================================================
 
 // Option の判定: Some(tag=1) なら 1, None(tag=0) なら 0

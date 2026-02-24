@@ -203,6 +203,10 @@ pub struct TraitMethod {
     pub param_types: Vec<String>,
     /// 戻り値型名（例: "bool", "i64"）
     pub return_type: String,
+    /// パラメータごとの精緻型制約（例: "v != 0"）。制約がないパラメータは None。
+    /// `fn div(a: Self, b: Self where v != 0) -> Self;` の場合:
+    /// param_constraints = [None, Some("v != 0")]
+    pub param_constraints: Vec<Option<String>>,
 }
 
 /// トレイト定義
@@ -489,22 +493,35 @@ pub fn parse_module(source: &str) -> Vec<Item> {
 
             if line.starts_with("fn ") {
                 // fn leq(a: Self, b: Self) -> bool;
+                // fn div(a: Self, b: Self where v != 0) -> Self;
                 let fn_re = Regex::new(r"fn\s+(\w+)\s*\(([^)]*)\)\s*->\s*(\w+)").unwrap();
                 if let Some(fcap) = fn_re.captures(line) {
                     let method_name = fcap[1].to_string();
                     let params_str = &fcap[2];
                     let return_type = fcap[3].to_string();
-                    let param_types: Vec<String> = params_str.split(',')
-                        .map(|p| {
-                            if let Some((_, t)) = p.split_once(':') {
+                    let mut param_types: Vec<String> = Vec::new();
+                    let mut param_constraints: Vec<Option<String>> = Vec::new();
+                    for p in params_str.split(',') {
+                        let p = p.trim();
+                        if p.is_empty() { continue; }
+                        // "b: Self where v != 0" → type="Self", constraint=Some("v != 0")
+                        if let Some((before_where, constraint)) = p.split_once("where") {
+                            let type_str = if let Some((_, t)) = before_where.split_once(':') {
                                 t.trim().to_string()
                             } else {
-                                p.trim().to_string()
-                            }
-                        })
-                        .filter(|s| !s.is_empty())
-                        .collect();
-                    methods.push(TraitMethod { name: method_name, param_types, return_type });
+                                before_where.trim().to_string()
+                            };
+                            param_types.push(type_str);
+                            param_constraints.push(Some(constraint.trim().to_string()));
+                        } else if let Some((_, t)) = p.split_once(':') {
+                            param_types.push(t.trim().to_string());
+                            param_constraints.push(None);
+                        } else {
+                            param_types.push(p.to_string());
+                            param_constraints.push(None);
+                        }
+                    }
+                    methods.push(TraitMethod { name: method_name, param_types, return_type, param_constraints });
                 }
             } else if line.starts_with("law ") {
                 // law reflexive: leq(x, x) == true;

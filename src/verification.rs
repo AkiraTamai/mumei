@@ -180,7 +180,7 @@ pub fn register_builtin_traits(module_env: &mut ModuleEnv) {
     module_env.register_trait(&TD {
         name: "Eq".to_string(),
         methods: vec![
-            TraitMethod { name: "eq".to_string(), param_types: vec!["Self".into(), "Self".into()], return_type: "bool".into() },
+            TraitMethod { name: "eq".to_string(), param_types: vec!["Self".into(), "Self".into()], return_type: "bool".into(), param_constraints: vec![None, None] },
         ],
         laws: vec![
             ("reflexive".into(), "eq(x, x) == true".into()),
@@ -196,7 +196,7 @@ pub fn register_builtin_traits(module_env: &mut ModuleEnv) {
     module_env.register_trait(&TD {
         name: "Ord".to_string(),
         methods: vec![
-            TraitMethod { name: "leq".to_string(), param_types: vec!["Self".into(), "Self".into()], return_type: "bool".into() },
+            TraitMethod { name: "leq".to_string(), param_types: vec!["Self".into(), "Self".into()], return_type: "bool".into(), param_constraints: vec![None, None] },
         ],
         laws: vec![
             ("reflexive".into(), "leq(x, x) == true".into()),
@@ -213,9 +213,9 @@ pub fn register_builtin_traits(module_env: &mut ModuleEnv) {
     module_env.register_trait(&TD {
         name: "Numeric".to_string(),
         methods: vec![
-            TraitMethod { name: "add".to_string(), param_types: vec!["Self".into(), "Self".into()], return_type: "Self".into() },
-            TraitMethod { name: "sub".to_string(), param_types: vec!["Self".into(), "Self".into()], return_type: "Self".into() },
-            TraitMethod { name: "mul".to_string(), param_types: vec!["Self".into(), "Self".into()], return_type: "Self".into() },
+            TraitMethod { name: "add".to_string(), param_types: vec!["Self".into(), "Self".into()], return_type: "Self".into(), param_constraints: vec![None, None] },
+            TraitMethod { name: "sub".to_string(), param_types: vec!["Self".into(), "Self".into()], return_type: "Self".into(), param_constraints: vec![None, None] },
+            TraitMethod { name: "mul".to_string(), param_types: vec!["Self".into(), "Self".into()], return_type: "Self".into(), param_constraints: vec![None, None] },
         ],
         laws: vec![
             ("commutative_add".into(), "add(a, b) == add(b, a)".into()),
@@ -250,6 +250,144 @@ pub fn register_builtin_traits(module_env: &mut ModuleEnv) {
 // impl の法則充足性検証 (Law Verification)
 // =============================================================================
 
+/// law 式内のメソッド呼び出しを impl body で展開する。
+///
+/// 例: law = "add(a, b) == add(b, a)", impl body = "a + b"
+/// → "((a) + (b)) == ((b) + (a))"
+///
+/// アルゴリズム:
+/// 1. law 式を左から走査し、メソッド名 + "(" を検出
+/// 2. 括弧の対応を追跡して引数リストを抽出
+/// 3. impl body 内の仮引数名を実引数で置換
+/// 4. 展開結果を括弧で囲んで挿入
+///
+/// ネストした呼び出し（例: "leq(a, b) && leq(b, c)"）にも対応。
+fn substitute_method_calls(
+    law_expr: &str,
+    method_bodies: &HashMap<String, String>,
+    method_params: &HashMap<String, Vec<String>>,
+) -> String {
+    let mut result = law_expr.to_string();
+
+    // 各メソッドについて繰り返し展開（ネスト対応のため複数パス）
+    for _pass in 0..5 {
+        let mut new_result = String::new();
+        let mut i = 0;
+        let chars: Vec<char> = result.chars().collect();
+        let mut changed = false;
+
+        while i < chars.len() {
+            // メソッド名の検出: 英字で始まり、直後に '(' が続く
+            let mut found_method = false;
+            for (method_name, body) in method_bodies {
+                let mn_chars: Vec<char> = method_name.chars().collect();
+                if i + mn_chars.len() < chars.len()
+                    && chars[i..i + mn_chars.len()] == mn_chars[..]
+                    && chars[i + mn_chars.len()] == '('
+                    // メソッド名の直前が英数字でないことを確認（部分一致を防ぐ）
+                    && (i == 0 || !chars[i - 1].is_alphanumeric())
+                {
+                    // 引数リストを抽出
+                    let args_start = i + mn_chars.len() + 1;
+                    let mut depth = 1;
+                    let mut args_end = args_start;
+                    while args_end < chars.len() && depth > 0 {
+                        match chars[args_end] {
+                            '(' => depth += 1,
+                            ')' => {
+                                depth -= 1;
+                                if depth == 0 { break; }
+                            }
+                            _ => {}
+                        }
+                        args_end += 1;
+                    }
+
+                    // 引数をカンマで分割（ネストした括弧を考慮）
+                    let args_str: String = chars[args_start..args_end].iter().collect();
+                    let args = split_args(&args_str);
+
+                    // body 内の仮引数名を実引数で置換
+                    let mut expanded = body.clone();
+                    if let Some(param_names) = method_params.get(method_name) {
+                        for (j, param_name) in param_names.iter().enumerate() {
+                            if let Some(arg) = args.get(j) {
+                                // 単語境界を考慮した置換（部分一致を防ぐ）
+                                expanded = replace_word(&expanded, param_name, &format!("({})", arg.trim()));
+                            }
+                        }
+                    }
+
+                    new_result.push('(');
+                    new_result.push_str(&expanded);
+                    new_result.push(')');
+                    i = args_end + 1; // ')' の次へ
+                    found_method = true;
+                    changed = true;
+                    break;
+                }
+            }
+            if !found_method {
+                new_result.push(chars[i]);
+                i += 1;
+            }
+        }
+
+        result = new_result;
+        if !changed { break; }
+    }
+
+    result
+}
+
+/// 単語境界を考慮した文字列置換。
+/// "a" を置換する際に "a" 単体のみマッチし、"add" 内の "a" にはマッチしない。
+fn replace_word(source: &str, word: &str, replacement: &str) -> String {
+    let mut result = String::new();
+    let chars: Vec<char> = source.chars().collect();
+    let word_chars: Vec<char> = word.chars().collect();
+    let mut i = 0;
+
+    while i < chars.len() {
+        if i + word_chars.len() <= chars.len()
+            && chars[i..i + word_chars.len()] == word_chars[..]
+            && (i == 0 || !chars[i - 1].is_alphanumeric() && chars[i - 1] != '_')
+            && (i + word_chars.len() >= chars.len() || !chars[i + word_chars.len()].is_alphanumeric() && chars[i + word_chars.len()] != '_')
+        {
+            result.push_str(replacement);
+            i += word_chars.len();
+        } else {
+            result.push(chars[i]);
+            i += 1;
+        }
+    }
+
+    result
+}
+
+/// カンマで引数を分割する（ネストした括弧を考慮）。
+fn split_args(input: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut depth = 0;
+    let mut current = String::new();
+    for c in input.chars() {
+        match c {
+            '(' => { depth += 1; current.push(c); }
+            ')' => { depth -= 1; current.push(c); }
+            ',' if depth == 0 => {
+                result.push(current.trim().to_string());
+                current.clear();
+            }
+            _ => { current.push(c); }
+        }
+    }
+    let trimmed = current.trim().to_string();
+    if !trimmed.is_empty() {
+        result.push(trimmed);
+    }
+    result
+}
+
 /// impl が対応する trait の全 law を満たしているかを Z3 で検証する。
 /// 各 law の論理式内のメソッド呼び出しを impl の具体的な body で置換し、
 /// ∀x. law_expr が成立するかを検証する。
@@ -274,11 +412,32 @@ pub fn verify_impl(impl_def: &ImplDef, module_env: &ModuleEnv) -> MumeiResult<()
     let ctx = Context::new(&cfg);
     let solver = Solver::new(&ctx);
 
+    // impl のメソッド body マップを構築（未解釈関数展開用）
+    let method_body_map: HashMap<String, String> = impl_def.method_bodies.iter()
+        .map(|(name, body)| (name.clone(), body.clone()))
+        .collect();
+
+    // メソッドのパラメータ名マップを構築（trait 定義から取得）
+    // law 式内の関数呼び出し `method(a, b)` を body 式に展開する際、
+    // 仮引数名（a, b）を実引数に置換するために使用
+    let method_param_names: HashMap<String, Vec<String>> = trait_def.methods.iter()
+        .map(|m| {
+            // トレイトメソッドのパラメータ名は慣例的に a, b, c, ... を使用
+            let param_names: Vec<String> = (0..m.param_types.len())
+                .map(|i| {
+                    let names = ["a", "b", "c", "d", "e", "f"];
+                    names.get(i).unwrap_or(&"x").to_string()
+                })
+                .collect();
+            (m.name.clone(), param_names)
+        })
+        .collect();
+
     for (law_name, law_expr) in &trait_def.laws {
         // law 内のメソッド呼び出しを impl body で置換
-        // 簡易版: メソッド名(args) の呼び出しを直接 body 式に展開はせず、
-        // law 式をそのまま Z3 に投入する（未解釈関数対応は将来の拡張）
-        let substituted = law_expr.clone();
+        // 例: law "add(a, b) == add(b, a)" で impl body が "a + b" の場合、
+        // "add(a, b)" → "(a + b)", "add(b, a)" → "(b + a)" に展開
+        let substituted = substitute_method_calls(law_expr, &method_body_map, &method_param_names);
 
         // シンボリック変数で law を検証
         let int_sort = z3::Sort::int(&ctx);
@@ -297,12 +456,6 @@ pub fn verify_impl(impl_def: &ImplDef, module_env: &ModuleEnv) -> MumeiResult<()
         }
         // "true" リテラルを登録
         env.insert("true".to_string(), Bool::from_bool(&ctx, true).into());
-
-        // impl のメソッド body を未解釈関数として env に登録
-        // 簡易版: メソッド呼び出しは expr_to_z3 の Call ブランチで解決される
-        for (_method_name, _method_body) in &impl_def.method_bodies {
-            // 将来の未解釈関数対応で使用
-        }
 
         // law 式をパースして検証
         let law_ast = parse_expression(&substituted);
@@ -339,9 +492,9 @@ pub fn verify_impl(impl_def: &ImplDef, module_env: &ModuleEnv) -> MumeiResult<()
                         solver.pop(1);
                         return Err(MumeiError::VerificationError(
                             format!(
-                                "impl {} for {}: law '{}' is not satisfied\n  Law: {}\n{}",
+                                "impl {} for {}: law '{}' is not satisfied\n  Law: {}\n  Expanded: {}\n{}",
                                 impl_def.trait_name, impl_def.target_type,
-                                law_name, law_expr, counterexample
+                                law_name, law_expr, substituted, counterexample
                             )
                         ));
                     }
@@ -349,7 +502,8 @@ pub fn verify_impl(impl_def: &ImplDef, module_env: &ModuleEnv) -> MumeiResult<()
                 }
             }
             Err(_) => {
-                // law のパースに失敗した場合はスキップ（将来の未解釈関数対応で改善）
+                // law のパースに失敗した場合はスキップ
+                // （未解釈関数展開後もパースできない場合は、law 式が複雑すぎる可能性がある）
             }
         };
     }

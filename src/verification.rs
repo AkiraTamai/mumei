@@ -67,10 +67,19 @@ struct VCtx<'a> {
 //   consume 後のアクセスを ¬is_alive(x) として検出
 
 /// 変数の線形性（所有権）追跡コンテキスト
+///
+/// 所有権（Ownership）と借用（Borrowing）の両方を追跡する。
+/// - consume: 所有権を消費（移動）。消費後のアクセスは Use-After-Free。
+/// - borrow: 読み取り専用の借用。借用中は所有者が consume/free できない。
+/// - release_borrow: 借用を解放。
 #[derive(Debug, Clone, Default)]
 pub struct LinearityCtx {
     /// 変数名 → 生存状態（true = alive, false = consumed）
     alive: HashMap<String, bool>,
+    /// 変数名 → 借用カウント（0 = 借用なし、1+ = 借用中）
+    borrow_count: HashMap<String, usize>,
+    /// 変数名 → 借用元の変数名リスト（誰がこの変数を借用しているか）
+    borrowers: HashMap<String, Vec<String>>,
     /// 消費済み変数のアクセス違反リスト
     violations: Vec<String>,
 }
@@ -83,11 +92,28 @@ impl LinearityCtx {
     /// 変数を生存状態で登録する
     pub fn register(&mut self, name: &str) {
         self.alive.insert(name.to_string(), true);
+        self.borrow_count.insert(name.to_string(), 0);
     }
 
     /// 変数を消費済みとしてマークする（所有権の移動）
-    /// 既に消費済みの場合は二重解放エラーを記録する
+    /// 既に消費済みの場合は二重解放エラーを記録する。
+    /// 借用中の場合は消費を拒否する。
     pub fn consume(&mut self, name: &str) -> Result<(), String> {
+        // 借用中チェック: 借用されている変数は消費できない
+        if let Some(&count) = self.borrow_count.get(name) {
+            if count > 0 {
+                let borrower_names = self.borrowers.get(name)
+                    .map(|v| v.join(", "))
+                    .unwrap_or_else(|| "unknown".to_string());
+                let msg = format!(
+                    "Cannot consume '{}': currently borrowed by [{}] ({} active borrow(s))",
+                    name, borrower_names, count
+                );
+                self.violations.push(msg.clone());
+                return Err(msg);
+            }
+        }
+
         match self.alive.get(name) {
             Some(true) => {
                 self.alive.insert(name.to_string(), false);
@@ -105,6 +131,40 @@ impl LinearityCtx {
         }
     }
 
+    /// 変数を借用する（読み取り専用の参照）
+    /// 借用中は所有者が consume/free できなくなる。
+    /// borrower_name: 借用する側の変数名（ライフタイム追跡用）
+    pub fn borrow(&mut self, owner_name: &str, borrower_name: &str) -> Result<(), String> {
+        // 生存チェック: 消費済み変数は借用できない
+        if let Some(false) = self.alive.get(owner_name) {
+            let msg = format!(
+                "Cannot borrow '{}': it has already been consumed (use-after-free)",
+                owner_name
+            );
+            self.violations.push(msg.clone());
+            return Err(msg);
+        }
+
+        let count = self.borrow_count.entry(owner_name.to_string()).or_insert(0);
+        *count += 1;
+        self.borrowers.entry(owner_name.to_string())
+            .or_insert_with(Vec::new)
+            .push(borrower_name.to_string());
+        Ok(())
+    }
+
+    /// 借用を解放する
+    pub fn release_borrow(&mut self, owner_name: &str, borrower_name: &str) {
+        if let Some(count) = self.borrow_count.get_mut(owner_name) {
+            if *count > 0 {
+                *count -= 1;
+            }
+        }
+        if let Some(borrowers) = self.borrowers.get_mut(owner_name) {
+            borrowers.retain(|b| b != borrower_name);
+        }
+    }
+
     /// 変数が生存しているかチェックする
     /// 消費済み変数へのアクセスはエラーを記録する
     pub fn check_alive(&mut self, name: &str) -> Result<(), String> {
@@ -114,6 +174,12 @@ impl LinearityCtx {
             return Err(msg);
         }
         Ok(())
+    }
+
+    /// 変数が借用中かどうかを確認する
+    #[allow(dead_code)]
+    pub fn is_borrowed(&self, name: &str) -> bool {
+        self.borrow_count.get(name).map_or(false, |&c| c > 0)
     }
 
     /// 蓄積された違反リストを返す
@@ -675,16 +741,24 @@ pub fn verify(atom: &Atom, output_dir: &Path, module_env: &ModuleEnv) -> MumeiRe
         }
     }
 
-    // 2d. 線形性チェック: consumed_params の Z3 シンボリック Bool 連携
+    // 2d. 線形性チェック: consumed_params + ref パラメータの Z3 シンボリック Bool 連携
     // consume 宣言されたパラメータに対して is_alive フラグを Z3 上で追跡する。
-    // body 検証後、consume 対象パラメータが「消費可能」であることを Z3 で証明する。
+    // ref パラメータに対しては借用カウントを追跡し、借用中の consume を禁止する。
     let mut linearity_ctx = LinearityCtx::new();
+
+    // consume 対象パラメータの登録
     if !atom.consumed_params.is_empty() {
         for param_name in &atom.consumed_params {
             // パラメータが実際に存在するか検証
             if !atom.params.iter().any(|p| p.name == *param_name) {
                 return Err(MumeiError::TypeError(
                     format!("consume target '{}' is not a parameter of atom '{}'", param_name, atom.name)
+                ));
+            }
+            // ref パラメータは consume できない
+            if atom.params.iter().any(|p| p.name == *param_name && p.is_ref) {
+                return Err(MumeiError::TypeError(
+                    format!("Cannot consume ref parameter '{}' in atom '{}': ref parameters are borrowed, not owned", param_name, atom.name)
                 ));
             }
             // LinearityCtx に登録
@@ -694,6 +768,30 @@ pub fn verify(atom: &Atom, output_dir: &Path, module_env: &ModuleEnv) -> MumeiRe
             let alive_name = format!("__alive_{}", param_name);
             let alive_bool = Bool::new_const(&ctx, alive_name.as_str());
             solver.assert(&alive_bool); // 初期状態: alive = true
+            env.insert(alive_name, alive_bool.into());
+        }
+    }
+
+    // ref パラメータの借用登録
+    // ref パラメータは読み取り専用で貸し出される。
+    // 借用中は元の所有者（呼び出し元）が consume/free できない。
+    // この制約は呼び出し元の verify() で検証される（Compositional Verification）。
+    for param in &atom.params {
+        if param.is_ref {
+            // ref パラメータを LinearityCtx に登録（借用として）
+            linearity_ctx.register(&param.name);
+
+            // Z3 上で borrowed フラグを作成
+            let borrowed_name = format!("__borrowed_{}", param.name);
+            let borrowed_bool = Bool::new_const(&ctx, borrowed_name.as_str());
+            solver.assert(&borrowed_bool); // 借用中: true
+            env.insert(borrowed_name, borrowed_bool.into());
+
+            // ref パラメータは consume 不可であることを Z3 で表現
+            // __alive_{name} は常に true（借用中は解放不可）
+            let alive_name = format!("__alive_{}", param.name);
+            let alive_bool = Bool::new_const(&ctx, alive_name.as_str());
+            solver.assert(&alive_bool); // ref は常に alive
             env.insert(alive_name, alive_bool.into());
         }
     }

@@ -138,6 +138,10 @@ pub struct Param {
     pub type_name: Option<String>,
     /// Generics: 型参照（TypeRef 版）。type_name との後方互換性のため両方保持。
     pub type_ref: Option<TypeRef>,
+    /// 参照渡し修飾子（Borrowing）: `ref v: Vector<T>` の場合 true。
+    /// ref パラメータは読み取り専用で貸し出され、所有権は移動しない。
+    /// 借用中は所有者が free/consume できないことを Z3 で保証する。
+    pub is_ref: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -624,16 +628,23 @@ pub fn parse_atom(source: &str) -> Atom {
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .map(|s| {
-            if let Some((param_name, type_name)) = s.split_once(':') {
+            // ref 修飾子の検出: "ref v: Vector<T>" → is_ref=true, name="v"
+            let (is_ref, s_stripped) = if s.starts_with("ref ") {
+                (true, s[4..].trim())
+            } else {
+                (false, s)
+            };
+            if let Some((param_name, type_name)) = s_stripped.split_once(':') {
                 let type_name_str = type_name.trim().to_string();
                 let type_ref = parse_type_ref(&type_name_str);
                 Param {
                     name: param_name.trim().to_string(),
                     type_name: Some(type_name_str),
                     type_ref: Some(type_ref),
+                    is_ref,
                 }
             } else {
-                Param { name: s.to_string(), type_name: None, type_ref: None }
+                Param { name: s_stripped.to_string(), type_name: None, type_ref: None, is_ref }
             }
         })
         .collect();

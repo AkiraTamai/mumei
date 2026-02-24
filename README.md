@@ -320,7 +320,7 @@ The `std/alloc.mm` module provides `Vector<T>`, `HashMap<K, V>`, and ownership p
 | 5 | **Tempering** (LLVM IR) | Pattern Matrix codegen, StructType, malloc/free, nested extract_value |
 | 6 | **Sharpening** (Transpiler) | Rust + Go + TypeScript with ownership mapping (`ref` → `&T`) |
 
-> 📖 **Detailed architecture**: `docs/ARCHITECTURE.md` (to be created)
+> 📖 **Detailed architecture**: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | **Changelog**: [`docs/CHANGELOG.md`](docs/CHANGELOG.md)
 
 ---
 
@@ -707,6 +707,10 @@ All generated code includes:
 │       ├── invariant_fail.mm      # loop invariant fails initially
 │       ├── requires_not_met.mm    # inter-atom precondition violation
 │       └── termination_fail.mm    # decreases does not strictly decrease
+├── docs/
+│   ├── ARCHITECTURE.md            # Compiler internals, pipeline, ModuleEnv, LinearityCtx
+│   ├── STDLIB.md                  # Standard library reference (all modules + atoms)
+│   └── CHANGELOG.md               # PR #16 change history
 ├── build_and_run.sh               # Build + verification suite runner (with example tests)
 ├── Cargo.toml
 └── README.md

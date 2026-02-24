@@ -34,6 +34,7 @@ Only atoms that pass formal verification are compiled to LLVM IR and transpiled 
 | **Ownership Tracking** | `Owned` trait + `LinearityCtx` — double-free and use-after-free detection at compile time |
 | **`consume` Modifier** | `atom take(x: T) consume x;` — linear type enforcement with Z3 `__alive_` symbolic Bools |
 | **LLVM Heap Ops** | `alloc_raw` → `malloc`, `dealloc_raw` → `free` — native heap allocation in LLVM IR |
+| **Borrowing (`ref`)** | `atom print(ref v: Vector<i64>)` — read-only borrow with Z3-backed lifetime verification |
 | **Multi-target Transpiler** | Enum/Struct/Atom/Trait/Impl → Rust + Go + TypeScript |
 | **Standard Library** | `std/option.mm`, `std/stack.mm`, `std/result.mm`, `std/list.mm` — verified generic core types |
 | **Module System** | `import "path" as alias;` — multi-file builds with compositional verification |
@@ -775,6 +776,8 @@ All generated code includes:
 - [x] **Linearity checking (LinearityCtx)**: Ownership tracking context for double-free and use-after-free detection — `register()`, `consume()`, `check_alive()` with violation accumulation
 - [x] **`consume` parameter modifier**: `atom take(x: T) consume x;` — parsed via `consumed_params`, integrated with `LinearityCtx` + Z3 `__alive_` symbolic Bools for compile-time double-free/use-after-free detection
 - [x] **LLVM alloc/dealloc codegen**: `alloc_raw` → `malloc` (with `ptr_to_int`), `dealloc_raw` → `free` (with `int_to_ptr`) — native heap operations in LLVM IR
+- [x] **Borrowing (`ref` keyword)**: `atom print(ref v: Vector<i64>)` — `Param.is_ref` flag parsed, `LinearityCtx.borrow()`/`release_borrow()` for lifetime tracking, Z3 `__borrowed_` symbolic Bools prevent consume during borrow
+- [x] **Transpiler ownership mapping**: Rust: `ref` → `&T`, `consume` → move semantics; TypeScript: `ref` → `/* readonly */` annotation; Go: comment-based ownership documentation
 - [ ] `HashMap<K, V>` concrete implementation (requires `Hashable + Eq` key constraints)
 - [ ] Equality ensures propagation (`ensures: result == n + 1` for chained call verification)
 - [ ] Fully qualified name (FQN) dot-notation in source code (`math.add(x, y)`)

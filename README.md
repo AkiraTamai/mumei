@@ -714,3 +714,4 @@ All generated code includes:
 - [ ] Nested struct support
 - [ ] Negative test suite (intentional constraint violations)
 - [ ] Editor integration (LSP / VS Code Extension)
+

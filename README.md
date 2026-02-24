@@ -32,6 +32,8 @@ Only atoms that pass formal verification are compiled to LLVM IR and transpiled 
 | **Standard Prelude** | `std/prelude.mm` auto-imported — traits, ADTs, `Sequential`/`Hashable` interfaces |
 | **Dynamic Memory (alloc)** | `RawPtr`, `Vector<T>` with `ptr`/`len`/`cap` field constraints, verified `vec_push`/`vec_get`/`vec_drop` |
 | **Ownership Tracking** | `Owned` trait + `LinearityCtx` — double-free and use-after-free detection at compile time |
+| **`consume` Modifier** | `atom take(x: T) consume x;` — linear type enforcement with Z3 `__alive_` symbolic Bools |
+| **LLVM Heap Ops** | `alloc_raw` → `malloc`, `dealloc_raw` → `free` — native heap allocation in LLVM IR |
 | **Multi-target Transpiler** | Enum/Struct/Atom/Trait/Impl → Rust + Go + TypeScript |
 | **Standard Library** | `std/option.mm`, `std/stack.mm`, `std/result.mm`, `std/list.mm` — verified generic core types |
 | **Module System** | `import "path" as alias;` — multi-file builds with compositional verification |
@@ -771,8 +773,9 @@ All generated code includes:
 - [x] **alloc roadmap design**: `Vector<T>` / `HashMap<K, V>` architecture documented in `std/prelude.mm` with `Sequential`/`Hashable` trait interfaces as migration bridge
 - [x] **Dynamic memory foundation**: `RawPtr`/`NullablePtr` refined types, `Owned` trait (linearity law), `Vector<T>` struct with `ptr`/`len`/`cap` field constraints, verified `vec_push`/`vec_get`/`vec_drop`/`vec_push_safe` atoms
 - [x] **Linearity checking (LinearityCtx)**: Ownership tracking context for double-free and use-after-free detection — `register()`, `consume()`, `check_alive()` with violation accumulation
+- [x] **`consume` parameter modifier**: `atom take(x: T) consume x;` — parsed via `consumed_params`, integrated with `LinearityCtx` + Z3 `__alive_` symbolic Bools for compile-time double-free/use-after-free detection
+- [x] **LLVM alloc/dealloc codegen**: `alloc_raw` → `malloc` (with `ptr_to_int`), `dealloc_raw` → `free` (with `int_to_ptr`) — native heap operations in LLVM IR
 - [ ] `HashMap<K, V>` concrete implementation (requires `Hashable + Eq` key constraints)
-- [ ] `consume` parameter modifier on atoms (`atom take(x: T) consume x;`) with Z3-backed linearity enforcement
 - [ ] Equality ensures propagation (`ensures: result == n + 1` for chained call verification)
 - [ ] Fully qualified name (FQN) dot-notation in source code (`math.add(x, y)`)
 - [ ] Incremental build (re-verify only changed modules)

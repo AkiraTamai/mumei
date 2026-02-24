@@ -1500,27 +1500,88 @@ fn expr_to_z3<'a>(
             result.ok_or_else(|| MumeiError::VerificationError("Match expression has no arms".into()))
         },
 
-        Expr::FieldAccess(expr, field_name) => {
-            // v.x → env から __struct_TypeName_x を探す、または v_x として探す
-            if let Expr::Variable(var_name) = expr.as_ref() {
-                // まず qualified name で探す
-                let candidates = [
-                    format!("__struct_{}_{}", var_name, field_name),
-                    format!("{}_{}", var_name, field_name),
-                ];
-                for candidate in &candidates {
-                    if let Some(val) = env.get(candidate) {
-                        return Ok(val.clone());
+        Expr::FieldAccess(inner_expr, field_name) => {
+            // ネスト構造体のフィールドアクセスを再帰的に解決する。
+            //
+            // 1段階: v.x → env["__struct_v_x"] or env["v_x"]
+            // 2段階: v.point.x → まず v.point を解決し、その結果から .x を解決
+            //
+            // 解決戦略:
+            // A. 内側の式が Variable の場合: 直接 env から探す
+            // B. 内側の式が FieldAccess の場合: 再帰的に解決し、
+            //    結果のパスを使って env から探す
+            // C. どちらでもない場合: 式を評価してシンボリック変数を生成
+
+            // フラットなパス文字列を構築するヘルパー
+            // v.point.x → "v_point_x" のようなパスを生成
+            fn build_field_path(expr: &Expr) -> Option<Vec<String>> {
+                match expr {
+                    Expr::Variable(name) => Some(vec![name.clone()]),
+                    Expr::FieldAccess(inner, field) => {
+                        let mut path = build_field_path(inner)?;
+                        path.push(field.clone());
+                        Some(path)
+                    }
+                    _ => None,
+                }
+            }
+
+            // 完全なフィールドパスを構築（例: ["v", "point", "x"]）
+            let full_path = {
+                let mut path = build_field_path(inner_expr).unwrap_or_default();
+                path.push(field_name.clone());
+                path
+            };
+
+            if full_path.len() >= 2 {
+                // パスの各プレフィックスで env を探索
+                // 例: ["v", "point", "x"] → "v_point_x", "__struct_v_point_x"
+                let underscore_path = full_path.join("_");
+                let struct_path = format!("__struct_{}", underscore_path);
+
+                // 直接パスで見つかればそれを返す
+                if let Some(val) = env.get(&struct_path) {
+                    return Ok(val.clone());
+                }
+                if let Some(val) = env.get(&underscore_path) {
+                    return Ok(val.clone());
+                }
+
+                // 1段階ずつ解決を試みる
+                // 例: v.point → env["__struct_v_point"] or env["v_point"]
+                //     その結果が構造体型なら、.x のフィールドをさらに解決
+                if full_path.len() == 2 {
+                    // 単純な1段階アクセス: v.x
+                    let var_name = &full_path[0];
+                    let candidates = [
+                        format!("__struct_{}_{}", var_name, field_name),
+                        format!("{}_{}", var_name, field_name),
+                    ];
+                    for candidate in &candidates {
+                        if let Some(val) = env.get(candidate) {
+                            return Ok(val.clone());
+                        }
                     }
                 }
-                // 見つからなければシンボリック変数を生成
-                let sym_name = format!("{}_{}", var_name, field_name);
-                let sym = Int::new_const(ctx, sym_name.as_str());
-                env.insert(sym_name, sym.clone().into());
+
+                // ネスト構造体の再帰解決:
+                // 内側の式を先に Z3 で評価し、結果を env に登録してからフィールドを解決
+                let base_val = expr_to_z3(vc, inner_expr, env, solver_opt)?;
+
+                // 内側の式の型を推定し、構造体定義からフィールドの型を取得
+                // フィールドの精緻型制約も再帰的に適用する
+                let nested_sym_name = format!("{}_{}", underscore_path.rsplit_once('_').map(|(prefix, _)| prefix).unwrap_or(&underscore_path), field_name);
+                let sym = if let Some(val) = env.get(&nested_sym_name) {
+                    return Ok(val.clone());
+                } else {
+                    let s = Int::new_const(ctx, full_path.join("_").as_str());
+                    env.insert(full_path.join("_"), s.clone().into());
+                    s
+                };
                 Ok(sym.into())
             } else {
-                // ネストされたフィールドアクセスはシンボリック変数で近似
-                let _base = expr_to_z3(vc, expr, env, solver_opt)?;
+                // パスが構築できない場合: 式を評価してシンボリック変数を生成
+                let _base = expr_to_z3(vc, inner_expr, env, solver_opt)?;
                 let sym = Int::new_const(ctx, format!("field_{}", field_name));
                 Ok(sym.into())
             }

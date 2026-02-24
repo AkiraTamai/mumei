@@ -531,9 +531,12 @@ fn compile_expr<'a>(
             Ok(phi.as_basic_value())
         },
 
-        Expr::FieldAccess(expr, field_name) => {
-            if let Expr::Variable(var_name) = expr.as_ref() {
-                // フラット変数として探す
+        Expr::FieldAccess(inner_expr, field_name) => {
+            // ネスト構造体のフィールドアクセスを再帰的に解決する。
+            // v.x → 1段階、v.point.x → 2段階（再帰的に extract_value）
+
+            // まずフラット変数として探す（1段階アクセスの高速パス）
+            if let Expr::Variable(var_name) = inner_expr.as_ref() {
                 let candidates = [
                     format!("__struct_{}_{}", var_name, field_name),
                     format!("{}_{}", var_name, field_name),
@@ -546,10 +549,7 @@ fn compile_expr<'a>(
                 // 構造体値から extract_value で取得を試みる
                 if let Some(struct_val) = variables.get(var_name) {
                     if struct_val.is_struct_value() {
-                        // フィールドインデックスを型定義から解決
-                        // 簡易実装: 全登録済み構造体から探す
                         let sv = struct_val.into_struct_value();
-                        // フィールド名からインデックスを推定（構造体定義を参照）
                         if let Some(idx) = find_field_index(var_name, field_name, module_env) {
                             let extracted = llvm!(builder.build_extract_value(sv, idx, &format!("{}.{}", var_name, field_name)));
                             return Ok(extracted);
@@ -558,12 +558,21 @@ fn compile_expr<'a>(
                 }
                 Err(MumeiError::CodegenError(format!("Field '{}' not found on '{}'", field_name, var_name)))
             } else {
-                let base_val = compile_expr(context, builder, module, function, expr, variables, array_ptrs, module_env)?;
+                // ネストされたフィールドアクセス: 内側の式を再帰的に評価
+                // v.point.x → compile_expr(v.point) → extract_value(result, x_idx)
+                let base_val = compile_expr(context, builder, module, function, inner_expr, variables, array_ptrs, module_env)?;
                 if base_val.is_struct_value() {
-                    // インデックス 0 をフォールバック
                     let sv = base_val.into_struct_value();
-                    let extracted = llvm!(builder.build_extract_value(sv, 0, &format!("field_{}", field_name)));
-                    Ok(extracted)
+                    // フィールドインデックスを型定義から解決
+                    // 内側の式の型名を推定して構造体定義を探す
+                    if let Some(idx) = find_field_index_by_name(field_name, module_env) {
+                        let extracted = llvm!(builder.build_extract_value(sv, idx, &format!("nested.{}", field_name)));
+                        Ok(extracted)
+                    } else {
+                        // フォールバック: インデックス 0
+                        let extracted = llvm!(builder.build_extract_value(sv, 0, &format!("field_{}", field_name)));
+                        Ok(extracted)
+                    }
                 } else {
                     Err(MumeiError::CodegenError(format!("Cannot access field '{}' on non-struct value", field_name)))
                 }
@@ -679,6 +688,16 @@ fn bind_pattern_variables<'a>(
             // バインドなし
         },
     }
+}
+
+/// フィールド名のみから全構造体定義を走査してインデックスを検索（ネスト構造体用）
+fn find_field_index_by_name(field_name: &str, module_env: &ModuleEnv) -> Option<u32> {
+    for sdef in module_env.structs.values() {
+        if let Some(pos) = sdef.fields.iter().position(|f| f.name == field_name) {
+            return Some(pos as u32);
+        }
+    }
+    None
 }
 
 /// 構造体定義からフィールド名のインデックスを検索

@@ -105,3 +105,16 @@ This PR implements dynamic memory management, ownership system, borrowing, and c
 | `README.md` | Full documentation update |
 | `docs/STDLIB.md` | **New** — Standard library reference |
 | `docs/CHANGELOG.md` | **New** — This file |
+
+---
+
+## Remaining Roadmap (pipeline integration pending)
+
+The following data structures and logic are implemented but not yet wired into the compiler pipeline:
+
+| Item | Data Structure | Missing Integration |
+|---|---|---|
+| Struct method parsing | `StructDef.method_names` | Parser for `impl Stack { atom push(...) }` syntax |
+| Trait method constraints | `TraitMethod.param_constraints` | Z3 injection in `verify_impl` and inter-atom calls |
+| Automatic borrow tracking | `LinearityCtx.borrow()` / `release_borrow()` | Call-site `ref` arg → borrow registration in `expr_to_z3` |
+| Use-after-consume detection | `LinearityCtx.check_alive()` | Variable access check in `expr_to_z3` `Variable` branch |

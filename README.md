@@ -787,5 +787,9 @@ All generated code includes:
 - [x] **FQN dot-notation**: `math.add(x, y)` resolved as `math::add` in both verification (`expr_to_z3`) and codegen (`compile_expr`) — `.` → `::` automatic conversion
 - [x] **Incremental build**: `.mumei_build_cache` with per-atom SHA-256 hashing (`compute_atom_hash`) — unchanged atoms skip Z3 verification in both `mumei verify` and `mumei build`, with cache invalidation on failure
 - [x] **Nested struct support**: `v.point.x` resolved via recursive `build_field_path()` → `["v", "point", "x"]` → env lookup as `v_point_x` / `__struct_v_point_x`, with recursive `extract_value` in LLVM codegen
+- [ ] Struct method parsing: `impl Stack { atom push(...) }` → parse and register as `Stack::push` in ModuleEnv (data structure `method_names` ready)
+- [ ] Trait method constraint enforcement: inject `param_constraints` (e.g., `where v != 0`) into Z3 during `verify_impl` and inter-atom call verification
+- [ ] Automatic borrow tracking in inter-atom calls: `ref` args → `LinearityCtx.borrow()` at call site, `release_borrow()` after call returns
+- [ ] Use-after-consume detection in expressions: `LinearityCtx.check_alive()` on every variable access in `expr_to_z3`
 - [ ] Editor integration (LSP / VS Code Extension)
 

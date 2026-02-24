@@ -123,6 +123,14 @@ fn load_and_prepare(input: &str) -> (Vec<Item>, verification::ModuleEnv, Vec<Imp
     verification::register_builtin_traits(&mut module_env);
     let input_path = Path::new(input);
     let base_dir = input_path.parent().unwrap_or(Path::new("."));
+
+    // std/prelude.mm の自動ロード（Eq, Ord, Numeric, Option<T>, Result<T, E> 等）
+    // prelude が見つからない場合は組み込みトレイトがフォールバックとして機能する
+    if let Err(e) = resolver::resolve_prelude(base_dir, &mut module_env) {
+        eprintln!("  ⚠️  Prelude load warning: {}", e);
+        // prelude のロード失敗は致命的ではない（組み込みトレイトが代替）
+    }
+
     if let Err(e) = resolver::resolve_imports(&items, base_dir, &mut module_env) {
         eprintln!("  ❌ Import Resolution Failed: {}", e);
         std::process::exit(1);

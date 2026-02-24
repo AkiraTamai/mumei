@@ -69,6 +69,53 @@ pub fn resolve_imports(items: &[Item], base_dir: &Path, module_env: &mut ModuleE
     save_cache(&cache_path, &cache);
     Ok(())
 }
+
+/// std/prelude.mm を自動的にロードし、ModuleEnv に登録する。
+/// ユーザーが `import "std/prelude"` を書かなくても、
+/// Eq, Ord, Numeric, Option<T>, Result<T, E> 等が利用可能になる。
+///
+/// prelude の定義はトレイト・ADT のみを登録し、atom は検証済みとしてマークする。
+/// prelude が見つからない場合はスキップする（組み込みトレイトがフォールバックとして機能）。
+pub fn resolve_prelude(base_dir: &Path, module_env: &mut ModuleEnv) -> MumeiResult<()> {
+    // prelude のパスを解決（見つからなければスキップ）
+    let prelude_path = match resolve_path("std/prelude", base_dir) {
+        Ok(path) => path,
+        Err(_) => {
+            // prelude が見つからない場合は静かにスキップ
+            // （組み込みトレイト register_builtin_traits が代替として機能）
+            return Ok(());
+        }
+    };
+
+    // prelude を読み込み・パース
+    let source = match fs::read_to_string(&prelude_path) {
+        Ok(s) => s,
+        Err(_) => return Ok(()), // 読み込み失敗もスキップ
+    };
+
+    let prelude_items = parser::parse_module(&source);
+
+    // prelude 内の import を再帰的に解決（prelude 自身が他モジュールに依存する場合）
+    let prelude_base_dir = prelude_path.parent().unwrap_or(Path::new("."));
+    let cache_path = prelude_base_dir.join(".mumei_cache");
+    let mut cache = load_cache(&cache_path);
+    let mut ctx = ResolverContext::new();
+    ctx.loading.insert(prelude_path.clone());
+    resolve_imports_recursive(&prelude_items, prelude_base_dir, &mut ctx, &mut cache, module_env)?;
+    save_cache(&cache_path, &cache);
+
+    // prelude の定義を ModuleEnv に登録（alias なし = グローバルスコープ）
+    register_imported_items(&prelude_items, None, module_env);
+
+    // prelude の atom を検証済みとしてマーク
+    for item in &prelude_items {
+        if let Item::Atom(atom) = item {
+            module_env.mark_verified(&atom.name);
+        }
+    }
+
+    Ok(())
+}
 /// 再帰的にインポートを解決する内部関数
 fn resolve_imports_recursive(
     items: &[Item],

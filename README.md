@@ -27,6 +27,7 @@ Only atoms that pass formal verification are compiled to LLVM IR and transpiled 
 | **Trait Bounds** | `atom min<T: Comparable>(a: T, b: T)` — type constraints with law verification |
 | **Trait System with Laws** | `trait Comparable { fn leq(...); law reflexive: ...; }` — algebraic laws verified by Z3 |
 | **Built-in Traits** | `Eq`, `Ord`, `Numeric` — auto-implemented for `i64`, `u64`, `f64` |
+| **Standard Prelude** | `std/prelude.mm` auto-imported — traits, ADTs, `Sequential`/`Hashable` interfaces |
 | **Multi-target Transpiler** | Enum/Struct/Atom/Trait/Impl → Rust + Go + TypeScript |
 | **Standard Library** | `std/option.mm`, `std/stack.mm`, `std/result.mm`, `std/list.mm` — verified generic core types |
 | **Module System** | `import "path" as alias;` — multi-file builds with compositional verification |
@@ -255,6 +256,19 @@ body: {
 | `sqrt(x)` | Square root (f64) |
 | `len(a)` | Array length (symbolic) |
 | `cast_to_int(x)` | Float to int conversion |
+
+### Standard Prelude (`std/prelude.mm`)
+
+The prelude is **automatically imported** by the compiler — no `import` statement needed. It provides:
+
+| Category | Definitions | Z3 Laws |
+|---|---|---|
+| **Traits** | `Eq`, `Ord`, `Numeric` | reflexive, symmetric, transitive, commutative_add |
+| **ADTs** | `Option<T>`, `Result<T, E>`, `List<T>`, `Pair<T, U>` | — |
+| **Collection Interfaces** | `Sequential`, `Hashable` | `non_negative_length`, `deterministic` |
+| **Atoms** | `prelude_is_some`, `prelude_is_none`, `prelude_is_ok` | — |
+
+The `Sequential` and `Hashable` traits are **abstract interfaces** for future `Vector<T>` / `HashMap<K, V>` implementations. Code written against these traits will seamlessly benefit from dynamic memory (`alloc`) when it becomes available.
 
 ### Verified Core Types (`std/`)
 
@@ -632,6 +646,7 @@ All generated code includes:
 │   │   └── typescript.rs  # TypeScript transpiler (const enum, interface, discriminated union)
 │   └── main.rs            # Compiler orchestrator (parse → resolve → mono → verify → codegen → transpile)
 ├── std/
+│   ├── prelude.mm         # Auto-imported: Eq/Ord/Numeric traits, Option/Result/List/Pair ADTs, Sequential/Hashable interfaces
 │   ├── option.mm          # Option<T> { None, Some(T) } — generic, verified
 │   ├── stack.mm           # Stack<T> { top, max } + push/pop/clear — generic, verified
 │   ├── result.mm          # Result<T, E> { Ok(T), Err(E) } — generic, verified
@@ -705,8 +720,8 @@ All generated code includes:
 - [x] **CLI subcommands**: `mumei build` / `mumei verify` / `mumei check` / `mumei init`
 - [x] **Project scaffolding**: `mumei init my_project` generates `mumei.toml` + `src/main.mm`
 - [x] **Backward compatibility**: `mumei input.mm -o dist/katana` works as `mumei build`
-- [ ] `std/prelude.mm`: Generic standard types (`Option<T>`, `Result<T, E>`, `List<T>`, `Pair<T, U>`)
-- [ ] `Vector<T>` / `HashMap<K, V>` standard library with verified invariants
+- [x] **`std/prelude.mm`**: Auto-imported standard prelude — `Eq`, `Ord`, `Numeric` traits (with Z3 laws), `Option<T>`, `Result<T, E>`, `List<T>`, `Pair<T, U>` ADTs, `Sequential`/`Hashable` abstract interfaces
+- [ ] `Vector<T>` / `HashMap<K, V>` standard library with verified invariants (requires alloc — `Sequential`/`Hashable` trait interfaces defined in prelude)
 - [ ] Equality ensures propagation (`ensures: result == n + 1` for chained call verification)
 - [ ] Fully qualified name (FQN) dot-notation in source code (`math.add(x, y)`)
 - [ ] Incremental build (re-verify only changed modules)

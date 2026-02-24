@@ -26,6 +26,8 @@ Only atoms that pass formal verification are compiled to LLVM IR and transpiled 
 | **Generics (Polymorphism)** | `struct Stack<T> { ... }`, `atom identity<T>(x: T)` — monomorphization at compile time |
 | **Trait Bounds** | `atom min<T: Comparable>(a: T, b: T)` — type constraints with law verification |
 | **Trait System with Laws** | `trait Comparable { fn leq(...); law reflexive: ...; }` — algebraic laws verified by Z3 |
+| **Trait Method Constraints** | `fn div(a: Self, b: Self where v != 0) -> Self;` — per-parameter refinement types on trait methods |
+| **Law Body Expansion** | `verify_impl` expands `add(a,b)` → `(a + b)` using impl body for precise Z3 law verification |
 | **Built-in Traits** | `Eq`, `Ord`, `Numeric` — auto-implemented for `i64`, `u64`, `f64` |
 | **Standard Prelude** | `std/prelude.mm` auto-imported — traits, ADTs, `Sequential`/`Hashable` interfaces |
 | **Multi-target Transpiler** | Enum/Struct/Atom/Trait/Impl → Rust + Go + TypeScript |
@@ -138,6 +140,32 @@ impl Comparable for i64 {
 }
 ```
 
+### Trait Method Refinement Constraints
+
+Trait methods support per-parameter `where` clauses for refinement type constraints. This enables **type-level prevention** of invalid inputs:
+
+```mumei
+trait Numeric {
+    fn add(a: Self, b: Self) -> Self;
+    fn div(a: Self, b: Self where v != 0) -> Self;
+    law commutative_add: add(a, b) == add(b, a);
+}
+```
+
+The `div` method's second parameter carries `where v != 0`, ensuring Z3 checks for zero-division at every call site where `Numeric::div` is used polymorphically.
+
+### Law Body Expansion
+
+When verifying `impl` blocks, Mumei expands method calls in law expressions using the concrete implementation body. For example:
+
+```mumei
+// Law: add(a, b) == add(b, a)
+// impl body: a + b
+// Expanded: (a + b) == (b + a)  ← Z3 proves this directly
+```
+
+This expansion uses word-boundary-aware substitution to avoid corrupting identifiers (e.g., `a` in `add` is not replaced).
+
 ### Trait Bounds on Generics
 
 Type parameters can be constrained with trait bounds using `T: Trait` syntax:
@@ -159,7 +187,7 @@ Three built-in traits are automatically registered with implementations for `i64
 |---|---|---|
 | **Eq** | `eq(a, b) -> bool` | reflexive, symmetric |
 | **Ord** | `leq(a, b) -> bool` | reflexive, transitive |
-| **Numeric** | `add(a, b)`, `sub(a, b)`, `mul(a, b)` | commutative_add |
+| **Numeric** | `add(a, b)`, `sub(a, b)`, `mul(a, b)`, `div(a, b where v≠0)` | commutative_add |
 
 ---
 
@@ -721,7 +749,10 @@ All generated code includes:
 - [x] **Project scaffolding**: `mumei init my_project` generates `mumei.toml` + `src/main.mm`
 - [x] **Backward compatibility**: `mumei input.mm -o dist/katana` works as `mumei build`
 - [x] **`std/prelude.mm`**: Auto-imported standard prelude — `Eq`, `Ord`, `Numeric` traits (with Z3 laws), `Option<T>`, `Result<T, E>`, `List<T>`, `Pair<T, U>` ADTs, `Sequential`/`Hashable` abstract interfaces
-- [ ] `Vector<T>` / `HashMap<K, V>` standard library with verified invariants (requires alloc — `Sequential`/`Hashable` trait interfaces defined in prelude)
+- [x] **Trait method refinement constraints**: `fn div(a: Self, b: Self where v != 0) -> Self;` — per-parameter `where` clauses on trait methods, parsed and stored as `param_constraints`
+- [x] **Law body expansion (verify_impl)**: `substitute_method_calls()` expands law expressions by replacing method calls with impl bodies (e.g., `add(a,b)` → `(a + b)`), enabling precise Z3 verification with word-boundary-aware substitution
+- [x] **alloc roadmap design**: `Vector<T>` / `HashMap<K, V>` architecture documented in `std/prelude.mm` with `Sequential`/`Hashable` trait interfaces as migration bridge
+- [ ] `Vector<T>` / `HashMap<K, V>` concrete implementation (requires alloc runtime — `Sequential`/`Hashable` trait interfaces defined in prelude)
 - [ ] Equality ensures propagation (`ensures: result == n + 1` for chained call verification)
 - [ ] Fully qualified name (FQN) dot-notation in source code (`math.add(x, y)`)
 - [ ] Incremental build (re-verify only changed modules)

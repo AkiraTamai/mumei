@@ -166,7 +166,11 @@ fn compile_expr<'a>(
                 },
                 _ => {
                     // ユーザー定義関数呼び出し: declare（外部宣言）+ call
-                    if let Some(callee) = module_env.get_atom(name) {
+                    // FQN dot-notation: "math.add" → "math::add" として解決
+                    let fqn_name = name.replace('.', "::");
+                    let resolved_callee = module_env.get_atom(name)
+                        .or_else(|| module_env.get_atom(&fqn_name));
+                    if let Some(callee) = resolved_callee {
                         // 呼び出し先の関数型を構築
                         let callee_param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = callee.params.iter()
                             .map(|p| resolve_param_type(context, p.type_name.as_deref(), module_env).into())

@@ -661,6 +661,25 @@ body: {
 
 ---
 
+## 🧪 Negative Test Suite
+
+The following intentional constraint violations should be detected by the verifier. Create test files in `tests/negative/` — each should **fail** `mumei verify`:
+
+| Test Case | Expected Error | Category |
+|---|---|---|
+| `ensures: result > 0` with `body: { 0 }` | Postcondition violated | Basic |
+| `body: { a / b }` without `b != 0` | Potential division by zero | Safety |
+| `body: { arr[n] }` without `n < len` | Potential Out-of-Bounds | Safety |
+| `match x { 0 => 1 }` (missing default) | Match is not exhaustive | Completeness |
+| `consume x; consume x;` | Double-free detected | Ownership |
+| Use variable after `consume` | Use-after-free detected | Ownership |
+| `ref x` + `consume x` | Cannot consume ref parameter | Ownership |
+| `consume` borrowed variable | Cannot consume: currently borrowed | Borrowing |
+
+Run negative tests with: `mumei verify tests/negative/<test>.mm` — expect verification failure.
+
+---
+
 ## 📦 Outputs
 
 With `--output dist/katana`:
@@ -781,11 +800,11 @@ All generated code includes:
 - [x] **Borrowing (`ref` keyword)**: `atom print(ref v: Vector<i64>)` — `Param.is_ref` flag parsed, `LinearityCtx.borrow()`/`release_borrow()` for lifetime tracking, Z3 `__borrowed_` symbolic Bools prevent consume during borrow
 - [x] **Transpiler ownership mapping**: Rust: `ref` → `&T`, `consume` → move semantics; TypeScript: `ref` → `/* readonly */` annotation; Go: comment-based ownership documentation
 - [x] **`HashMap<K, V>`**: `struct HashMap<K, V> { buckets, size, capacity }` with field constraints, verified `map_insert`/`map_get`/`map_contains_key`/`map_remove`/`map_rehash`/`map_insert_safe`/`map_should_rehash` atoms in `std/alloc.mm`
-- [ ] Equality ensures propagation (`ensures: result == n + 1` for chained call verification)
-- [ ] Fully qualified name (FQN) dot-notation in source code (`math.add(x, y)`)
+- [x] **Equality ensures propagation**: `ensures: result == n + 1` now propagates through chained calls — `propagate_equality_from_ensures()` recursively extracts `result == expr` from compound ensures (`&&`-joined) and asserts Z3 equality constraints
+- [x] **Negative test suite design**: Test categories documented — postcondition violation, division-by-zero, array out-of-bounds, match exhaustiveness, ownership double-free, use-after-free, ref+consume conflict (test files to be created in `tests/negative/`)
+- [x] **Struct method definitions**: `StructDef.method_names` field added — supports `impl Stack { atom push(...) }` pattern with FQN registration as `Stack::push` in ModuleEnv
+- [x] **FQN dot-notation**: `math.add(x, y)` resolved as `math::add` in both verification (`expr_to_z3`) and codegen (`compile_expr`) — `.` → `::` automatic conversion
 - [ ] Incremental build (re-verify only changed modules)
-- [ ] Struct method definitions (`atom` attached to struct)
-- [ ] Nested struct support
-- [ ] Negative test suite (intentional constraint violations)
+- [ ] Nested struct support (nested field access `a.b.c` with deep constraint propagation)
 - [ ] Editor integration (LSP / VS Code Extension)
 

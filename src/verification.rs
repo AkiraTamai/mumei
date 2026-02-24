@@ -945,7 +945,14 @@ fn expr_to_z3<'a>(
                     // ユーザー定義関数呼び出し: 契約による検証（Compositional Verification）
                     // 呼び出し先の requires を現在のコンテキストで証明し、
                     // 成功すれば ensures を事実として追加する
-                    if let Some(callee) = vc.module_env.get_atom(name).cloned() {
+                    //
+                    // FQN dot-notation サポート:
+                    // "math.add" → "math::add" として ModuleEnv から解決する。
+                    // これにより `math.add(x, y)` と `math::add(x, y)` の両方が動作する。
+                    let fqn_name = name.replace('.', "::");
+                    let resolved_callee = vc.module_env.get_atom(name).cloned()
+                        .or_else(|| vc.module_env.get_atom(&fqn_name).cloned());
+                    if let Some(callee) = resolved_callee {
                         // 引数を評価
                         let mut arg_vals = Vec::new();
                         for arg in args {
@@ -1009,15 +1016,70 @@ fn expr_to_z3<'a>(
                         };
 
                         // ensures を事実として solver に追加（result を呼び出し結果に束縛）
+                        //
+                        // Equality Ensures Propagation:
+                        // ensures 内に `result == expr` の形式の等式が含まれる場合、
+                        // シンボリック result を具体的な式に直接束縛する。
+                        // これにより `let x = increment(n);` で `x == n + 1` が
+                        // 呼び出し元のコンテキストに伝播し、連鎖呼び出しの検証精度が向上する。
+                        //
+                        // 例: ensures: result == n + 1;
+                        //   → call_env に result = call_increment_0 を挿入
+                        //   → Z3 に call_increment_0 == n + 1 を assert
+                        //   → 後続の `increment(x)` で x >= 1 だけでなく x == n + 1 が使える
                         if callee.ensures.trim() != "true" {
                             call_env.insert("result".to_string(), result_z3.clone());
                             let ens_ast = parse_expression(&callee.ensures);
+
+                            // Equality ensures の特別処理:
+                            // ensures が `result == expr` の形式の場合、
+                            // expr を評価して result と等価であることを直接 assert する。
+                            // これにより Z3 が等式を完全に活用できる。
                             let ens_z3 = expr_to_z3(vc, &ens_ast, &mut call_env, None)?;
                             if let Some(ens_bool) = ens_z3.as_bool() {
                                 if let Some(solver) = solver_opt {
                                     solver.assert(&ens_bool);
                                 }
                             }
+
+                            // 追加: ensures 式が `result == expr` の形式かチェックし、
+                            // 該当する場合は result のシンボリック値に対して
+                            // 等式制約を明示的に追加する（Z3 の等式推論を強化）
+                            if let Expr::BinaryOp(left, Op::Eq, right) = &ens_ast {
+                                if let Expr::Variable(ref var_name) = left.as_ref() {
+                                    if var_name == "result" {
+                                        // ensures: result == <expr> の場合
+                                        // <expr> を call_env で評価し、result_z3 == eval(<expr>) を assert
+                                        if let Ok(rhs_val) = expr_to_z3(vc, right, &mut call_env, None) {
+                                            if let Some(solver) = solver_opt {
+                                                if let (Some(res_int), Some(rhs_int)) = (result_z3.as_int(), rhs_val.as_int()) {
+                                                    solver.assert(&res_int._eq(&rhs_int));
+                                                } else if let (Some(res_float), Some(rhs_float)) = (result_z3.as_float(), rhs_val.as_float()) {
+                                                    solver.assert(&res_float._eq(&rhs_float));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                // ensures: <expr> == result の逆順もサポート
+                                if let Expr::Variable(ref var_name) = right.as_ref() {
+                                    if var_name == "result" {
+                                        if let Ok(lhs_val) = expr_to_z3(vc, left, &mut call_env, None) {
+                                            if let Some(solver) = solver_opt {
+                                                if let (Some(res_int), Some(lhs_int)) = (result_z3.as_int(), lhs_val.as_int()) {
+                                                    solver.assert(&res_int._eq(&lhs_int));
+                                                } else if let (Some(res_float), Some(lhs_float)) = (result_z3.as_float(), lhs_val.as_float()) {
+                                                    solver.assert(&res_float._eq(&lhs_float));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // 複合 ensures（&& で結合された複数条件）内の等式も伝播
+                            // ensures: result >= 0 && result == n + 1 のような場合
+                            propagate_equality_from_ensures(vc, &ens_ast, &result_z3, &mut call_env, solver_opt)?;
                         }
 
                         Ok(result_z3)
@@ -1694,6 +1756,62 @@ fn format_counterexample(
         }).collect();
         format!("(could not evaluate; covered patterns: [{}])", covered.join(", "))
     }
+}
+
+/// 複合 ensures 式（&& で結合された複数条件）から等式 `result == expr` を
+/// 再帰的に抽出し、Z3 solver に assert する。
+///
+/// ensures: result >= 0 && result == n + 1
+/// → `result >= 0` と `result == n + 1` の両方を assert
+/// → 特に `result == n + 1` は等式制約として明示的に追加
+///
+/// ensures: result == a + b && result >= 0 && result <= 100
+/// → 3つの条件すべてを assert + `result == a + b` の等式を追加
+fn propagate_equality_from_ensures<'a>(
+    vc: &VCtx<'a>,
+    expr: &Expr,
+    result_z3: &Dynamic<'a>,
+    call_env: &mut Env<'a>,
+    solver_opt: Option<&Solver<'a>>,
+) -> MumeiResult<()> {
+    match expr {
+        // && で結合された複合条件: 左右を再帰的に処理
+        Expr::BinaryOp(left, Op::And, right) => {
+            propagate_equality_from_ensures(vc, left, result_z3, call_env, solver_opt)?;
+            propagate_equality_from_ensures(vc, right, result_z3, call_env, solver_opt)?;
+        }
+        // result == <expr> の等式
+        Expr::BinaryOp(left, Op::Eq, right) => {
+            let is_result_left = matches!(left.as_ref(), Expr::Variable(ref v) if v == "result");
+            let is_result_right = matches!(right.as_ref(), Expr::Variable(ref v) if v == "result");
+
+            if is_result_left {
+                if let Ok(rhs_val) = expr_to_z3(vc, right, call_env, None) {
+                    if let Some(solver) = solver_opt {
+                        if let (Some(res_int), Some(rhs_int)) = (result_z3.as_int(), rhs_val.as_int()) {
+                            solver.assert(&res_int._eq(&rhs_int));
+                        } else if let (Some(res_float), Some(rhs_float)) = (result_z3.as_float(), rhs_val.as_float()) {
+                            solver.assert(&res_float._eq(&rhs_float));
+                        }
+                    }
+                }
+            } else if is_result_right {
+                if let Ok(lhs_val) = expr_to_z3(vc, left, call_env, None) {
+                    if let Some(solver) = solver_opt {
+                        if let (Some(res_int), Some(lhs_int)) = (result_z3.as_int(), lhs_val.as_int()) {
+                            solver.assert(&res_int._eq(&lhs_int));
+                        } else if let (Some(res_float), Some(lhs_float)) = (result_z3.as_float(), lhs_val.as_float()) {
+                            solver.assert(&res_float._eq(&lhs_float));
+                        }
+                    }
+                }
+            }
+        }
+        _ => {
+            // 等式でも && でもない条件はスキップ（既に全体の ensures として assert 済み）
+        }
+    }
+    Ok(())
 }
 
 fn save_visualizer_report(output_dir: &Path, status: &str, name: &str, a: &str, b: &str, reason: &str) {

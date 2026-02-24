@@ -183,6 +183,10 @@ pub struct StructDef {
     /// Generics: 型パラメータリスト（例: ["T"]）。非ジェネリックなら空。
     pub type_params: Vec<String>,
     pub fields: Vec<StructField>,
+    /// 構造体に紐付けられた Atom（メソッド）の名前リスト。
+    /// `impl Stack { atom push(...) ... }` で定義されたメソッドを追跡する。
+    /// 実際の Atom 定義は ModuleEnv.atoms に "Stack::push" のような FQN で登録される。
+    pub method_names: Vec<String>,
 }
 
 /// インポート宣言
@@ -437,7 +441,7 @@ pub fn parse_module(source: &str) -> Vec<Item> {
                 }
             })
             .collect();
-        items.push(Item::StructDef(StructDef { name, type_params, fields }));
+        items.push(Item::StructDef(StructDef { name, type_params, fields, method_names: vec![] }));
     }
 
     // enum 定義: enum Name { ... } または enum Name<T> { ... }

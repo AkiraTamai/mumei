@@ -127,6 +127,43 @@ fn compile_expr<'a>(
                     // フォールバック: 配列が見つからない場合はダミー定数
                     Ok(context.i64_type().const_int(0, false).into())
                 },
+                "alloc_raw" => {
+                    // alloc_raw(size) → malloc(size * 8) → i64 としてポインタを返す
+                    let size_val = compile_expr(context, builder, module, function, &args[0], variables, array_ptrs, module_env)?;
+                    let malloc_fn = module.get_function("malloc").unwrap_or_else(|| {
+                        let ptr_type = context.ptr_type(AddressSpace::default());
+                        let fn_type = ptr_type.fn_type(&[context.i64_type().into()], false);
+                        module.add_function("malloc", fn_type, Some(inkwell::module::Linkage::External))
+                    });
+                    // size * 8 (bytes per i64 element)
+                    let byte_size = llvm!(builder.build_int_mul(
+                        size_val.into_int_value(),
+                        context.i64_type().const_int(8, false),
+                        "byte_size"
+                    ));
+                    let ptr = llvm!(builder.build_call(malloc_fn, &[byte_size.into()], "malloc_result"));
+                    let ptr_val = ptr.as_any_value_enum().into_pointer_value();
+                    // ポインタを i64 にキャスト（Mumei の RawPtr = i64 where v >= 0）
+                    Ok(llvm!(builder.build_ptr_to_int(ptr_val, context.i64_type(), "ptr_as_int")).into())
+                },
+                "dealloc_raw" => {
+                    // dealloc_raw(ptr) → free(ptr)
+                    let ptr_int = compile_expr(context, builder, module, function, &args[0], variables, array_ptrs, module_env)?;
+                    let free_fn = module.get_function("free").unwrap_or_else(|| {
+                        let ptr_type = context.ptr_type(AddressSpace::default());
+                        let fn_type = context.void_type().fn_type(&[ptr_type.into()], false);
+                        module.add_function("free", fn_type, Some(inkwell::module::Linkage::External))
+                    });
+                    // i64 をポインタにキャスト
+                    let ptr_val = llvm!(builder.build_int_to_ptr(
+                        ptr_int.into_int_value(),
+                        context.ptr_type(AddressSpace::default()),
+                        "int_as_ptr"
+                    ));
+                    llvm!(builder.build_call(free_fn, &[ptr_val.into()], "free_call"));
+                    // 成功を示す 0 を返す
+                    Ok(context.i64_type().const_int(0, false).into())
+                },
                 _ => {
                     // ユーザー定義関数呼び出し: declare（外部宣言）+ call
                     if let Some(callee) = module_env.get_atom(name) {

@@ -675,6 +675,29 @@ pub fn verify(atom: &Atom, output_dir: &Path, module_env: &ModuleEnv) -> MumeiRe
         }
     }
 
+    // 2d. 線形性チェック: consumed_params の Z3 シンボリック Bool 連携
+    // consume 宣言されたパラメータに対して is_alive フラグを Z3 上で追跡する。
+    // body 検証後、consume 対象パラメータが「消費可能」であることを Z3 で証明する。
+    let mut linearity_ctx = LinearityCtx::new();
+    if !atom.consumed_params.is_empty() {
+        for param_name in &atom.consumed_params {
+            // パラメータが実際に存在するか検証
+            if !atom.params.iter().any(|p| p.name == *param_name) {
+                return Err(MumeiError::TypeError(
+                    format!("consume target '{}' is not a parameter of atom '{}'", param_name, atom.name)
+                ));
+            }
+            // LinearityCtx に登録
+            linearity_ctx.register(param_name);
+
+            // Z3 上で is_alive シンボリック Bool を作成し、初期値 true を assert
+            let alive_name = format!("__alive_{}", param_name);
+            let alive_bool = Bool::new_const(&ctx, alive_name.as_str());
+            solver.assert(&alive_bool); // 初期状態: alive = true
+            env.insert(alive_name, alive_bool.into());
+        }
+    }
+
     // 3. 前提条件 (requires)
     if atom.requires.trim() != "true" {
         let req_ast = parse_expression(&atom.requires);
@@ -704,6 +727,33 @@ pub fn verify(atom: &Atom, output_dir: &Path, module_env: &ModuleEnv) -> MumeiRe
             solver.pop(1);
         }
         env.remove("result");
+    }
+
+    // 5b. 線形性チェック: consume 対象パラメータの検証
+    // body 実行後、consume 宣言されたパラメータが正しく消費されていることを確認。
+    // LinearityCtx に蓄積された違反（二重解放・Use-After-Free）があればエラー。
+    if !atom.consumed_params.is_empty() {
+        // consume 対象パラメータを消費済みとしてマーク
+        for param_name in &atom.consumed_params {
+            if let Err(e) = linearity_ctx.consume(param_name) {
+                return Err(MumeiError::VerificationError(
+                    format!("Linearity violation in atom '{}': {}", atom.name, e)
+                ));
+            }
+
+            // Z3 上で is_alive を false に更新（消費後のアクセスを禁止）
+            let alive_name = format!("__alive_{}", param_name);
+            let alive_false = Bool::from_bool(&ctx, false);
+            env.insert(alive_name, alive_false.into());
+        }
+
+        // 蓄積された違反をチェック
+        if linearity_ctx.has_violations() {
+            let violations = linearity_ctx.get_violations().join("\n  ");
+            return Err(MumeiError::VerificationError(
+                format!("Linearity violations in atom '{}':\n  {}", atom.name, violations)
+            ));
+        }
     }
 
     if solver.check() == SatResult::Unsat {

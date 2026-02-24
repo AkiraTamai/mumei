@@ -154,6 +154,11 @@ pub struct Atom {
     pub forall_constraints: Vec<Quantifier>,
     pub ensures: String,
     pub body_expr: String,
+    /// 所有権の消費対象パラメータ名リスト（Linear Types）
+    /// `atom take(x: T) consume x;` の場合: consumed_params = ["x"]
+    /// consume されたパラメータは body 内で使用後、再利用不可となる。
+    /// LinearityCtx が Z3 と連携して二重使用・Use-After-Free を検出する。
+    pub consumed_params: Vec<String>,
 }
 
 /// 構造体フィールド定義（オプションで精緻型制約を保持）
@@ -663,6 +668,18 @@ pub fn parse_atom(source: &str) -> Atom {
         forall_constraints.push(Quantifier { q_type: QuantifierType::Exists, var: cap[1].to_string(), start: cap[2].trim().to_string(), end: cap[3].trim().to_string(), condition: cap[4].trim().to_string() });
     }
 
+    // consume 句のパース: "consume x, y;" または "consume x;"
+    // body: の前に出現する consume 宣言を検出
+    let consume_re = Regex::new(r"consume\s+([^;]+);").unwrap();
+    let consumed_params: Vec<String> = consume_re.captures_iter(source)
+        .flat_map(|cap| {
+            cap[1].split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
     Atom {
         name,
         type_params,
@@ -672,6 +689,7 @@ pub fn parse_atom(source: &str) -> Atom {
         forall_constraints,
         ensures,
         body_expr: body_raw,
+        consumed_params,
     }
 }
 

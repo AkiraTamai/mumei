@@ -30,6 +30,8 @@ Only atoms that pass formal verification are compiled to LLVM IR and transpiled 
 | **Law Body Expansion** | `verify_impl` expands `add(a,b)` → `(a + b)` using impl body for precise Z3 law verification |
 | **Built-in Traits** | `Eq`, `Ord`, `Numeric` — auto-implemented for `i64`, `u64`, `f64` |
 | **Standard Prelude** | `std/prelude.mm` auto-imported — traits, ADTs, `Sequential`/`Hashable` interfaces |
+| **Dynamic Memory (alloc)** | `RawPtr`, `Vector<T>` with `ptr`/`len`/`cap` field constraints, verified `vec_push`/`vec_get`/`vec_drop` |
+| **Ownership Tracking** | `Owned` trait + `LinearityCtx` — double-free and use-after-free detection at compile time |
 | **Multi-target Transpiler** | Enum/Struct/Atom/Trait/Impl → Rust + Go + TypeScript |
 | **Standard Library** | `std/option.mm`, `std/stack.mm`, `std/result.mm`, `std/list.mm` — verified generic core types |
 | **Module System** | `import "path" as alias;` — multi-file builds with compositional verification |
@@ -296,7 +298,21 @@ The prelude is **automatically imported** by the compiler — no `import` statem
 | **Collection Interfaces** | `Sequential`, `Hashable` | `non_negative_length`, `deterministic` |
 | **Atoms** | `prelude_is_some`, `prelude_is_none`, `prelude_is_ok` | — |
 
-The `Sequential` and `Hashable` traits are **abstract interfaces** for future `Vector<T>` / `HashMap<K, V>` implementations. Code written against these traits will seamlessly benefit from dynamic memory (`alloc`) when it becomes available.
+The `Sequential` and `Hashable` traits are **abstract interfaces** for `Vector<T>` / `HashMap<K, V>` implementations.
+
+#### Dynamic Memory (`alloc`) Foundation
+
+The prelude also provides the foundation for dynamic memory management:
+
+| Category | Definitions | Z3 Guarantees |
+|---|---|---|
+| **Pointer Types** | `RawPtr` (≥0), `NullablePtr` (≥-1) | Null safety via refinement types |
+| **Ownership** | `Owned` trait (`is_alive`, `consume`) | `law alive_before_consume` — no use-after-free |
+| **Vector** | `Vector<T>` struct (`ptr`, `len`, `cap`) | Field constraints: `ptr≥0`, `len≥0`, `cap>0` |
+| **Vector Ops** | `vec_push`, `vec_get`, `vec_drop`, `vec_push_safe` | Bounds checking, overflow prevention |
+| **Alloc** | `alloc_raw`, `dealloc_raw` | Valid pointer requirements |
+
+The compiler's `LinearityCtx` tracks variable liveness to detect double-free and use-after-free at compile time.
 
 ### Verified Core Types (`std/`)
 
@@ -752,7 +768,10 @@ All generated code includes:
 - [x] **Trait method refinement constraints**: `fn div(a: Self, b: Self where v != 0) -> Self;` — per-parameter `where` clauses on trait methods, parsed and stored as `param_constraints`
 - [x] **Law body expansion (verify_impl)**: `substitute_method_calls()` expands law expressions by replacing method calls with impl bodies (e.g., `add(a,b)` → `(a + b)`), enabling precise Z3 verification with word-boundary-aware substitution
 - [x] **alloc roadmap design**: `Vector<T>` / `HashMap<K, V>` architecture documented in `std/prelude.mm` with `Sequential`/`Hashable` trait interfaces as migration bridge
-- [ ] `Vector<T>` / `HashMap<K, V>` concrete implementation (requires alloc runtime — `Sequential`/`Hashable` trait interfaces defined in prelude)
+- [x] **Dynamic memory foundation**: `RawPtr`/`NullablePtr` refined types, `Owned` trait (linearity law), `Vector<T>` struct with `ptr`/`len`/`cap` field constraints, verified `vec_push`/`vec_get`/`vec_drop`/`vec_push_safe` atoms
+- [x] **Linearity checking (LinearityCtx)**: Ownership tracking context for double-free and use-after-free detection — `register()`, `consume()`, `check_alive()` with violation accumulation
+- [ ] `HashMap<K, V>` concrete implementation (requires `Hashable + Eq` key constraints)
+- [ ] `consume` parameter modifier on atoms (`atom take(x: T) consume x;`) with Z3-backed linearity enforcement
 - [ ] Equality ensures propagation (`ensures: result == n + 1` for chained call verification)
 - [ ] Fully qualified name (FQN) dot-notation in source code (`math.add(x, y)`)
 - [ ] Incremental build (re-verify only changed modules)

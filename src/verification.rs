@@ -49,6 +49,85 @@ struct VCtx<'a> {
 }
 
 // =============================================================================
+// 線形性チェック（Linear Types / Ownership Tracking）
+// =============================================================================
+//
+// 動的メモリ管理における二重解放・Use-After-Free を防ぐために、
+// 変数の「生存状態」を追跡する。
+//
+// 設計:
+// - LinearityCtx が各変数の生存フラグ (is_alive) を管理
+// - consume(x) 呼び出し時に x を「消費済み」としてマーク
+// - 消費済み変数へのアクセスはコンパイルエラー
+//
+// 将来の拡張:
+// - atom のパラメータに `consume` 修飾子を追加
+//   例: atom take_ownership(resource: T) consume resource;
+// - Z3 上で is_alive フラグをシンボリック Bool として表現し、
+//   consume 後のアクセスを ¬is_alive(x) として検出
+
+/// 変数の線形性（所有権）追跡コンテキスト
+#[derive(Debug, Clone, Default)]
+pub struct LinearityCtx {
+    /// 変数名 → 生存状態（true = alive, false = consumed）
+    alive: HashMap<String, bool>,
+    /// 消費済み変数のアクセス違反リスト
+    violations: Vec<String>,
+}
+
+impl LinearityCtx {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 変数を生存状態で登録する
+    pub fn register(&mut self, name: &str) {
+        self.alive.insert(name.to_string(), true);
+    }
+
+    /// 変数を消費済みとしてマークする（所有権の移動）
+    /// 既に消費済みの場合は二重解放エラーを記録する
+    pub fn consume(&mut self, name: &str) -> Result<(), String> {
+        match self.alive.get(name) {
+            Some(true) => {
+                self.alive.insert(name.to_string(), false);
+                Ok(())
+            }
+            Some(false) => {
+                let msg = format!("Double-free detected: '{}' has already been consumed", name);
+                self.violations.push(msg.clone());
+                Err(msg)
+            }
+            None => {
+                // 追跡対象外の変数は無視（通常の値型）
+                Ok(())
+            }
+        }
+    }
+
+    /// 変数が生存しているかチェックする
+    /// 消費済み変数へのアクセスはエラーを記録する
+    pub fn check_alive(&mut self, name: &str) -> Result<(), String> {
+        if let Some(false) = self.alive.get(name) {
+            let msg = format!("Use-after-free detected: '{}' has been consumed and is no longer valid", name);
+            self.violations.push(msg.clone());
+            return Err(msg);
+        }
+        Ok(())
+    }
+
+    /// 蓄積された違反リストを返す
+    pub fn get_violations(&self) -> &[String] {
+        &self.violations
+    }
+
+    /// 違反があるかどうか
+    pub fn has_violations(&self) -> bool {
+        !self.violations.is_empty()
+    }
+}
+
+// =============================================================================
 // モジュール環境: グローバル static Mutex から構造体ベースの管理に移行
 // =============================================================================
 

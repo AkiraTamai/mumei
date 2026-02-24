@@ -691,6 +691,7 @@ All generated code includes:
 │   └── main.rs            # Compiler orchestrator (parse → resolve → mono → verify → codegen → transpile)
 ├── std/
 │   ├── prelude.mm         # Auto-imported: Eq/Ord/Numeric traits, Option/Result/List/Pair ADTs, Sequential/Hashable interfaces
+│   ├── alloc.mm           # Dynamic memory: RawPtr, Owned trait, Vector<T>, alloc/dealloc/vec_* atoms
 │   ├── option.mm          # Option<T> { None, Some(T) } — generic, verified
 │   ├── stack.mm           # Stack<T> { top, max } + push/pop/clear — generic, verified
 │   ├── result.mm          # Result<T, E> { Ok(T), Err(E) } — generic, verified

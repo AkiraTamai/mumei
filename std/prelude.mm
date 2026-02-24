@@ -113,134 +113,15 @@ trait Hashable {
 }
 
 // =============================================================
-// D. 動的メモリ管理（alloc）基盤
+// D. 動的メモリ管理（alloc）
 // =============================================================
-// RawPtr 型、所有権トレイト、Vector 構造体を定義する。
-// Z3 による線形性チェックと精緻型制約により、
-// 二重解放・メモリリーク・バッファオーバーフローを
-// コンパイル時に論理的に排除する。
-
-// --- STEP 1: RawPtr — 生ポインタの精緻型表現 ---
-// LLVM IR レベルでは i64 のラッパー。
-// Z3 上ではシンボリック整数として扱い、
-// null チェックや境界チェックを精緻型で保証する。
-// 有効なポインタは >= 0、null は -1 で表現。
-type RawPtr = i64 where v >= 0;
-type NullablePtr = i64 where v >= -1;
-
-// --- STEP 2: 所有権トレイト（Linear Types の近似）---
-// Owned トレイト: リソースの生存状態を追跡する。
-// law により「消費前は必ず生存している」ことを Z3 で保証。
+// RawPtr 型、所有権トレイト (Owned)、Vector<T> 構造体、
+// および alloc/dealloc/vec_* atom は std/alloc.mm に定義。
 //
-// Z3 による線形性の検証:
-//   各変数 x に対して is_alive(x) フラグを管理。
-//   consume(x) 呼び出し後、is_alive(x) == false となる。
-//   false になった変数へのアクセスは Z3 が Unsat を返し、
-//   コンパイルエラーとなる。
+// 使用方法:
+//   import "std/alloc" as alloc;
 //
-// atom take_ownership(resource: T) consume resource;
-//   → resource は以後使用不可（Z3 が追跡）
-trait Owned {
-    fn is_alive(a: Self) -> bool;
-    fn consume(a: Self) -> Self;
-    law alive_before_consume: is_alive(x) == true;
-}
-
-// --- STEP 3: Vector<T> 構造体定義 ---
-// ヒープ上のメモリを管理する動的配列。
-// 精緻型制約による不変条件（Z3 で常に検証）:
-//   - ptr >= 0（有効なポインタ）
-//   - len >= 0（要素数は非負）
-//   - cap > 0（容量は正）
-//   - len <= cap（暗黙: push の requires で保証）
-struct Vector<T> {
-    ptr: i64 where v >= 0,
-    len: i64 where v >= 0,
-    cap: i64 where v > 0
-}
-
-// --- Vector 操作 Atom ---
-
-// メモリ確保: 指定サイズのヒープメモリを確保
-// 失敗時は -1（null）を返す
-atom alloc_raw(size: i64)
-    requires: size > 0;
-    ensures: result >= -1;
-    body: {
-        if size > 0 { 0 } else { -1 }
-    }
-
-// メモリ解放: 有効なポインタのみ受け付ける
-atom dealloc_raw(ptr: i64)
-    requires: ptr >= 0;
-    ensures: result >= 0;
-    body: { 0 }
-
-// Vector 新規作成: 初期容量を指定して空の Vector を生成
-atom vec_new(initial_cap: i64)
-    requires: initial_cap > 0;
-    ensures: result >= 0;
-    body: { 0 }
-
-// Vector push: len < cap の場合のみ許可（Z3 がコンパイル時に検証）
-atom vec_push(vec_len: i64, vec_cap: i64)
-    requires: vec_len >= 0 && vec_cap > 0 && vec_len < vec_cap;
-    ensures: result >= 0 && result <= vec_cap;
-    body: { vec_len + 1 }
-
-// Vector get: 境界チェック付き（0 <= index < len）
-atom vec_get(vec_len: i64, index: i64)
-    requires: vec_len > 0 && index >= 0 && index < vec_len;
-    ensures: result >= 0;
-    body: { index }
-
-// Vector 長さ取得
-atom vec_len(len: i64)
-    requires: len >= 0;
-    ensures: result >= 0 && result == len;
-    body: { len }
-
-// Vector 空判定
-atom vec_is_empty(len: i64)
-    requires: len >= 0;
-    ensures: result >= 0 && result <= 1;
-    body: {
-        if len == 0 { 1 } else { 0 }
-    }
-
-// Vector 容量拡張
-atom vec_grow(old_cap: i64, new_cap: i64)
-    requires: old_cap > 0 && new_cap > old_cap;
-    ensures: result > old_cap;
-    body: { new_cap }
-
-// Vector 解放: メモリを解放し len を 0 にリセット
-atom vec_drop(vec_len: i64, vec_ptr: i64)
-    requires: vec_len >= 0 && vec_ptr >= 0;
-    ensures: result >= 0;
-    body: { 0 }
-
-// 安全な push: 容量チェック付き（Result 型: 0=Ok, 1=Err）
-atom vec_push_safe(vec_len: i64, vec_cap: i64)
-    requires: vec_len >= 0 && vec_cap > 0;
-    ensures: result >= 0 && result <= 1;
-    body: {
-        if vec_len < vec_cap { 0 } else { 1 }
-    }
-
-// --- HashMap ロードマップ（将来実装）---
-// Hashable + Eq をキー制約として使用:
-//
-//   struct HashMap<K, V> {
-//       buckets: i64 where v >= 0,
-//       size: i64 where v >= 0,
-//       capacity: i64 where v > 0
-//   }
-//
-//   atom map_insert<K: Hashable + Eq, V>(m: HashMap<K, V>, key: K, val: V)
-//       requires: m.size < m.capacity;
-//       ensures: result.size <= m.size + 1;
-//       body: { /* hash-based implementation */ };
+// 詳細は std/alloc.mm を参照。
 
 // =============================================================
 // E. Prelude Atoms（基本操作）

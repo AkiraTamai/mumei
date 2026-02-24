@@ -819,7 +819,7 @@ All generated code includes:
 - [x] **Negative test suite design**: Test categories documented — postcondition violation, division-by-zero, array out-of-bounds, match exhaustiveness, ownership double-free, use-after-free, ref+consume conflict (test files to be created in `tests/negative/`)
 - [x] **Struct method definitions**: `StructDef.method_names` field added — supports `impl Stack { atom push(...) }` pattern with FQN registration as `Stack::push` in ModuleEnv
 - [x] **FQN dot-notation**: `math.add(x, y)` resolved as `math::add` in both verification (`expr_to_z3`) and codegen (`compile_expr`) — `.` → `::` automatic conversion
-- [ ] Incremental build (re-verify only changed modules)
-- [ ] Nested struct support (nested field access `a.b.c` with deep constraint propagation)
+- [x] **Incremental build**: `.mumei_build_cache` with per-atom SHA-256 hashing (`compute_atom_hash`) — unchanged atoms skip Z3 verification in both `mumei verify` and `mumei build`, with cache invalidation on failure
+- [x] **Nested struct support**: `v.point.x` resolved via recursive `build_field_path()` → `["v", "point", "x"]` → env lookup as `v_point_x` / `__struct_v_point_x`, with recursive `extract_value` in LLVM codegen
 - [ ] Editor integration (LSP / VS Code Extension)
 

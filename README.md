@@ -303,62 +303,24 @@ The prelude is **automatically imported** by the compiler — no `import` statem
 
 The `Sequential` and `Hashable` traits are **abstract interfaces** for `Vector<T>` / `HashMap<K, V>` implementations.
 
-#### Dynamic Memory (`alloc`) Foundation
+The `std/alloc.mm` module provides `Vector<T>`, `HashMap<K, V>`, and ownership primitives (`RawPtr`, `Owned` trait).
 
-The prelude also provides the foundation for dynamic memory management:
-
-| Category | Definitions | Z3 Guarantees |
-|---|---|---|
-| **Pointer Types** | `RawPtr` (≥0), `NullablePtr` (≥-1) | Null safety via refinement types |
-| **Ownership** | `Owned` trait (`is_alive`, `consume`) | `law alive_before_consume` — no use-after-free |
-| **Vector** | `Vector<T>` struct (`ptr`, `len`, `cap`) | Field constraints: `ptr≥0`, `len≥0`, `cap>0` |
-| **Vector Ops** | `vec_push`, `vec_get`, `vec_drop`, `vec_push_safe` | Bounds checking, overflow prevention |
-| **HashMap** | `HashMap<K, V>` struct (`buckets`, `size`, `capacity`) | Field constraints: `buckets≥0`, `size≥0`, `capacity>0` |
-| **HashMap Ops** | `map_insert`, `map_get`, `map_remove`, `map_rehash`, `map_should_rehash` | Capacity checking, load factor monitoring |
-| **Alloc** | `alloc_raw`, `dealloc_raw` | Valid pointer requirements |
-
-The compiler's `LinearityCtx` tracks variable liveness to detect double-free and use-after-free at compile time.
-
-### Verified Core Types (`std/`)
-
-Mumei ships with a verified standard library that can be imported into any `.mm` file:
-
-```mumei
-import "std/option" as option;
-import "std/stack" as stack;
-import "std/result" as result;
-import "std/list" as list;
-```
-
-| Module | Types | Atoms |
-|---|---|---|
-| `std/option.mm` | `Option<T> { None, Some(T) }` | `is_some`, `is_none`, `unwrap_or` |
-| `std/stack.mm` | `Stack<T> { top, max }` | `stack_push`, `stack_pop`, `stack_is_empty`, `stack_is_full`, `stack_clear` |
-| `std/result.mm` | `Result<T, E> { Ok(T), Err(E) }` | `is_ok`, `is_err`, `unwrap_or_default`, `safe_divide` |
-| `std/list.mm` | `List { Nil, Cons(i64, Self) }` | `is_empty`, `head_or`, `is_sorted_pair`, `insert_sorted` |
-
-All atoms in `std/` are formally verified — their `requires`/`ensures` contracts are proven by Z3 at compile time. When imported, only the contracts are trusted (body is not re-verified).
-
-### Std Path Resolution
-
-The resolver searches for `std/` imports in the following order:
-
-1. **Project root** — `base_dir/std/option.mm`
-2. **Compiler binary directory** — alongside the `mumei` executable
-3. **Current working directory** — `cwd/std/option.mm`
-4. **`CARGO_MANIFEST_DIR`** — for development builds
-5. **`MUMEI_STD_PATH` env var** — custom installation path
+> 📖 **Full standard library reference**: [`docs/STDLIB.md`](docs/STDLIB.md)
 
 ---
 
 ## 🛠️ Forging Process
 
-1. **Polishing (Parser):** Parses `import`, `type`, `struct`, `enum`, `trait`, `impl`, and `atom` definitions. Supports generics (`<T: Trait>`), `if/else`, `let`, `while invariant decreases`, `match` with guards, function calls, array access, struct init, field access, and recursive ADT (`Self`).
-2. **Resolving (Resolver):** Recursively resolves `import` declarations, builds the dependency graph, detects circular imports, and registers all symbols (types, structs, enums, traits, impls, atoms) into `ModuleEnv`.
-3. **Monomorphization:** Collects generic type instances (`Stack<i64>`, `Stack<f64>`) and expands them into concrete definitions. Trait bounds are validated against registered `impl`s.
-4. **Verification (Z3):** Verifies `requires`, `ensures`, loop invariants, termination (decreases), struct field constraints, division-by-zero, array bounds, **inter-atom call contracts**, **match exhaustiveness** (SMT-based with counter-examples), **Enum domain constraints**, and **trait law satisfaction** (impl laws verified by Z3).
-5. **Tempering (LLVM IR):** Emits a `.ll` file per atom. Match expressions use Pattern Matrix codegen (linear if-else chain). LLVM StructType support and `declare` for external atom calls. All definitions resolved via `ModuleEnv`.
-6. **Sharpening (Transpiler):** Generates **Enum**, **Struct**, **Trait** (Rust `trait` / Go `interface` / TypeScript `interface`), **Impl** (Rust `impl` / Go methods / TypeScript const objects), and **Atom** definitions. Outputs `.rs`, `.go`, and `.ts` files.
+| Stage | Name | Description |
+|---|---|---|
+| 1 | **Polishing** (Parser) | Parses all definitions including generics, `ref`/`consume`, match with guards |
+| 2 | **Resolving** (Resolver) | Import resolution, circular detection, prelude auto-load, incremental cache |
+| 3 | **Monomorphization** | Expands `Stack<i64>`, `Stack<f64>` into concrete definitions |
+| 4 | **Verification** (Z3) | Contracts, invariants, termination, exhaustiveness, ownership, borrowing |
+| 5 | **Tempering** (LLVM IR) | Pattern Matrix codegen, StructType, malloc/free, nested extract_value |
+| 6 | **Sharpening** (Transpiler) | Rust + Go + TypeScript with ownership mapping (`ref` → `&T`) |
+
+> 📖 **Detailed architecture**: `docs/ARCHITECTURE.md` (to be created)
 
 ---
 

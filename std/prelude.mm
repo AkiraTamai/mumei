@@ -104,9 +104,10 @@ trait Sequential {
 // HashMap<K, V> の Key 制約として使用する。
 // 決定性（同じ値は同じハッシュ）を Z3 で保証する。
 //
-// 将来:
-//   atom lookup<K: Hashable + Eq, V>(map: HashMap<K, V>, key: K) -> Option<V>
-//   のように型制約として活用する。
+// HashMap<K, V> の具体実装は std/alloc.mm に定義済み。
+// Usage:
+//   import "std/alloc" as alloc;
+//   // map_insert, map_get, map_contains_key, map_remove 等が利用可能
 trait Hashable {
     fn hash(a: Self) -> i64;
     law deterministic: hash(x) == hash(x);

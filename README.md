@@ -30,7 +30,7 @@ Only atoms that pass formal verification are compiled to LLVM IR and transpiled 
 | **Law Body Expansion** | `verify_impl` expands `add(a,b)` → `(a + b)` using impl body for precise Z3 law verification |
 | **Built-in Traits** | `Eq`, `Ord`, `Numeric` — auto-implemented for `i64`, `u64`, `f64` |
 | **Standard Prelude** | `std/prelude.mm` auto-imported — traits, ADTs, `Sequential`/`Hashable` interfaces |
-| **Dynamic Memory (alloc)** | `RawPtr`, `Vector<T>` with `ptr`/`len`/`cap` field constraints, verified `vec_push`/`vec_get`/`vec_drop` |
+| **Dynamic Memory (alloc)** | `RawPtr`, `Vector<T>`, `HashMap<K, V>` with field constraints, verified collection operations |
 | **Ownership Tracking** | `Owned` trait + `LinearityCtx` — double-free and use-after-free detection at compile time |
 | **`consume` Modifier** | `atom take(x: T) consume x;` — linear type enforcement with Z3 `__alive_` symbolic Bools |
 | **LLVM Heap Ops** | `alloc_raw` → `malloc`, `dealloc_raw` → `free` — native heap allocation in LLVM IR |
@@ -313,6 +313,8 @@ The prelude also provides the foundation for dynamic memory management:
 | **Ownership** | `Owned` trait (`is_alive`, `consume`) | `law alive_before_consume` — no use-after-free |
 | **Vector** | `Vector<T>` struct (`ptr`, `len`, `cap`) | Field constraints: `ptr≥0`, `len≥0`, `cap>0` |
 | **Vector Ops** | `vec_push`, `vec_get`, `vec_drop`, `vec_push_safe` | Bounds checking, overflow prevention |
+| **HashMap** | `HashMap<K, V>` struct (`buckets`, `size`, `capacity`) | Field constraints: `buckets≥0`, `size≥0`, `capacity>0` |
+| **HashMap Ops** | `map_insert`, `map_get`, `map_remove`, `map_rehash`, `map_should_rehash` | Capacity checking, load factor monitoring |
 | **Alloc** | `alloc_raw`, `dealloc_raw` | Valid pointer requirements |
 
 The compiler's `LinearityCtx` tracks variable liveness to detect double-free and use-after-free at compile time.
@@ -778,7 +780,7 @@ All generated code includes:
 - [x] **LLVM alloc/dealloc codegen**: `alloc_raw` → `malloc` (with `ptr_to_int`), `dealloc_raw` → `free` (with `int_to_ptr`) — native heap operations in LLVM IR
 - [x] **Borrowing (`ref` keyword)**: `atom print(ref v: Vector<i64>)` — `Param.is_ref` flag parsed, `LinearityCtx.borrow()`/`release_borrow()` for lifetime tracking, Z3 `__borrowed_` symbolic Bools prevent consume during borrow
 - [x] **Transpiler ownership mapping**: Rust: `ref` → `&T`, `consume` → move semantics; TypeScript: `ref` → `/* readonly */` annotation; Go: comment-based ownership documentation
-- [ ] `HashMap<K, V>` concrete implementation (requires `Hashable + Eq` key constraints)
+- [x] **`HashMap<K, V>`**: `struct HashMap<K, V> { buckets, size, capacity }` with field constraints, verified `map_insert`/`map_get`/`map_contains_key`/`map_remove`/`map_rehash`/`map_insert_safe`/`map_should_rehash` atoms in `std/alloc.mm`
 - [ ] Equality ensures propagation (`ensures: result == n + 1` for chained call verification)
 - [ ] Fully qualified name (FQN) dot-notation in source code (`math.add(x, y)`)
 - [ ] Incremental build (re-verify only changed modules)

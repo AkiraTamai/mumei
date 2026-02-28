@@ -101,14 +101,16 @@ atom result_or_else(res: i64, alternative: i64)
     }
 
 // --- MapErr: Err の中身を変換 ---
-// res が Err なら mapped_err を返し、Ok ならそのまま Ok(0) を返す。
+// res が Err なら Err タグ(1) を返し、Ok ならそのまま Ok(0) を返す。
+// タグベースモデルでは Err の「中身」は別途管理するため、
+// ここではタグの保存のみを行う。
 atom result_map_err(res: i64, mapped_err: i64)
     requires: res >= 0 && res <= 1;
     ensures: result >= 0 && result <= 1;
     body: {
         match res {
             0 => 0,
-            _ => mapped_err
+            _ => 1
         }
     }
 

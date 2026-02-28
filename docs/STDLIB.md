@@ -123,6 +123,10 @@ import "std/option" as option;
 | `is_some(opt)` | Returns 1 if Some, 0 if None |
 | `is_none(opt)` | Returns 1 if None, 0 if Some |
 | `unwrap_or(opt, default)` | Returns value or default |
+| `map_apply(opt, default, mapped)` | Map: applies transformation (Some→mapped, None→default) |
+| `and_then_apply(opt, inner_opt)` | AndThen/FlatMap: chains Option-returning operations |
+| `or_else(opt, alternative)` | OrElse: provides fallback Option |
+| `filter(opt, condition)` | Filter: Some→None if condition is false |
 
 ---
 
@@ -158,6 +162,10 @@ import "std/result" as result;
 | `is_err(res)` | Returns 1 if Err, 0 if Ok |
 | `unwrap_or_default(res, default)` | Returns value or default |
 | `safe_divide(a, b)` | Division returning Result (Err on zero) |
+| `result_map_apply(res, default, mapped)` | Map: Ok→mapped, Err→default |
+| `result_and_then(res, inner_res)` | AndThen/FlatMap: chains Result operations |
+| `result_or_else(res, alternative)` | OrElse: provides fallback on Err |
+| `result_map_err(res, mapped_err)` | MapErr: transforms Err value |
 
 ---
 
@@ -177,6 +185,17 @@ enum List { Nil, Cons(i64, Self) }
 | `head_or(list, default)` | Get head or default |
 | `is_sorted_pair(a, b)` | Check if a <= b |
 | `insert_sorted(val, sorted_tag)` | Insert into sorted position |
+
+### Immutable List Operations
+
+| Atom | Requires | Ensures | Description |
+|---|---|---|---|
+| `list_head(list)` | `list ∈ {0,1}` | `result ∈ {0,1}` | Head as Option (Nil→None, Cons→Some) |
+| `list_tail(list)` | `list ∈ {0,1}` | `result ∈ {0,1}` | Tail (new list, original unchanged) |
+| `list_append(list, value)` | `list ∈ {0,1}` | `result == 1` | Append returns non-empty list |
+| `list_prepend(list, value)` | `list ∈ {0,1}` | `result == 1` | Prepend (O(1), Cons construction) |
+| `list_length(list)` | `list ∈ {0,1}` | `result >= 0` | Length (tag-based abstraction) |
+| `list_reverse(list)` | `list ∈ {0,1}` | `result == list` | Reverse (tag preserved) |
 
 ### Sort Algorithms (Verified)
 

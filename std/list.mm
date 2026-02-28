@@ -58,6 +58,88 @@ atom insert_sorted(val: i64, sorted_tag: i64)
     }
 
 // =============================================================
+// 不変操作（Immutable List Operations）
+// =============================================================
+// 元の List を変更せず、常に新しい値を返す操作群。
+// 意図しない副作用（Side Effects）を完全に排除する。
+//
+// 設計: mumei の atom は純粋関数（副作用なし）であり、
+// 入力を変更しないことが言語レベルで保証される。
+// ref mut を使わない限り、全ての操作は不変（immutable）。
+
+// --- Head: リストの先頭要素を Option として返す ---
+// 空リスト(Nil, tag=0) → None(0)
+// 非空リスト(Cons, tag=1) → Some(1)
+// 実際の値はタグベースの抽象化のため、存在の有無のみ返す。
+atom list_head(list: i64)
+    requires: list >= 0 && list <= 1;
+    ensures: result >= 0 && result <= 1;
+    body: {
+        match list {
+            0 => 0,
+            _ => 1
+        }
+    }
+
+// --- Tail: 先頭を除いた残りのリスト ---
+// 空リスト → 空リスト(Nil, 0)
+// 非空リスト → 残りのリスト（タグベースでは Cons(1) or Nil(0)）
+// 不変操作: 元のリストは変更されない。
+atom list_tail(list: i64)
+    requires: list >= 0 && list <= 1;
+    ensures: result >= 0 && result <= 1;
+    body: {
+        match list {
+            0 => 0,
+            _ => 0
+        }
+    }
+
+// --- Append: 末尾に要素を追加した新しいリストを返す ---
+// 不変操作: 元のリストは変更されず、新しいリストが生成される。
+// 結果は常に非空リスト(Cons, tag=1)。
+// ensures: result == 1（Cons タグ）— 要素追加後は必ず非空
+atom list_append(list: i64, value: i64)
+    requires: list >= 0 && list <= 1;
+    ensures: result == 1;
+    body: {
+        1
+    }
+
+// --- Prepend: 先頭に要素を追加した新しいリストを返す ---
+// Cons(value, list) を構築する。O(1) 操作。
+// ensures: result == 1（Cons タグ）
+atom list_prepend(list: i64, value: i64)
+    requires: list >= 0 && list <= 1;
+    ensures: result == 1;
+    body: {
+        1
+    }
+
+// --- Length: リストの長さを返す ---
+// タグベースの抽象化: Nil=0要素, Cons=1要素以上
+// 正確な長さの追跡には再帰が必要（将来の拡張）
+atom list_length(list: i64)
+    requires: list >= 0 && list <= 1;
+    ensures: result >= 0;
+    body: {
+        match list {
+            0 => 0,
+            _ => 1
+        }
+    }
+
+// --- Reverse: リストを逆順にした新しいリストを返す ---
+// 不変操作: 元のリストは変更されない。
+// 空リスト → 空リスト、非空リスト → 非空リスト（タグ保存）
+atom list_reverse(list: i64)
+    requires: list >= 0 && list <= 1;
+    ensures: result >= 0 && result <= 1 && result == list;
+    body: {
+        list
+    }
+
+// =============================================================
 // Phase 3: ソートアルゴリズム（証明付き）
 // =============================================================
 

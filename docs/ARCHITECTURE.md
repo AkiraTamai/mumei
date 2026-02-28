@@ -13,7 +13,7 @@ source.mm → parse → resolve → monomorphize → verify (Z3) → codegen (LL
 
 | File | Role |
 |---|---|
-| `src/parser.rs` | AST definitions, tokenizer, parser (struct/enum/trait/impl/atom/match/generics/ref/consume/async/acquire/await/resource/trusted/unverified/invariant) |
+| `src/parser.rs` | AST definitions, tokenizer, parser (struct/enum/trait/impl/atom/match/generics/ref/ref mut/consume/async/acquire/await/resource/trusted/unverified/invariant) |
 | `src/ast.rs` | `TypeRef`, `Monomorphizer` — generic type expansion engine |
 | `src/resolver.rs` | Import resolution, circular detection, prelude auto-load, incremental build cache |
 | `src/verification.rs` | Z3 verification, `ModuleEnv`, `LinearityCtx`, law expansion, equality propagation, resource hierarchy, BMC, async recursion depth, inductive invariant, trust boundary |
@@ -111,6 +111,8 @@ pub struct LinearityCtx {
 |---|---|---|---|
 | `atom f(x: T)` | `pub fn f(x: T)` | `func f(x T)` | `function f(x: number)` |
 | `ref x: T` | `x: &T` | `x T // ref` | `/* readonly */ x: number` |
+| `ref v: T` | `v: &T` | `v T // ref` | `/* readonly */ v: number` |
+| `ref mut v: T` | `v: &mut T` | `v *T` | `/* &mut */ v: number` |
 | `consume x` | move semantics | comment | comment |
 | `enum E { A, B }` | `enum E { A, B }` | `const + type` | `const enum + union` |
 | `struct S { f: T }` | `struct S { f: T }` | `type S struct` | `interface S` |
@@ -126,6 +128,45 @@ pub struct LinearityCtx {
 2. Try env lookup: `__struct_v_point_x`, `v_point_x`
 3. If not found: recursively evaluate inner expression
 4. LLVM codegen: chain `extract_value` calls
+
+---
+
+## Ownership & Borrowing (Aliasing Prevention)
+
+### Borrow Modes
+
+| Modifier | Z3 Tracking | Semantics |
+|---|---|---|
+| (none) | `__alive_` Bool | Owned value. Can be consumed via `consume x;` |
+| `ref` | `__borrowed_` Bool | Shared read-only reference. Multiple `ref` allowed simultaneously |
+| `ref mut` | `__exclusive_` Bool | Exclusive mutable reference. No other `ref` or `ref mut` to same data |
+| `consume` | `__alive_` → false | Ownership transfer. Use-after-free detected by LinearityCtx |
+
+### Aliasing Prevention (Z3)
+
+When `ref mut` exists, the verifier checks all other `ref`/`ref mut` params of the same type:
+
+```
+∀ p1, p2 ∈ params:
+  p1.is_ref_mut ∧ p1.type == p2.type ∧ p1 ≠ p2
+  → Z3.assert(p1 ≠ p2)  // if SAT (may be equal), report aliasing error
+```
+
+Example:
+```mumei
+// ✅ OK: different types
+atom safe(ref mut x: i64, ref y: f64) ...
+
+// ✅ OK: requires proves they are distinct
+atom safe2(ref mut x: i64, ref y: i64)
+requires: x != y;
+...
+
+// ❌ ERROR: ref mut x and ref y may alias (same type, no distinctness proof)
+atom unsafe(ref mut x: i64, ref y: i64)
+requires: true;
+...
+```
 
 ---
 

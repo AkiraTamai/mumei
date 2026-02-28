@@ -363,6 +363,7 @@ impl Monomorphizer {
                     type_name: Some(new_type_ref.display_name()),
                     type_ref: Some(new_type_ref),
                     is_ref: p.is_ref,
+                    is_ref_mut: p.is_ref_mut,
                 }
             } else {
                 p.clone()

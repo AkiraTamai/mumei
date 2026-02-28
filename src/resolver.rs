@@ -393,10 +393,14 @@ pub fn compute_atom_hash(atom: &crate::parser::Atom) -> String {
         hasher.update(b"|consume:");
         hasher.update(cp.as_bytes());
     }
-    // ref パラメータも含める
+    // ref / ref mut パラメータも含める
     for p in &atom.params {
         if p.is_ref {
             hasher.update(b"|ref:");
+            hasher.update(p.name.as_bytes());
+        }
+        if p.is_ref_mut {
+            hasher.update(b"|ref_mut:");
             hasher.update(p.name.as_bytes());
         }
     }

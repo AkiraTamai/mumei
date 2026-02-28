@@ -74,21 +74,24 @@ requires: n >= 0;
 ensures: result == n;
 max_unroll: 5;
 body: {
-    let i = 1;
-    while i < n
-    invariant: i >= 1 && i <= n
-    decreases: n - i
-    {
-        let j = i;
-        while j > 0
-        invariant: j >= 0 && j <= i
-        decreases: j
+    if n <= 1 { n }
+    else {
+        let i = 1;
+        while i < n
+        invariant: i >= 1 && i <= n
+        decreases: n - i
         {
-            j = j - 1;
+            let j = i;
+            while j > 0
+            invariant: j >= 0 && j <= i
+            decreases: j
+            {
+                j = j - 1;
+            };
+            i = i + 1;
         };
-        i = i + 1;
-    };
-    n
+        n
+    }
 };
 
 // --- マージソート ---

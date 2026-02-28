@@ -4,6 +4,8 @@ mod verification;
 mod codegen;
 mod transpiler;
 mod resolver;
+mod manifest;
+mod setup;
 
 use clap::{Parser, Subcommand};
 use std::fs;
@@ -12,7 +14,7 @@ use crate::transpiler::{TargetLanguage, transpile, transpile_enum, transpile_str
 use crate::parser::{Item, ImportDecl};
 
 // =============================================================================
-// CLI: mumei build / verify / check / init
+// CLI: mumei build / verify / check / init / setup / doctor
 // =============================================================================
 //
 // Usage:
@@ -20,6 +22,8 @@ use crate::parser::{Item, ImportDecl};
 //   mumei verify input.mm                 # Z3 verification only
 //   mumei check input.mm                  # parse + resolve + monomorphize (no Z3)
 //   mumei init my_project                 # generate project template
+//   mumei setup                           # download & configure Z3 + LLVM toolchain
+//   mumei add <dep>                       # add dependency to mumei.toml
 //   mumei input.mm -o dist/katana         # backward compat → same as build
 
 #[derive(Parser)]
@@ -69,6 +73,17 @@ enum Command {
     },
     /// Check development environment (Z3, LLVM, std library)
     Doctor,
+    /// Download and configure Z3 + LLVM toolchain into ~/.mumei/
+    Setup {
+        /// Force re-download even if already installed
+        #[arg(long)]
+        force: bool,
+    },
+    /// Add a dependency to mumei.toml
+    Add {
+        /// Dependency specifier: local path (./path/to/lib) or package name
+        dep: String,
+    },
 }
 
 fn main() {

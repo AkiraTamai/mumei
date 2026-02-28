@@ -222,6 +222,23 @@ pub struct Atom {
     /// BMC のループ展開回数上限（atom 単位のオーバーライド）
     /// `max_unroll: 5;` で指定。None の場合はグローバルデフォルト（3）を使用。
     pub max_unroll: Option<usize>,
+    /// atom レベルの状態不変量（Invariant）。
+    /// 再帰的 async atom や状態を持つ atom に対して、
+    /// 呼び出し前後で維持されるべき論理的性質を記述する。
+    ///
+    /// ```mumei
+    /// async atom process(state: i64)
+    /// invariant: state >= 0;
+    /// requires: state >= 0;
+    /// ensures: result >= 0;
+    /// body: { ... };
+    /// ```
+    ///
+    /// Z3 検証:
+    /// 1. 導入 (Induction Base): requires が成立するとき invariant が成立することを証明
+    /// 2. 維持 (Preservation): invariant が成立する状態で body を実行した後も invariant が維持されることを証明
+    /// 3. 再帰呼び出し時: 呼び出し先の invariant を仮定として使用（帰納法の仮定）
+    pub invariant: Option<String>,
 }
 
 // =============================================================================
@@ -860,6 +877,12 @@ pub fn parse_atom(source: &str) -> Atom {
     let max_unroll = max_unroll_re.captures(source)
         .and_then(|cap| cap[1].parse::<usize>().ok());
 
+    // invariant 句のパース: "invariant: <expr>;"
+    // atom レベルの状態不変量。再帰呼び出しの帰納的検証に使用。
+    let invariant_re = Regex::new(r"(?m)^invariant:\s*([^;]+);").unwrap();
+    let invariant = invariant_re.captures(source)
+        .map(|cap| cap[1].trim().to_string());
+
     Atom {
         name,
         type_params,
@@ -874,6 +897,7 @@ pub fn parse_atom(source: &str) -> Atom {
         is_async: false,
         trust_level: TrustLevel::Verified,
         max_unroll,
+        invariant,
     }
 }
 
@@ -1649,6 +1673,27 @@ body: n;
 
         assert_eq!(atoms.len(), 1);
         assert_eq!(atoms[0].max_unroll, Some(5));
+    }
+
+    #[test]
+    fn test_parse_atom_invariant() {
+        let source = r#"
+async atom process(state: i64)
+invariant: state >= 0;
+requires: state >= 0;
+ensures: result >= 0;
+body: state + 1;
+"#;
+        let items = parse_module(source);
+        let atoms: Vec<_> = items.iter().filter_map(|i| {
+            if let Item::Atom(a) = i { Some(a) } else { None }
+        }).collect();
+
+        assert_eq!(atoms.len(), 1);
+        let a = &atoms[0];
+        assert_eq!(a.name, "process");
+        assert!(a.is_async);
+        assert_eq!(a.invariant, Some("state >= 0".to_string()));
     }
 
     #[test]

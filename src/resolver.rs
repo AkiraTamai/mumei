@@ -400,6 +400,11 @@ pub fn compute_atom_hash(atom: &crate::parser::Atom) -> String {
     if atom.is_async {
         hasher.update(b"|async");
     }
+    // invariant も含める
+    if let Some(ref inv) = atom.invariant {
+        hasher.update(b"|invariant:");
+        hasher.update(inv.as_bytes());
+    }
     format!("{:x}", hasher.finalize())
 }
 

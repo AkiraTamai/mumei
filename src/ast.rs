@@ -383,6 +383,7 @@ impl Monomorphizer {
             is_async: generic.is_async,
             trust_level: generic.trust_level.clone(),
             max_unroll: generic.max_unroll,
+            invariant: generic.invariant.clone(),
         })
     }
 

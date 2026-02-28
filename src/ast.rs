@@ -381,6 +381,8 @@ impl Monomorphizer {
             consumed_params: generic.consumed_params.clone(),
             resources: generic.resources.clone(),
             is_async: generic.is_async,
+            trust_level: generic.trust_level.clone(),
+            max_unroll: generic.max_unroll,
         })
     }
 

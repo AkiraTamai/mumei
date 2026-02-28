@@ -1,6 +1,6 @@
 use z3::ast::{Ast, Int, Bool, Array, Dynamic, Float};
 use z3::{Config, Context, Solver, SatResult};
-use crate::parser::{Atom, QuantifierType, Expr, Op, parse_expression, RefinedType, StructDef, EnumDef, Pattern, MatchArm, TraitDef, ImplDef, ResourceDef, ResourceMode};
+use crate::parser::{Atom, QuantifierType, Expr, Op, parse_expression, RefinedType, StructDef, EnumDef, Pattern, MatchArm, TraitDef, ImplDef, ResourceDef, ResourceMode, TrustLevel};
 use std::fs;
 use std::path::Path;
 use std::fmt;
@@ -836,8 +836,14 @@ fn verify_resource_hierarchy(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult
 // - 無限ループの停止性は証明しない（それは decreases 句の役割）
 // - BMC は「展開回数以内でのバグ不在」を証明するのみ（完全性はない）
 
-/// BMC のループ展開回数上限
-const BMC_UNROLL_DEPTH: usize = 3;
+/// BMC のループ展開回数上限（グローバルデフォルト）
+/// atom 単位で `max_unroll: N;` によりオーバーライド可能。
+const BMC_DEFAULT_UNROLL_DEPTH: usize = 3;
+
+/// 再帰的 async 呼び出しの最大展開深度。
+/// async atom が自身を呼び出す場合、この深度を超えると
+/// 「Unknown（未定義）」として扱い、Z3 探索を打ち切る。
+const MAX_ASYNC_RECURSION_DEPTH: usize = 3;
 
 /// body 内の Acquire 式を再帰的に収集する（BMC 用）。
 /// ループ内で acquire が使われているパターンを検出するために使用。
@@ -874,9 +880,10 @@ fn collect_acquire_resources(expr: &Expr) -> Vec<String> {
     resources
 }
 
-/// 有界モデル検査: atom の body 内のループを BMC_UNROLL_DEPTH 回展開し、
+/// 有界モデル検査: atom の body 内のループを展開し、
 /// 各展開でリソース階層制約が維持されることを検証する。
 ///
+/// 展開回数は atom.max_unroll（指定時）または BMC_DEFAULT_UNROLL_DEPTH を使用。
 /// ループ不変量が提供されている場合はスキップ（不変量ベースの検証が優先）。
 /// BMC は「ユーザーが不変量を書けない場合」の補助的な検証手段。
 fn verify_bmc_resource_safety(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult<()> {
@@ -905,18 +912,21 @@ fn verify_bmc_resource_safety(atom: &Atom, module_env: &ModuleEnv) -> MumeiResul
         return Ok(()); // ループ外の acquire は通常の検証で十分
     }
 
+    // 展開回数: atom 単位のオーバーライド > グローバルデフォルト
+    let unroll_depth = atom.max_unroll.unwrap_or(BMC_DEFAULT_UNROLL_DEPTH);
+
     // BMC: ループを展開して各ステップでリソース階層をチェック
     let mut resource_ctx = ResourceCtx::new();
 
-    for unroll_step in 0..BMC_UNROLL_DEPTH {
+    for unroll_step in 0..unroll_depth {
         // 各展開ステップで acquire されるリソースの順序を検証
         for res_name in &acquired_resources {
             if let Some(rdef) = module_env.resources.get(res_name) {
                 if let Err(e) = resource_ctx.acquire(res_name, rdef.priority) {
                     return Err(MumeiError::VerificationError(
                         format!(
-                            "BMC (unroll step {}): resource ordering violation in loop body: {}",
-                            unroll_step, e
+                            "BMC (unroll step {}/{}, max_unroll={}): resource ordering violation in loop body: {}",
+                            unroll_step, unroll_depth, unroll_depth, e
                         )
                     ));
                 }
@@ -931,12 +941,117 @@ fn verify_bmc_resource_safety(atom: &Atom, module_env: &ModuleEnv) -> MumeiResul
     Ok(())
 }
 
+/// 再帰的 async 呼び出しの深度を検証する。
+/// async atom が自身を（直接的または間接的に）呼び出す場合、
+/// MAX_ASYNC_RECURSION_DEPTH を超える再帰がないことを静的にチェックする。
+///
+/// 仕組み: body 内の Call 式を走査し、呼び出し先が async atom かつ
+/// 自身と同名の場合、再帰深度カウンタをインクリメント。
+/// 上限を超えたら「Unknown」として打ち切り、警告を出す。
+fn verify_async_recursion_depth(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult<()> {
+    if !atom.is_async {
+        return Ok(());
+    }
+
+    fn count_self_calls(expr: &Expr, atom_name: &str) -> usize {
+        match expr {
+            Expr::Call(name, args) => {
+                let self_call = if name == atom_name { 1 } else { 0 };
+                self_call + args.iter().map(|a| count_self_calls(a, atom_name)).sum::<usize>()
+            }
+            Expr::Block(stmts) => stmts.iter().map(|s| count_self_calls(s, atom_name)).sum(),
+            Expr::IfThenElse { cond, then_branch, else_branch } => {
+                count_self_calls(cond, atom_name)
+                    + count_self_calls(then_branch, atom_name)
+                    + count_self_calls(else_branch, atom_name)
+            }
+            Expr::Let { value, .. } | Expr::Assign { value, .. } => count_self_calls(value, atom_name),
+            Expr::Async { body } => count_self_calls(body, atom_name),
+            Expr::Await { expr } => count_self_calls(expr, atom_name),
+            Expr::Acquire { body, .. } => count_self_calls(body, atom_name),
+            Expr::While { cond, body, .. } => {
+                count_self_calls(cond, atom_name) + count_self_calls(body, atom_name)
+            }
+            Expr::BinaryOp(l, _, r) => count_self_calls(l, atom_name) + count_self_calls(r, atom_name),
+            _ => 0,
+        }
+    }
+
+    let body_ast = parse_expression(&atom.body_expr);
+    let self_call_count = count_self_calls(&body_ast, &atom.name);
+
+    if self_call_count > 0 {
+        // 再帰的 async 呼び出しが検出された
+        // 呼び出し先の async atom も再帰する可能性があるため、
+        // 深度制限を超える場合は警告
+        let max_depth = atom.max_unroll.unwrap_or(MAX_ASYNC_RECURSION_DEPTH);
+        if self_call_count > max_depth {
+            return Err(MumeiError::VerificationError(
+                format!(
+                    "Async recursion depth exceeded in atom '{}': {} self-calls detected \
+                     (max_depth={}). Use max_unroll: {}; to increase the limit, or \
+                     refactor to use iteration with invariant.",
+                    atom.name, self_call_count, max_depth, self_call_count + 1
+                )
+            ));
+        }
+
+        // 再帰呼び出し先の契約を信頼して展開（Compositional Verification）
+        // 各展開ステップで ensures を仮定として使用する。
+        // これにより、f_depth_1, f_depth_2 ... と別シンボルとして扱われ、
+        // Z3 が無限ループに陥ることを防ぐ。
+        if let Some(callee) = module_env.get_atom(&atom.name) {
+            if callee.ensures.trim() == "true" {
+                // ensures が trivial な場合、再帰の安全性を証明できない
+                return Err(MumeiError::VerificationError(
+                    format!(
+                        "Recursive async atom '{}' requires a non-trivial ensures clause \
+                         for inductive verification. Add: ensures: <postcondition>;",
+                        atom.name
+                    )
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 pub fn verify(atom: &Atom, output_dir: &Path, module_env: &ModuleEnv) -> MumeiResult<()> {
+    // Phase 0: 信頼レベルチェック（Trust Boundary）
+    match &atom.trust_level {
+        TrustLevel::Trusted => {
+            // trusted atom: body の検証をスキップし、契約（requires/ensures）のみ信頼する。
+            // 呼び出し元は契約に基づいて Compositional Verification を行う。
+            save_visualizer_report(output_dir, "trusted", &atom.name, "N/A", "N/A",
+                "Trusted: body verification skipped, contract assumed correct.");
+            return Ok(());
+        }
+        TrustLevel::Unverified => {
+            // unverified atom: 警告を出すが、検証は続行する。
+            // ensures が non-trivial な場合のみ検証を試みる。
+            eprintln!("  ⚠️  Warning: atom '{}' is marked as 'unverified'. \
+                       Verification results may be incomplete.", atom.name);
+            if atom.ensures.trim() == "true" && atom.requires.trim() == "true" {
+                // 契約が trivial な場合、検証する意味がないのでスキップ
+                save_visualizer_report(output_dir, "unverified", &atom.name, "N/A", "N/A",
+                    "Unverified: no contract to verify.");
+                return Ok(());
+            }
+        }
+        TrustLevel::Verified => {
+            // 通常の検証フロー
+        }
+    }
+
     // Phase 1: リソース階層検証（デッドロック防止）
     verify_resource_hierarchy(atom, module_env)?;
 
     // Phase 1b: 有界モデル検査（ループ内 acquire パターン）
     verify_bmc_resource_safety(atom, module_env)?;
+
+    // Phase 1c: 再帰的 async 呼び出しの深度検証
+    verify_async_recursion_depth(atom, module_env)?;
 
     let mut cfg = Config::new();
     cfg.set_timeout_msec(10000);

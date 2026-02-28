@@ -214,6 +214,34 @@ pub struct Atom {
     /// この atom が非同期（async）かどうか
     /// `async atom fetch(url: Str)` の場合: is_async = true
     pub is_async: bool,
+    /// 信頼レベル（外部ライブラリとの境界）
+    /// - Verified: 完全に検証される（デフォルト）
+    /// - Trusted: requires/ensures の契約のみ信頼し、body は検証しない
+    /// - Unverified: 未検証コード。呼び出し時に警告を出す
+    pub trust_level: TrustLevel,
+    /// BMC のループ展開回数上限（atom 単位のオーバーライド）
+    /// `max_unroll: 5;` で指定。None の場合はグローバルデフォルト（3）を使用。
+    pub max_unroll: Option<usize>,
+}
+
+// =============================================================================
+// 信頼境界 (Trust Boundary)
+// =============================================================================
+
+/// 外部ライブラリとの信頼レベル。
+/// mumei で検証された安全な世界と、未検証の外部コードの境界を定義する。
+#[derive(Debug, Clone, PartialEq)]
+pub enum TrustLevel {
+    /// 完全に検証される（デフォルト）。body, requires, ensures すべてを Z3 で検証。
+    Verified,
+    /// 信頼済み外部コード。requires/ensures の契約のみ信頼し、body は検証しない。
+    /// `trusted atom ffi_read(fd: i64) ...` で宣言。
+    /// 外部 C/Rust ライブラリの FFI ラッパーに使用する。
+    Trusted,
+    /// 未検証コード。呼び出し時に「検証スキップ」の警告を出す。
+    /// `unverified atom legacy_code(x: i64) ...` で宣言。
+    /// レガシーコードの段階的な移行に使用する。
+    Unverified,
 }
 
 /// 構造体フィールド定義（オプションで精緻型制約を保持）
@@ -668,37 +696,61 @@ pub fn parse_module(source: &str) -> Vec<Item> {
         items.push(Item::ResourceDef(ResourceDef { name, priority, mode }));
     }
 
-    // async atom のパース: "async atom" を先に検出
-    let async_atom_re = Regex::new(r"async\s+atom\s+\w+").unwrap();
-    let async_atom_indices: Vec<_> = async_atom_re.find_iter(source).map(|m| m.start()).collect();
-    let mut async_atom_starts: std::collections::HashSet<usize> = std::collections::HashSet::new();
-    for &start in &async_atom_indices {
-        async_atom_starts.insert(start);
-        let end_idx = source.len();
-        // "async atom" の次の atom または async atom、または EOF までを切り出す
+    // 修飾子付き atom のパース: "async atom", "trusted atom", "unverified atom",
+    // "async trusted atom" 等の組み合わせを先に検出
+    let modified_atom_re = Regex::new(r"(?:(?:async|trusted|unverified)\s+)+atom\s+\w+").unwrap();
+    let modified_atom_indices: Vec<_> = modified_atom_re.find_iter(source).collect();
+    let mut modified_atom_starts: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for mat in &modified_atom_indices {
+        let start = mat.start();
+        modified_atom_starts.insert(start);
         let atom_source = &source[start..];
-        // "async " を除去して parse_atom に渡す
-        let stripped = atom_source.strip_prefix("async").unwrap_or(atom_source).trim_start();
-        // 次の atom/async atom の開始位置を探す
-        let next_atom_pos = atom_re.find(stripped.get(5..).unwrap_or(""))
+        // 修飾子を解析
+        let mut is_async = false;
+        let mut trust_level = TrustLevel::Verified;
+        let mut remaining = atom_source;
+        loop {
+            remaining = remaining.trim_start();
+            if remaining.starts_with("async") && remaining[5..].starts_with(|c: char| c.is_whitespace()) {
+                is_async = true;
+                remaining = &remaining[5..];
+            } else if remaining.starts_with("trusted") && remaining[7..].starts_with(|c: char| c.is_whitespace()) {
+                trust_level = TrustLevel::Trusted;
+                remaining = &remaining[7..];
+            } else if remaining.starts_with("unverified") && remaining[10..].starts_with(|c: char| c.is_whitespace()) {
+                trust_level = TrustLevel::Unverified;
+                remaining = &remaining[10..];
+            } else {
+                break;
+            }
+        }
+        // "atom" から始まる部分を切り出して parse_atom に渡す
+        let atom_start_in_remaining = remaining.find("atom").unwrap_or(0);
+        let atom_text = &remaining[atom_start_in_remaining..];
+        // 次の atom の開始位置を探す
+        let next_atom_pos = atom_re.find(atom_text.get(5..).unwrap_or(""))
             .map(|m| m.start() + 5)
-            .unwrap_or(stripped.len());
-        let atom_slice = &stripped[..next_atom_pos];
+            .unwrap_or(atom_text.len());
+        let atom_slice = &atom_text[..next_atom_pos];
         let mut atom = parse_atom(atom_slice);
-        atom.is_async = true;
+        atom.is_async = is_async;
+        atom.trust_level = trust_level;
         items.push(Item::Atom(atom));
     }
 
     let atom_indices: Vec<_> = atom_re.find_iter(source).map(|m| m.start()).collect();
     for i in 0..atom_indices.len() {
         let start = atom_indices[i];
-        // "async atom" の一部として既にパース済みならスキップ
-        if start >= 6 && async_atom_starts.contains(&(start - 6)) {
+        // 修飾子付き atom の一部として既にパース済みならスキップ
+        let skip = modified_atom_starts.iter().any(|&ms| {
+            start > ms && start < ms + 30 // 修飾子 + "atom" の最大長以内
+        });
+        if skip {
             continue;
         }
-        // "async " が直前にある場合もスキップ
-        let prefix = &source[start.saturating_sub(6)..start];
-        if prefix.trim_start().ends_with("async") || prefix.ends_with("async ") {
+        // 直前に修飾子キーワードがある場合もスキップ
+        let prefix = &source[start.saturating_sub(12)..start];
+        if prefix.contains("async") || prefix.contains("trusted") || prefix.contains("unverified") {
             continue;
         }
         let end = if i + 1 < atom_indices.len() { atom_indices[i+1] } else { source.len() };
@@ -803,6 +855,11 @@ pub fn parse_atom(source: &str) -> Atom {
         })
         .collect();
 
+    // max_unroll 句のパース: "max_unroll: 5;" — BMC 展開回数のオーバーライド
+    let max_unroll_re = Regex::new(r"max_unroll:\s*(\d+)\s*;").unwrap();
+    let max_unroll = max_unroll_re.captures(source)
+        .and_then(|cap| cap[1].parse::<usize>().ok());
+
     Atom {
         name,
         type_params,
@@ -815,6 +872,8 @@ pub fn parse_atom(source: &str) -> Atom {
         consumed_params,
         resources,
         is_async: false,
+        trust_level: TrustLevel::Verified,
+        max_unroll,
     }
 }
 
@@ -1516,6 +1575,80 @@ body: amount;
             }
             _ => panic!("Expected Async expression, got {:?}", expr),
         }
+    }
+
+    #[test]
+    fn test_parse_trusted_atom() {
+        let source = r#"
+trusted atom ffi_read(fd: i64)
+requires: fd >= 0;
+ensures: result >= 0;
+body: fd;
+"#;
+        let items = parse_module(source);
+        let atoms: Vec<_> = items.iter().filter_map(|i| {
+            if let Item::Atom(a) = i { Some(a) } else { None }
+        }).collect();
+
+        assert_eq!(atoms.len(), 1);
+        assert_eq!(atoms[0].name, "ffi_read");
+        assert_eq!(atoms[0].trust_level, TrustLevel::Trusted);
+        assert!(!atoms[0].is_async);
+    }
+
+    #[test]
+    fn test_parse_unverified_atom() {
+        let source = r#"
+unverified atom legacy_code(x: i64)
+requires: true;
+ensures: true;
+body: x;
+"#;
+        let items = parse_module(source);
+        let atoms: Vec<_> = items.iter().filter_map(|i| {
+            if let Item::Atom(a) = i { Some(a) } else { None }
+        }).collect();
+
+        assert_eq!(atoms.len(), 1);
+        assert_eq!(atoms[0].name, "legacy_code");
+        assert_eq!(atoms[0].trust_level, TrustLevel::Unverified);
+    }
+
+    #[test]
+    fn test_parse_async_trusted_atom() {
+        let source = r#"
+async trusted atom fetch_external(url: i64)
+requires: url >= 0;
+ensures: result >= 0;
+body: url;
+"#;
+        let items = parse_module(source);
+        let atoms: Vec<_> = items.iter().filter_map(|i| {
+            if let Item::Atom(a) = i { Some(a) } else { None }
+        }).collect();
+
+        assert_eq!(atoms.len(), 1);
+        assert_eq!(atoms[0].name, "fetch_external");
+        assert!(atoms[0].is_async);
+        assert_eq!(atoms[0].trust_level, TrustLevel::Trusted);
+    }
+
+    #[test]
+    fn test_parse_max_unroll() {
+        let source = r#"
+atom loop_with_acquire(n: i64)
+max_unroll: 5;
+requires: n >= 0;
+ensures: true;
+body: n;
+"#;
+        let items = parse_module(source);
+        let atoms: Vec<_> = items.iter().filter_map(|i| {
+            if let Item::Atom(a) = i { Some(a) } else { None }
+        }).collect();
+
+        assert_eq!(atoms.len(), 1);
+        assert_eq!(atoms[0].max_unroll, Some(5));
     }
 
     #[test]

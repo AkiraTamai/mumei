@@ -4,6 +4,9 @@
 
 ```
 source.mm → parse → resolve → monomorphize → verify (Z3) → codegen (LLVM IR) → transpile (Rust/Go/TS)
+                                                ↑
+                                   Resource Hierarchy Check (deadlock-free proof)
+                                   Async Safety Verification (ownership across await)
 ```
 
 ## Source Files
@@ -123,4 +126,91 @@ pub struct LinearityCtx {
 2. Try env lookup: `__struct_v_point_x`, `v_point_x`
 3. If not found: recursively evaluate inner expression
 4. LLVM codegen: chain `extract_value` calls
+
+---
+
+## Async/Await + Resource Hierarchy (Concurrency Safety)
+
+### Design
+
+Mumei treats concurrency safety as a **compile-time verification problem**.
+Instead of relying on runtime deadlock detection, the compiler uses Z3 to
+mathematically prove that resource acquisition order is safe.
+
+### Resource Definition
+
+```mumei
+resource db_conn priority: 1 mode: exclusive;
+resource cache   priority: 2 mode: shared;
+```
+
+Each resource has:
+- **Priority**: Defines the acquisition order. Higher priority = acquired later.
+- **Mode**: `exclusive` (write, no concurrent access) or `shared` (read-only, concurrent OK).
+
+### Deadlock Prevention (Resource Hierarchy)
+
+**Invariant**: If thread T holds resource L₁ and requests L₂, then `Priority(L₂) > Priority(L₁)`.
+
+The verifier (`verify_resource_hierarchy`) encodes this as Z3 constraints:
+1. For each pair of resources (rᵢ, rⱼ) where i < j in the declaration order
+2. Assert `Priority(rⱼ) > Priority(rᵢ)`
+3. If Z3 finds a counterexample (SAT), report a deadlock risk
+
+### Data Race Prevention (Ownership Model)
+
+Resources in `exclusive` mode enforce single-writer semantics:
+- `HasAccess(Thread, Resource, Write)` → no other thread may access
+- `HasAccess(Thread, Resource, Read)` → other threads may also read (shared mode)
+
+### Syntax
+
+```mumei
+// Atom with resource declaration
+atom transfer(amount: i64)
+resources: [db_conn, cache];
+requires: amount >= 0;
+ensures: result >= 0;
+body: {
+    acquire db_conn {
+        acquire cache {
+            amount + 1
+        }
+    }
+};
+
+// Async atom
+async atom fetch_data(id: i64)
+requires: id >= 0;
+ensures: result >= 0;
+body: {
+    let result = await get_remote(id);
+    result
+};
+```
+
+### Verification Steps (per atom with resources)
+
+1. `verify_resource_hierarchy()`: Z3 checks priority ordering
+2. `expr_to_z3(Acquire)`: Tracks `__resource_held_{name}` as Z3 Bool
+3. `expr_to_z3(Await)`: Ownership consistency check at suspension points
+4. Standard `verify()` pipeline continues (requires/ensures/linearity)
+
+### Pipeline Extension
+
+```
+source.mm → parse → resolve → monomorphize → verify (Z3) → codegen (LLVM IR) → transpile
+                                                 ↑
+                                    Resource Hierarchy Check
+                                    Deadlock-Free Proof
+                                    Data Race Prevention
+```
+
+### Transpiler Mapping (Async)
+
+| Mumei | Rust | Go | TypeScript |
+|---|---|---|---|
+| `async atom f(x: T)` | `pub async fn f(x: T)` | `func f(x T) // goroutine` | `async function f(x: number)` |
+| `await expr` | `expr.await` | `<-ch` | `await expr` |
+| `acquire r { body }` | `let _g = r.lock(); { body }` | `r.Lock(); { body }; r.Unlock()` | `await r.acquire(); { body }; r.release()` |
 

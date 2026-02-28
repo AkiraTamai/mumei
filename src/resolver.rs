@@ -256,6 +256,14 @@ fn register_imported_items(items: &[Item], alias: Option<&str>, module_env: &mut
             Item::ImplDef(impl_def) => {
                 module_env.register_impl(impl_def);
             }
+            Item::ResourceDef(resource_def) => {
+                module_env.register_resource(resource_def);
+                if let Some(prefix) = alias {
+                    let mut fqn_resource = resource_def.clone();
+                    fqn_resource.name = format!("{}::{}", prefix, resource_def.name);
+                    module_env.register_resource(&fqn_resource);
+                }
+            }
             Item::Import(_) => {
                 // 再帰的に処理済み
             }
@@ -382,6 +390,15 @@ pub fn compute_atom_hash(atom: &crate::parser::Atom) -> String {
             hasher.update(b"|ref:");
             hasher.update(p.name.as_bytes());
         }
+    }
+    // resources も含める（リソース制約の変更を検出）
+    for r in &atom.resources {
+        hasher.update(b"|resource:");
+        hasher.update(r.as_bytes());
+    }
+    // async フラグも含める
+    if atom.is_async {
+        hasher.update(b"|async");
     }
     format!("{:x}", hasher.finalize())
 }

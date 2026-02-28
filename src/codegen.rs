@@ -531,6 +531,26 @@ fn compile_expr<'a>(
             Ok(phi.as_basic_value())
         },
 
+        // =================================================================
+        // 非同期処理 + リソース管理の LLVM IR 生成
+        // =================================================================
+        Expr::Acquire { resource: _, body } => {
+            // acquire ブロック: リソースの取得/解放はランタイムで処理。
+            // Z3 検証済みのため、LLVM IR では body をそのままコンパイルする。
+            // 将来: mutex_lock/mutex_unlock の呼び出しを生成
+            compile_expr(context, builder, module, function, body, variables, array_ptrs, module_env)
+        },
+        Expr::Async { body } => {
+            // async ブロック: 現在は同期的に body をコンパイルする。
+            // 将来: コルーチン変換（LLVM coroutine intrinsics）を生成
+            compile_expr(context, builder, module, function, body, variables, array_ptrs, module_env)
+        },
+        Expr::Await { expr } => {
+            // await 式: 現在は内側の式をそのままコンパイルする。
+            // 将来: suspend/resume ポイントを生成
+            compile_expr(context, builder, module, function, expr, variables, array_ptrs, module_env)
+        },
+
         Expr::FieldAccess(inner_expr, field_name) => {
             // ネスト構造体のフィールドアクセスを再帰的に解決する。
             // v.x → 1段階、v.point.x → 2段階（再帰的に extract_value）

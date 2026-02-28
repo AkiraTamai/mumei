@@ -1442,4 +1442,93 @@ body: a + b;
         assert_eq!(atoms[0].name, "add");
         assert!(atoms[0].type_params.is_empty());
     }
+
+    // =========================================================================
+    // 非同期処理 + リソース管理のテスト
+    // =========================================================================
+
+    #[test]
+    fn test_parse_resource_def() {
+        let source = r#"
+resource db_conn priority: 1 mode: exclusive;
+resource cache priority: 2 mode: shared;
+"#;
+        let items = parse_module(source);
+        let resources: Vec<_> = items.iter().filter_map(|i| {
+            if let Item::ResourceDef(r) = i { Some(r) } else { None }
+        }).collect();
+
+        assert_eq!(resources.len(), 2);
+        assert_eq!(resources[0].name, "db_conn");
+        assert_eq!(resources[0].priority, 1);
+        assert_eq!(resources[0].mode, ResourceMode::Exclusive);
+        assert_eq!(resources[1].name, "cache");
+        assert_eq!(resources[1].priority, 2);
+        assert_eq!(resources[1].mode, ResourceMode::Shared);
+    }
+
+    #[test]
+    fn test_parse_atom_with_resources() {
+        let source = r#"
+atom transfer(amount: i64)
+resources: [db, cache];
+requires: amount >= 0;
+ensures: true;
+body: amount;
+"#;
+        let items = parse_module(source);
+        let atoms: Vec<_> = items.iter().filter_map(|i| {
+            if let Item::Atom(a) = i { Some(a) } else { None }
+        }).collect();
+
+        assert_eq!(atoms.len(), 1);
+        let a = &atoms[0];
+        assert_eq!(a.name, "transfer");
+        assert_eq!(a.resources, vec!["db", "cache"]);
+        assert!(!a.is_async);
+    }
+
+    #[test]
+    fn test_parse_acquire_expression() {
+        let expr = parse_expression("acquire mutex_a { x + 1 }");
+        match expr {
+            Expr::Acquire { resource, body } => {
+                assert_eq!(resource, "mutex_a");
+                // body should be a Block containing x + 1
+                match *body {
+                    Expr::Block(_) => {} // OK
+                    _ => panic!("Expected Block in acquire body"),
+                }
+            }
+            _ => panic!("Expected Acquire expression, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_parse_async_expression() {
+        let expr = parse_expression("async { x + 1 }");
+        match expr {
+            Expr::Async { body } => {
+                match *body {
+                    Expr::Block(_) => {} // OK
+                    _ => panic!("Expected Block in async body"),
+                }
+            }
+            _ => panic!("Expected Async expression, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_parse_await_expression() {
+        let expr = parse_expression("await x");
+        match expr {
+            Expr::Await { expr } => {
+                match *expr {
+                    Expr::Variable(ref name) => assert_eq!(name, "x"),
+                    _ => panic!("Expected Variable in await expr"),
+                }
+            }
+            _ => panic!("Expected Await expression, got {:?}", expr),
+        }
+    }
 }

@@ -379,6 +379,8 @@ impl Monomorphizer {
             ensures: generic.ensures.clone(),
             body_expr: generic.body_expr.clone(),
             consumed_params: generic.consumed_params.clone(),
+            resources: generic.resources.clone(),
+            is_async: generic.is_async,
         })
     }
 

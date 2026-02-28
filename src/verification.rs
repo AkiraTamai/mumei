@@ -1551,9 +1551,22 @@ pub fn verify(atom: &Atom, output_dir: &Path, module_env: &ModuleEnv) -> MumeiRe
         }
     }
 
-    // =================================================================
-    // エイリアシング検証 (Aliasing Prevention)
-    // =================================================================
+    // 3. 前提条件 (requires)
+    // NOTE: requires は エイリアシング検証より先に assert する必要がある。
+    // requires: x != y; のような制約がエイリアシング検証で活用されるため。
+    if atom.requires.trim() != "true" {
+        let req_ast = parse_expression(&atom.requires);
+        let req_z3 = expr_to_z3(&vc, &req_ast, &mut env, None)?;
+        if let Some(req_bool) = req_z3.as_bool() {
+            solver.assert(&req_bool);
+        }
+    }
+
+    // 3b. エイリアシング検証 (Aliasing Prevention)
+    // requires が assert された後に実行する。
+    // これにより requires: x != y; のような制約が Z3 で活用され、
+    // 「provably distinct」なパラメータはエイリアシングエラーにならない。
+    //
     // ref mut パラメータが存在する場合、同じ型の他の ref/ref mut パラメータ
     // とのエイリアシング（同一データへの複数参照）を禁止する。
     //
@@ -1608,15 +1621,6 @@ pub fn verify(atom: &Atom, output_dir: &Path, module_env: &ModuleEnv) -> MumeiRe
                     }
                 }
             }
-        }
-    }
-
-    // 3. 前提条件 (requires)
-    if atom.requires.trim() != "true" {
-        let req_ast = parse_expression(&atom.requires);
-        let req_z3 = expr_to_z3(&vc, &req_ast, &mut env, None)?;
-        if let Some(req_bool) = req_z3.as_bool() {
-            solver.assert(&req_bool);
         }
     }
 

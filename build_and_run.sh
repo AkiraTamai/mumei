@@ -28,7 +28,7 @@ echo "✅ Environment configured for LLVM 18 & Z3"
 
 # --- 3. ビルド工程 ---
 # 初回や環境変更時以外は cargo build だけで十分高速です
-if [ "$1" == "--clean" ]; then
+if [ "$1" = "--clean" ]; then
     echo "🧹 Cleaning..."
     cargo clean
 fi

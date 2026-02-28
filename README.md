@@ -12,41 +12,31 @@ Only atoms that pass formal verification are compiled to LLVM IR and transpiled 
 
 ## ✨ Features
 
-| Feature | Description |
-|---|---|
-| **Refinement Types** | `type Nat = i64 where v >= 0;` — Z3-backed type predicates |
-| **Structs with Field Constraints** | `struct Point { x: f64 where v >= 0.0 }` — per-field invariants |
-| **Enums (ADT)** | `enum Shape { Circle(f64), Rect(f64, f64), None }` — algebraic data types |
-| **Pattern Matching** | `match expr { Pattern if guard => body }` — with Z3 exhaustiveness checking |
-| **Recursive ADT** | `enum List { Nil, Cons(i64, Self) }` — self-referencing types with bounded verification |
-| **Loop Invariant Verification** | `while ... invariant: ...` — Z3 proves preservation |
-| **Termination Checking** | `decreases: n - i` — ranking function proves loops terminate |
-| **Float Verification** | Sign propagation for `f64` arithmetic (pos×pos→pos, etc.) |
-| **Array Bounds Checking** | Symbolic `len_<name>` model with Z3 out-of-bounds detection |
-| **Generics (Polymorphism)** | `struct Stack<T> { ... }`, `atom identity<T>(x: T)` — monomorphization at compile time |
-| **Trait Bounds** | `atom min<T: Comparable>(a: T, b: T)` — type constraints with law verification |
-| **Trait System with Laws** | `trait Comparable { fn leq(...); law reflexive: ...; }` — algebraic laws verified by Z3 |
-| **Trait Method Constraints** | `fn div(a: Self, b: Self where v != 0) -> Self;` — per-parameter refinement types on trait methods |
-| **Law Body Expansion** | `verify_impl` expands `add(a,b)` → `(a + b)` using impl body for precise Z3 law verification |
-| **Built-in Traits** | `Eq`, `Ord`, `Numeric` — auto-implemented for `i64`, `u64`, `f64` |
-| **Standard Prelude** | `std/prelude.mm` auto-imported — traits, ADTs, `Sequential`/`Hashable` interfaces |
-| **Dynamic Memory (alloc)** | `RawPtr`, `Vector<T>`, `HashMap<K, V>` with field constraints, verified collection operations |
-| **Ownership Tracking** | `Owned` trait + `LinearityCtx` — double-free and use-after-free detection at compile time |
-| **`consume` Modifier** | `atom take(x: T) consume x;` — linear type enforcement with Z3 `__alive_` symbolic Bools |
-| **LLVM Heap Ops** | `alloc_raw` → `malloc`, `dealloc_raw` → `free` — native heap allocation in LLVM IR |
-| **Borrowing (`ref`)** | `atom print(ref v: Vector<i64>)` — read-only borrow with Z3-backed lifetime verification |
-| **Mutable References (`ref mut`)** | `atom modify(ref mut v: i64)` — exclusive mutable borrow with Z3 aliasing prevention |
-| **Async/Await** | `async atom`, `await expr`, `acquire r { body }` — Z3-verified concurrency safety |
-| **Resource Hierarchy** | `resource db priority: 1 mode: exclusive;` — deadlock-free proof via Z3 priority ordering |
-| **Trust Boundary** | `trusted atom` / `unverified atom` — FFI safety with taint analysis |
-| **Inductive Invariant** | `invariant: expr;` — complete proof for recursive atoms (base + preservation) |
-| **BMC** | `max_unroll: N;` — bounded model checking for loops with `acquire` |
-| **Multi-target Transpiler** | Enum/Struct/Atom/Trait/Impl → Rust + Go + TypeScript |
-| **Standard Library** | `std/option.mm`, `std/stack.mm`, `std/result.mm`, `std/list.mm` — verified generic core types |
-| **Module System** | `import "path" as alias;` — multi-file builds with compositional verification |
-| **Inter-atom Calls** | Contract-based verification: caller proves `requires`, assumes `ensures` |
-| **Counter-example Display** | Z3 `get_model()` shows exactly which value is uncovered on exhaustiveness failure |
-| **ModuleEnv Architecture** | Zero global state — all definitions managed via `ModuleEnv` struct (no Mutex) |
+### Core Language
+- **Refinement Types** — `type Nat = i64 where v >= 0;` with Z3-backed predicates
+- **Structs / Enums (ADT)** — per-field constraints, pattern matching with Z3 exhaustiveness checking
+- **Generics** — monomorphization at compile time (`Pair<T, U>`, `Option<T>`)
+- **Trait System with Laws** — algebraic laws verified by Z3 (`law reflexive: leq(x, x) == true`)
+- **Loop Invariant + Termination** — `invariant:` + `decreases:` with inductive proof
+
+### Verification
+- **Quantifiers in ensures** — `forall(i, 0, n, arr[i] <= arr[i+1])` in postconditions
+- **Ownership & Borrowing** — `ref` / `ref mut` / `consume` with Z3 aliasing prevention
+- **Async/Await + Resource Hierarchy** — deadlock-free proof via Z3 priority ordering
+- **Trust Boundary** — `trusted` / `unverified` atoms with taint analysis
+- **BMC + Inductive Invariant** — bounded model checking upgradable to complete proof
+
+### Standard Library (Verified)
+- **Option / Result** — `map_apply`, `and_then_apply`, `or_else`, `filter`, `wrap_err`
+- **List** — immutable ops (`head`/`tail`/`append`/`prepend`/`reverse`) + fold ops (`sum`/`count`/`min`/`max`/`all`/`any`)
+- **Sort Algorithms** — `insertion_sort`, `merge_sort`, `binary_search` with termination + invariant proofs
+- **Sorted Array Proofs** — `verified_insertion_sort` with `forall` in ensures: `arr[i] <= arr[i+1]`
+- **BoundedArray** — push/pop with overflow/underflow prevention, sorted operations
+- **Dynamic Memory** — `Vector<T>`, `HashMap<K, V>` with field constraints
+
+### Output
+- **Multi-target Transpiler** — Rust + Go + TypeScript
+- **LLVM IR Codegen** — Pattern Matrix, StructType, malloc/free
 
 ---
 

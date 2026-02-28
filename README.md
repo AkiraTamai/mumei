@@ -35,6 +35,12 @@ Only atoms that pass formal verification are compiled to LLVM IR and transpiled 
 | **`consume` Modifier** | `atom take(x: T) consume x;` — linear type enforcement with Z3 `__alive_` symbolic Bools |
 | **LLVM Heap Ops** | `alloc_raw` → `malloc`, `dealloc_raw` → `free` — native heap allocation in LLVM IR |
 | **Borrowing (`ref`)** | `atom print(ref v: Vector<i64>)` — read-only borrow with Z3-backed lifetime verification |
+| **Mutable References (`ref mut`)** | `atom modify(ref mut v: i64)` — exclusive mutable borrow with Z3 aliasing prevention |
+| **Async/Await** | `async atom`, `await expr`, `acquire r { body }` — Z3-verified concurrency safety |
+| **Resource Hierarchy** | `resource db priority: 1 mode: exclusive;` — deadlock-free proof via Z3 priority ordering |
+| **Trust Boundary** | `trusted atom` / `unverified atom` — FFI safety with taint analysis |
+| **Inductive Invariant** | `invariant: expr;` — complete proof for recursive atoms (base + preservation) |
+| **BMC** | `max_unroll: N;` — bounded model checking for loops with `acquire` |
 | **Multi-target Transpiler** | Enum/Struct/Atom/Trait/Impl → Rust + Go + TypeScript |
 | **Standard Library** | `std/option.mm`, `std/stack.mm`, `std/result.mm`, `std/list.mm` — verified generic core types |
 | **Module System** | `import "path" as alias;` — multi-file builds with compositional verification |
@@ -313,12 +319,12 @@ The `std/alloc.mm` module provides `Vector<T>`, `HashMap<K, V>`, and ownership p
 
 | Stage | Name | Description |
 |---|---|---|
-| 1 | **Polishing** (Parser) | Parses all definitions including generics, `ref`/`consume`, match with guards |
+| 1 | **Polishing** (Parser) | Parses all definitions including generics, `ref`/`ref mut`/`consume`, `async`/`acquire`/`await`, `trusted`/`unverified`, `invariant`, match with guards |
 | 2 | **Resolving** (Resolver) | Import resolution, circular detection, prelude auto-load, incremental cache |
 | 3 | **Monomorphization** | Expands `Stack<i64>`, `Stack<f64>` into concrete definitions |
-| 4 | **Verification** (Z3) | Contracts, invariants, termination, exhaustiveness, ownership, borrowing |
-| 5 | **Tempering** (LLVM IR) | Pattern Matrix codegen, StructType, malloc/free, nested extract_value |
-| 6 | **Sharpening** (Transpiler) | Rust + Go + TypeScript with ownership mapping (`ref` → `&T`) |
+| 4 | **Verification** (Z3) | Trust boundary → resource hierarchy → BMC → async recursion depth → inductive invariant → call graph cycles → contracts → aliasing → taint analysis → ownership/borrowing |
+| 5 | **Tempering** (LLVM IR) | Pattern Matrix codegen, StructType, malloc/free, mutex_lock/unlock, nested extract_value |
+| 6 | **Sharpening** (Transpiler) | Rust + Go + TypeScript with ownership mapping (`ref` → `&T`, `ref mut` → `&mut T`, `acquire` → lock/unlock) |
 
 > 📖 **Detailed architecture**: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | **Changelog**: [`docs/CHANGELOG.md`](docs/CHANGELOG.md)
 
@@ -364,7 +370,28 @@ mumei init my_project
 mumei input.mm -o dist/katana
 ```
 
-### 4) Run Example Tests
+### 4) Development Setup (pre-commit hooks)
+
+```bash
+# Install pre-commit (Python)
+pip install pre-commit
+
+# Install Git hooks (run once after clone)
+pre-commit install
+
+# Verify hooks work
+pre-commit run --all-files
+```
+
+This enables automatic checks on every `git commit`:
+- **check-yaml**: Validates all YAML files (including `.pre-commit-config.yaml` itself)
+- **end-of-file-fixer**: Ensures files end with a newline
+- **trailing-whitespace**: Removes trailing whitespace
+- **cargo fmt**: Rust code formatting
+- **cargo clippy**: Rust linting (warnings as errors)
+- **cargo test**: Runs all unit tests (parser, verification, etc.)
+
+### 5) Run Example Tests
 
 ```bash
 # Inter-atom call test (compositional verification)
@@ -389,7 +416,7 @@ mumei verify sword_test.mm
 mumei check sword_test.mm
 ```
 
-### 5) Create a New Project
+### 6) Create a New Project
 
 ```bash
 mumei init my_app
@@ -711,6 +738,7 @@ All generated code includes:
 │   ├── ARCHITECTURE.md            # Compiler internals, pipeline, ModuleEnv, LinearityCtx
 │   ├── STDLIB.md                  # Standard library reference (all modules + atoms)
 │   └── CHANGELOG.md               # PR #16 change history
+├── .pre-commit-config.yaml        # Git pre-commit hooks (check-yaml, cargo fmt/clippy/test)
 ├── build_and_run.sh               # Build + verification suite runner (with example tests)
 ├── Cargo.toml
 └── README.md
@@ -787,6 +815,14 @@ All generated code includes:
 - [x] **FQN dot-notation**: `math.add(x, y)` resolved as `math::add` in both verification (`expr_to_z3`) and codegen (`compile_expr`) — `.` → `::` automatic conversion
 - [x] **Incremental build**: `.mumei_build_cache` with per-atom SHA-256 hashing (`compute_atom_hash`) — unchanged atoms skip Z3 verification in both `mumei verify` and `mumei build`, with cache invalidation on failure
 - [x] **Nested struct support**: `v.point.x` resolved via recursive `build_field_path()` → `["v", "point", "x"]` → env lookup as `v_point_x` / `__struct_v_point_x`, with recursive `extract_value` in LLVM codegen
+- [x] **Async/Await + Resource Hierarchy**: `async atom`, `acquire r { body }`, `await expr` — Z3 resource priority ordering, await-across-lock detection, ownership consistency at suspension points
+- [x] **Mutable References (`ref mut`)**: `atom modify(ref mut v: i64)` — Z3 exclusivity constraint (`__exclusive_`), aliasing prevention (same-type `ref`+`ref mut` forbidden unless provably distinct)
+- [x] **Trust Boundary**: `trusted atom` (body skip) / `unverified atom` (warning) — FFI safety with taint analysis (`__tainted_` markers)
+- [x] **BMC (Bounded Model Checking)**: Loop-internal `acquire` patterns unrolled up to `max_unroll: N;` (default: 3) — Z3 timeout guard
+- [x] **Inductive Invariant**: `invariant: expr;` on atoms — base case + preservation proof, upgrades BMC to complete proof
+- [x] **Call Graph Cycle Detection**: DFS-based indirect recursion detection (A→B→A) with `invariant`/`max_unroll` guidance
+- [x] **Taint Analysis**: `unverified` function return values marked `__tainted_`, warning on use in safety proofs
+- [x] **Pre-commit hooks**: `check-yaml` + `cargo fmt` + `cargo clippy` + `cargo test` via `.pre-commit-config.yaml`
 - [ ] Struct method parsing: `impl Stack { atom push(...) }` → parse and register as `Stack::push` in ModuleEnv (data structure `method_names` ready)
 - [ ] Trait method constraint enforcement: inject `param_constraints` (e.g., `where v != 0`) into Z3 during `verify_impl` and inter-atom call verification
 - [ ] Automatic borrow tracking in inter-atom calls: `ref` args → `LinearityCtx.borrow()` at call site, `release_borrow()` after call returns

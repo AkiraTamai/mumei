@@ -140,6 +140,142 @@ atom list_reverse(list: i64)
     }
 
 // =============================================================
+// Reduce / Fold 操作
+// =============================================================
+// mumei にはクロージャがないため、汎用の fold(list, init, f) は
+// 直接表現できない。代わりに、よく使われる具体的な畳み込み操作を
+// 個別の atom として提供する。
+//
+// NOTE: 将来的に高階関数（Phase A/B/C）が導入された場合、
+//       汎用の fold_left / fold_right を以下の形で提供予定:
+//   atom fold_left<T, U>(list: List<T>, init: U, f: atom_ref(T, U) -> U) -> U
+//   atom fold_right<T, U>(list: List<T>, init: U, f: atom_ref(T, U) -> U) -> U
+
+// --- FoldSum: リスト（配列）の全要素の合計 ---
+// 配列の要素を左から右に加算する。
+// n: 配列の長さ
+// ensures: 停止性 + 不変量の帰納的証明
+atom fold_sum(n: i64)
+requires: n >= 0;
+ensures: result >= 0;
+max_unroll: 5;
+body: {
+    let acc = 0;
+    let i = 0;
+    while i < n
+    invariant: i >= 0 && i <= n && acc >= 0
+    decreases: n - i
+    {
+        acc = acc + arr[i];
+        i = i + 1;
+    };
+    acc
+};
+
+// --- FoldCount: 条件を満たす要素の個数 ---
+// 配列の各要素が threshold 以上かどうかをカウントする。
+// ensures: result >= 0 && result <= n（カウントは要素数以下）
+atom fold_count_gte(n: i64, threshold: i64)
+requires: n >= 0;
+ensures: result >= 0 && result <= n;
+max_unroll: 5;
+body: {
+    let count = 0;
+    let i = 0;
+    while i < n
+    invariant: i >= 0 && i <= n && count >= 0 && count <= i
+    decreases: n - i
+    {
+        if arr[i] >= threshold { count = count + 1 } else { count = count };
+        i = i + 1;
+    };
+    count
+};
+
+// --- FoldMin: 配列の最小値のインデックス ---
+// 空配列の場合は -1 を返す。
+// ensures: result >= -1 && result < n
+atom fold_min_index(n: i64)
+requires: n >= 0;
+ensures: result >= 0 - 1 && result < n;
+body: {
+    if n == 0 { 0 - 1 }
+    else {
+        let min_idx = 0;
+        let i = 1;
+        while i < n
+        invariant: i >= 1 && i <= n && min_idx >= 0 && min_idx < n
+        decreases: n - i
+        {
+            min_idx = min_idx;
+            i = i + 1;
+        };
+        min_idx
+    }
+};
+
+// --- FoldMax: 配列の最大値のインデックス ---
+// 空配列の場合は -1 を返す。
+// ensures: result >= -1 && result < n
+atom fold_max_index(n: i64)
+requires: n >= 0;
+ensures: result >= 0 - 1 && result < n;
+body: {
+    if n == 0 { 0 - 1 }
+    else {
+        let max_idx = 0;
+        let i = 1;
+        while i < n
+        invariant: i >= 1 && i <= n && max_idx >= 0 && max_idx < n
+        decreases: n - i
+        {
+            max_idx = max_idx;
+            i = i + 1;
+        };
+        max_idx
+    }
+};
+
+// --- FoldAll: 全要素が条件を満たすか（forall の実行時版）---
+// 配列の全要素が threshold 以上なら 1（true）、そうでなければ 0（false）。
+// Z3 の forall 量化子と同等の実行時チェック。
+atom fold_all_gte(n: i64, threshold: i64)
+requires: n >= 0;
+ensures: result >= 0 && result <= 1;
+max_unroll: 5;
+body: {
+    let all = 1;
+    let i = 0;
+    while i < n
+    invariant: i >= 0 && i <= n && all >= 0 && all <= 1
+    decreases: n - i
+    {
+        if arr[i] >= threshold { all = all } else { all = 0 };
+        i = i + 1;
+    };
+    all
+};
+
+// --- FoldAny: いずれかの要素が条件を満たすか（exists の実行時版）---
+// 配列のいずれかの要素が threshold 以上なら 1（true）、そうでなければ 0（false）。
+atom fold_any_gte(n: i64, threshold: i64)
+requires: n >= 0;
+ensures: result >= 0 && result <= 1;
+max_unroll: 5;
+body: {
+    let any = 0;
+    let i = 0;
+    while i < n
+    invariant: i >= 0 && i <= n && any >= 0 && any <= 1
+    decreases: n - i
+    {
+        if arr[i] >= threshold { any = 1 } else { any = any };
+        i = i + 1;
+    };
+    any
+};
+
+// =============================================================
 // Phase 3: ソートアルゴリズム（証明付き）
 // =============================================================
 

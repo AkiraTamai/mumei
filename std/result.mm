@@ -111,3 +111,55 @@ atom result_map_err(res: i64, mapped_err: i64)
             _ => mapped_err
         }
     }
+
+// =============================================================
+// エラーラップ（パッケージ境界でのエラー変換）
+// =============================================================
+// パッケージ間でエラーコードを変換するための操作群。
+// 内部エラーコードを外部向けに再マッピングする際に使用する。
+//
+// 設計: mumei のタグベースモデルでは、エラーの「種類」をエラーコード（i64）で表現する。
+// MapErr は Result のタグ（Ok/Err）を保持しつつ、エラーコードを変換する。
+
+// --- WrapErr: Err にコンテキスト情報を付加 ---
+// res が Err の場合、元のエラーコード err_code にオフセット wrap_offset を加算し、
+// パッケージ固有のエラー空間にマッピングする。
+// Ok の場合はそのまま Ok(0) を返す。
+// ensures: result は Ok(0) または変換後のエラーコード
+atom result_wrap_err(res: i64, err_code: i64, wrap_offset: i64)
+    requires: res >= 0 && res <= 1 && err_code >= 0 && wrap_offset >= 0;
+    ensures: result >= 0;
+    body: {
+        match res {
+            0 => 0,
+            _ => err_code + wrap_offset
+        }
+    }
+
+// --- UnwrapOrElse: Err の場合にエラーコードに基づくデフォルト値を返す ---
+// res が Ok なら ok_value を返し、Err なら err_default を返す。
+// エラーハンドリングの最終段で使用する。
+atom result_unwrap_or_else(res: i64, ok_value: i64, err_default: i64)
+    requires: res >= 0 && res <= 1;
+    ensures: true;
+    body: {
+        match res {
+            0 => ok_value,
+            _ => err_default
+        }
+    }
+
+// --- Flatten: Result<Result<T, E>, E> → Result<T, E> ---
+// 二重の Result をフラット化する。
+// outer が Err → Err(1)
+// outer が Ok かつ inner が Err → Err(1)
+// outer が Ok かつ inner が Ok → Ok(0)
+atom result_flatten(outer: i64, inner: i64)
+    requires: outer >= 0 && outer <= 1 && inner >= 0 && inner <= 1;
+    ensures: result >= 0 && result <= 1;
+    body: {
+        match outer {
+            0 => inner,
+            _ => 1
+        }
+    }

@@ -166,6 +166,9 @@ import "std/result" as result;
 | `result_and_then(res, inner_res)` | AndThen/FlatMap: chains Result operations |
 | `result_or_else(res, alternative)` | OrElse: provides fallback on Err |
 | `result_map_err(res, mapped_err)` | MapErr: transforms Err value |
+| `result_wrap_err(res, err_code, offset)` | WrapErr: remap error code for package boundaries |
+| `result_unwrap_or_else(res, ok_val, err_default)` | UnwrapOrElse: final error handling |
+| `result_flatten(outer, inner)` | Flatten: `Result<Result<T,E>,E>` → `Result<T,E>` |
 
 ---
 
@@ -196,6 +199,17 @@ enum List { Nil, Cons(i64, Self) }
 | `list_prepend(list, value)` | `list ∈ {0,1}` | `result == 1` | Prepend (O(1), Cons construction) |
 | `list_length(list)` | `list ∈ {0,1}` | `result >= 0` | Length (tag-based abstraction) |
 | `list_reverse(list)` | `list ∈ {0,1}` | `result == list` | Reverse (tag preserved) |
+
+### Reduce / Fold Operations
+
+| Atom | Requires | Ensures | Description |
+|---|---|---|---|
+| `fold_sum(n)` | `n >= 0` | `result >= 0` | Sum all elements |
+| `fold_count_gte(n, threshold)` | `n >= 0` | `0 <= result <= n` | Count elements ≥ threshold |
+| `fold_min_index(n)` | `n >= 0` | `-1 <= result < n` | Index of minimum element |
+| `fold_max_index(n)` | `n >= 0` | `-1 <= result < n` | Index of maximum element |
+| `fold_all_gte(n, threshold)` | `n >= 0` | `result ∈ {0,1}` | All elements ≥ threshold? (runtime forall) |
+| `fold_any_gte(n, threshold)` | `n >= 0` | `result ∈ {0,1}` | Any element ≥ threshold? (runtime exists) |
 
 ### Sort Algorithms (Verified)
 

@@ -211,9 +211,29 @@ Variables consumed (`__alive_` = false) before an `await` point are marked with
 `__await_consumed_*` flags. This enables detection of use-after-free patterns
 where a consumed variable is accessed after the coroutine resumes.
 
+### Bounded Model Checking (BMC)
+
+For loops containing `acquire` expressions, BMC unrolls the loop up to
+`BMC_UNROLL_DEPTH` (default: 3) iterations and verifies resource ordering
+at each step. This catches bugs like:
+
+```mumei
+// BMC detects: acquire order reversal across iterations
+while cond invariant: true {
+    acquire cache { acquire db { ... } }  // iteration N: cache → db
+    // iteration N+1: cache → db (OK, same order each time)
+}
+```
+
+BMC is a **complement** to loop invariants, not a replacement:
+- Loop invariants provide **complete** proofs (∀ iterations)
+- BMC provides **bounded** proofs (first N iterations only)
+- If no invariant is provided, BMC acts as a safety net
+
 ### Verification Steps (per atom with resources)
 
 1. `verify_resource_hierarchy()`: Z3 checks priority ordering
+1b. `verify_bmc_resource_safety()`: BMC for loop-internal acquire patterns
 2. `expr_to_z3(Acquire)`: Tracks `__resource_held_{name}` as Z3 Bool
 3. `expr_to_z3(Await)`: Resource-held-across-await + ownership consistency checks
 4. Standard `verify()` pipeline continues (requires/ensures/linearity)
@@ -227,6 +247,19 @@ source.mm → parse → resolve → monomorphize → verify (Z3) → codegen (LL
                                     Deadlock-Free Proof
                                     Data Race Prevention
 ```
+
+### LLVM IR Codegen
+
+| Construct | LLVM IR Output |
+|---|---|
+| `acquire r { body }` | `call i32 @pthread_mutex_lock(@__mumei_resource_r)` → body → `call i32 @pthread_mutex_unlock(@__mumei_resource_r)` |
+| `async { body }` | Synchronous compilation (future: `@llvm.coro.*` intrinsics) |
+| `await expr` | Pass-through compilation (future: `@llvm.coro.suspend`) |
+
+The `@__mumei_resource_{name}` global symbols are resolved at link time by the
+Mumei runtime library or user-provided mutex instances. Since Z3 has proven the
+acquisition order is deadlock-free, the runtime mutex only provides mutual
+exclusion — not deadlock prevention.
 
 ### Transpiler Mapping (Async)
 

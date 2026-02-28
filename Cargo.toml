@@ -1,0 +1,44 @@
+[package]
+name = "mumei"
+version = "0.2.0"
+edition = "2021"
+description = "Mathematical Proof-Driven Programming Language — formally verified with Z3, compiled to LLVM IR, transpiled to Rust/Go/TypeScript"
+license = "MIT"
+repository = "https://github.com/akiratamai/mumei"
+keywords = ["formal-verification", "z3", "llvm", "programming-language", "proof"]
+categories = ["compilers", "development-tools"]
+readme = "README.md"
+
+# cargo install mumei で mumei バイナリがインストールされる
+[[bin]]
+name = "mumei"
+path = "src/main.rs"
+
+[dependencies]
+# CLI解析: サブコマンド対応（build, verify, init, check）
+clap = { version = "4.4", features = ["derive"] }
+
+# 構文解析: 正規表現ベースの高速な字句解析
+regex = "1.10"
+
+# 形式検証: Z3 SMTソルバによる数学的証明
+# 注意: システムに libz3-dev 等のインストールが必要です
+z3 = "0.12"
+
+# コード生成: LLVM IR 生成用の低レイヤライブラリ
+inkwell = { git = "https://github.com/TheDan64/inkwell", branch = "master", features = ["llvm17-0"] }
+
+# レポート出力: 検証結果の JSON 書き出し
+serde_json = "1.0"
+
+# シリアライズ: 検証キャッシュの永続化
+serde = { version = "1.0", features = ["derive"] }
+
+# ハッシュ: ソースファイルの変更検出
+sha2 = "0.10"
+
+# マニフェスト: mumei.toml の解析
+toml = "0.8"
+
+# ディレクトリ操作: ~/.mumei/ のパス解決
+dirs = "5.0"

@@ -1,0 +1,23 @@
+# 環境変数ファイル
+.env
+.env.*
+!.env.example
+.cargo/
+
+# Rust ビルド成果物
+/target
+Cargo.lock
+
+# Mumei 生成物
+visualizer/report.json
+*.ll
+/*.rs
+error.log
+dist/
+
+# Mumei 検証キャッシュ
+.mumei_cache
+
+# テスト用一時ファイル
+sword_test.mm
+

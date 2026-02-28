@@ -123,3 +123,4 @@ pub struct LinearityCtx {
 2. Try env lookup: `__struct_v_point_x`, `v_point_x`
 3. If not found: recursively evaluate inner expression
 4. LLVM codegen: chain `extract_value` calls
+

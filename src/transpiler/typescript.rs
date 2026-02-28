@@ -268,8 +268,10 @@ fn format_expr_ts(expr: &Expr) -> String {
         },
 
         Expr::Acquire { resource, body } => {
+            // acquire を即時実行 async 関数で包むことで、外側の関数が async でなくても動作する。
+            // async 関数内で呼ばれる場合は await で展開される。
             let body_str = format_expr_ts(body);
-            format!("await {r}.acquire();\n    try {{\n        {body}\n    }} finally {{\n        {r}.release();\n    }}", r = resource, body = body_str)
+            format!("(async () => {{ await {r}.acquire(); try {{ return {body}; }} finally {{ {r}.release(); }} }})()", r = resource, body = body_str)
         },
         Expr::Async { body } => {
             let body_str = format_expr_ts(body);

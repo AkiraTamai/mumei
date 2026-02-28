@@ -269,9 +269,10 @@ fn format_expr_go(expr: &Expr) -> String {
         },
 
         Expr::Acquire { resource, body } => {
-            // Go: sync.Mutex の Lock/Unlock パターン
+            // Go: 即時実行関数リテラルでスコープを限定し、defer でブロック終了時に Unlock する。
+            // defer は関数スコープなので、ネストやループ内でも正しくブロック終了時に解放される。
             let body_str = format_expr_go(body);
-            format!("{r}.Lock()\n    defer {r}.Unlock()\n    {body}", r = resource, body = body_str)
+            format!("func() int64 {{\n        {r}.Lock()\n        defer {r}.Unlock()\n        return {body}\n    }}()", r = resource, body = body_str)
         },
         Expr::Async { body } => {
             // Go: goroutine + channel パターン

@@ -231,6 +231,15 @@ impl Monomorphizer {
             Expr::ArrayAccess(_, idx) => {
                 self.collect_from_expr(idx);
             }
+            Expr::Acquire { body, .. } => {
+                self.collect_from_expr(body);
+            }
+            Expr::Async { body } => {
+                self.collect_from_expr(body);
+            }
+            Expr::Await { expr } => {
+                self.collect_from_expr(expr);
+            }
             Expr::Number(_) | Expr::Float(_) | Expr::Variable(_) => {}
         }
     }
@@ -354,6 +363,7 @@ impl Monomorphizer {
                     type_name: Some(new_type_ref.display_name()),
                     type_ref: Some(new_type_ref),
                     is_ref: p.is_ref,
+                    is_ref_mut: p.is_ref_mut,
                 }
             } else {
                 p.clone()
@@ -370,6 +380,11 @@ impl Monomorphizer {
             ensures: generic.ensures.clone(),
             body_expr: generic.body_expr.clone(),
             consumed_params: generic.consumed_params.clone(),
+            resources: generic.resources.clone(),
+            is_async: generic.is_async,
+            trust_level: generic.trust_level.clone(),
+            max_unroll: generic.max_unroll,
+            invariant: generic.invariant.clone(),
         })
     }
 

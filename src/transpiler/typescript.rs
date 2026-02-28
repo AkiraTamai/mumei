@@ -134,10 +134,13 @@ pub fn transpile_to_ts(atom: &Atom) -> String {
     // TSでは number (f64/i64) または bigint (u64的な扱い) ですが、
     // 汎用性を考慮しすべて number として出力します。
     // ref パラメータは Readonly<T> コメントで論理的な読み取り専用を示す。
+    // ref mut パラメータは @mutable JSDoc で可変参照を示す。
     // consume パラメータは @consume JSDoc で使用禁止を示す。
     let params: String = atom.params.iter()
         .map(|p| {
-            if p.is_ref {
+            if p.is_ref_mut {
+                format!("/* &mut */ {}: number", p.name)
+            } else if p.is_ref {
                 format!("/* readonly */ {}: number", p.name)
             } else {
                 format!("{}: number", p.name)
@@ -148,9 +151,11 @@ pub fn transpile_to_ts(atom: &Atom) -> String {
 
     let body = format_expr_ts(&parse_expression(&atom.body_expr));
 
+    let async_keyword = if atom.is_async { "async " } else { "" };
+    let return_type = if atom.is_async { "Promise<number>" } else { "number" };
     format!(
-        "/**\n * Verified Atom: {}\n * Requires: {}\n * Ensures: {}\n */\nfunction {}({}): number {{\n    {}\n}}",
-        atom.name, atom.requires, atom.ensures, atom.name, params, body
+        "/**\n * Verified Atom: {}\n * Requires: {}\n * Ensures: {}\n */\n{}function {}({}): {} {{\n    {}\n}}",
+        atom.name, atom.requires, atom.ensures, async_keyword, atom.name, params, return_type, body
     )
 }
 
@@ -260,6 +265,21 @@ fn format_expr_ts(expr: &Expr) -> String {
                 }
             }
             format!("(() => {{ switch ({}) {{ {} }} }})()", target_str, cases.join(" "))
+        },
+
+        Expr::Acquire { resource, body } => {
+            // acquire を即時実行 async 関数で包むことで、外側の関数が async でなくても動作する。
+            // async 関数内で呼ばれる場合は await で展開される。
+            let body_str = format_expr_ts(body);
+            format!("(async () => {{ await {r}.acquire(); try {{ return {body}; }} finally {{ {r}.release(); }} }})()", r = resource, body = body_str)
+        },
+        Expr::Async { body } => {
+            let body_str = format_expr_ts(body);
+            format!("(async () => {{ {} }})()", body_str)
+        },
+        Expr::Await { expr } => {
+            let expr_str = format_expr_ts(expr);
+            format!("await {}", expr_str)
         },
     }
 }

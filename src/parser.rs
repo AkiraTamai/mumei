@@ -10,6 +10,33 @@ pub enum Op {
     And, Or, Implies,
 }
 
+// =============================================================================
+// 非同期処理 + リソース管理 (Async/Await + Resource Hierarchy)
+// =============================================================================
+
+/// リソースの優先度（Priority）定義。
+/// デッドロック防止のため、リソース取得順序を静的に制約する。
+/// 不変条件: スレッド T がリソース L1 を保持したまま L2 を要求する場合、
+///           Priority(L2) > Priority(L1) でなければならない。
+#[derive(Debug, Clone)]
+pub struct ResourceDef {
+    /// リソース名（例: "mutex_a", "db_conn"）
+    pub name: String,
+    /// 優先度（数値が大きいほど後に取得すべき）
+    pub priority: i64,
+    /// アクセスモード: exclusive（書き込み）または shared（読み取り）
+    pub mode: ResourceMode,
+}
+
+/// リソースのアクセスモード
+#[derive(Debug, Clone, PartialEq)]
+pub enum ResourceMode {
+    /// 排他的アクセス（書き込み可能、他者はアクセス不可）
+    Exclusive,
+    /// 共有アクセス（読み取り専用、他者も読み取り可能）
+    Shared,
+}
+
 #[derive(Debug, Clone)]
 pub enum Expr {
     Number(i64),
@@ -50,6 +77,23 @@ pub enum Expr {
     Match {
         target: Box<Expr>,
         arms: Vec<MatchArm>,
+    },
+    /// リソース取得: acquire resource_name { body }
+    /// body 実行中はリソースを保持し、ブロック終了時に自動解放する。
+    /// Z3 検証時にリソース階層制約をチェックする。
+    Acquire {
+        resource: String,
+        body: Box<Expr>,
+    },
+    /// 非同期式: async { body }
+    /// body を非同期コンテキストで実行する。暗黙的に Control エフェクトを持つ。
+    Async {
+        body: Box<Expr>,
+    },
+    /// 待機式: await expr
+    /// 非同期式の結果を待機する。await ポイントで所有権の検証が行われる。
+    Await {
+        expr: Box<Expr>,
     },
 }
 
@@ -142,6 +186,13 @@ pub struct Param {
     /// ref パラメータは読み取り専用で貸し出され、所有権は移動しない。
     /// 借用中は所有者が free/consume できないことを Z3 で保証する。
     pub is_ref: bool,
+    /// 排他的可変参照修飾子: `ref mut v: Vector<T>` の場合 true。
+    /// ref mut パラメータは書き込み可能な排他的参照。
+    /// Z3 で以下の排他性制約を検証する:
+    /// - ref mut が存在する場合、同じ変数への他の ref/ref mut は存在できない
+    /// - ref mut パラメータへの書き込みは所有者に反映される
+    /// - ref mut は同時に1つのみ存在可能（エイリアシング防止）
+    pub is_ref_mut: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -163,6 +214,58 @@ pub struct Atom {
     /// consume されたパラメータは body 内で使用後、再利用不可となる。
     /// LinearityCtx が Z3 と連携して二重使用・Use-After-Free を検出する。
     pub consumed_params: Vec<String>,
+    /// この atom が使用するリソース名リスト（非同期安全性検証用）
+    /// `atom transfer() resources: [db, cache];` の場合: resources = ["db", "cache"]
+    /// Z3 がリソース階層制約を検証し、デッドロックの可能性を検出する。
+    pub resources: Vec<String>,
+    /// この atom が非同期（async）かどうか
+    /// `async atom fetch(url: Str)` の場合: is_async = true
+    pub is_async: bool,
+    /// 信頼レベル（外部ライブラリとの境界）
+    /// - Verified: 完全に検証される（デフォルト）
+    /// - Trusted: requires/ensures の契約のみ信頼し、body は検証しない
+    /// - Unverified: 未検証コード。呼び出し時に警告を出す
+    pub trust_level: TrustLevel,
+    /// BMC のループ展開回数上限（atom 単位のオーバーライド）
+    /// `max_unroll: 5;` で指定。None の場合はグローバルデフォルト（3）を使用。
+    pub max_unroll: Option<usize>,
+    /// atom レベルの状態不変量（Invariant）。
+    /// 再帰的 async atom や状態を持つ atom に対して、
+    /// 呼び出し前後で維持されるべき論理的性質を記述する。
+    ///
+    /// ```mumei
+    /// async atom process(state: i64)
+    /// invariant: state >= 0;
+    /// requires: state >= 0;
+    /// ensures: result >= 0;
+    /// body: { ... };
+    /// ```
+    ///
+    /// Z3 検証:
+    /// 1. 導入 (Induction Base): requires が成立するとき invariant が成立することを証明
+    /// 2. 維持 (Preservation): invariant が成立する状態で body を実行した後も invariant が維持されることを証明
+    /// 3. 再帰呼び出し時: 呼び出し先の invariant を仮定として使用（帰納法の仮定）
+    pub invariant: Option<String>,
+}
+
+// =============================================================================
+// 信頼境界 (Trust Boundary)
+// =============================================================================
+
+/// 外部ライブラリとの信頼レベル。
+/// mumei で検証された安全な世界と、未検証の外部コードの境界を定義する。
+#[derive(Debug, Clone, PartialEq)]
+pub enum TrustLevel {
+    /// 完全に検証される（デフォルト）。body, requires, ensures すべてを Z3 で検証。
+    Verified,
+    /// 信頼済み外部コード。requires/ensures の契約のみ信頼し、body は検証しない。
+    /// `trusted atom ffi_read(fd: i64) ...` で宣言。
+    /// 外部 C/Rust ライブラリの FFI ラッパーに使用する。
+    Trusted,
+    /// 未検証コード。呼び出し時に「検証スキップ」の警告を出す。
+    /// `unverified atom legacy_code(x: i64) ...` で宣言。
+    /// レガシーコードの段階的な移行に使用する。
+    Unverified,
 }
 
 /// 構造体フィールド定義（オプションで精緻型制約を保持）
@@ -268,6 +371,8 @@ pub enum Item {
     Import(ImportDecl),
     TraitDef(TraitDef),
     ImplDef(ImplDef),
+    /// リソース定義: resource name priority mode;
+    ResourceDef(ResourceDef),
 }
 
 // --- 3. Generics パースヘルパー ---
@@ -603,9 +708,75 @@ pub fn parse_module(source: &str) -> Vec<Item> {
         items.push(Item::ImplDef(ImplDef { trait_name, target_type, method_bodies }));
     }
 
+    // resource 定義: resource name priority:<N> mode:exclusive|shared;
+    let resource_re = Regex::new(r"(?m)^resource\s+(\w+)\s+priority:\s*(-?\d+)\s+mode:\s*(exclusive|shared)\s*;").unwrap();
+    for cap in resource_re.captures_iter(source) {
+        let name = cap[1].to_string();
+        let priority = cap[2].parse::<i64>().unwrap_or(0);
+        let mode = match &cap[3] {
+            "exclusive" => ResourceMode::Exclusive,
+            _ => ResourceMode::Shared,
+        };
+        items.push(Item::ResourceDef(ResourceDef { name, priority, mode }));
+    }
+
+    // 修飾子付き atom のパース: "async atom", "trusted atom", "unverified atom",
+    // "async trusted atom" 等の組み合わせを先に検出
+    let modified_atom_re = Regex::new(r"(?:(?:async|trusted|unverified)\s+)+atom\s+\w+").unwrap();
+    let modified_atom_indices: Vec<_> = modified_atom_re.find_iter(source).collect();
+    let mut modified_atom_starts: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for mat in &modified_atom_indices {
+        let start = mat.start();
+        modified_atom_starts.insert(start);
+        let atom_source = &source[start..];
+        // 修飾子を解析
+        let mut is_async = false;
+        let mut trust_level = TrustLevel::Verified;
+        let mut remaining = atom_source;
+        loop {
+            remaining = remaining.trim_start();
+            if remaining.starts_with("async") && remaining[5..].starts_with(|c: char| c.is_whitespace()) {
+                is_async = true;
+                remaining = &remaining[5..];
+            } else if remaining.starts_with("trusted") && remaining[7..].starts_with(|c: char| c.is_whitespace()) {
+                trust_level = TrustLevel::Trusted;
+                remaining = &remaining[7..];
+            } else if remaining.starts_with("unverified") && remaining[10..].starts_with(|c: char| c.is_whitespace()) {
+                trust_level = TrustLevel::Unverified;
+                remaining = &remaining[10..];
+            } else {
+                break;
+            }
+        }
+        // "atom" から始まる部分を切り出して parse_atom に渡す
+        let atom_start_in_remaining = remaining.find("atom").unwrap_or(0);
+        let atom_text = &remaining[atom_start_in_remaining..];
+        // 次の atom の開始位置を探す
+        let next_atom_pos = atom_re.find(atom_text.get(5..).unwrap_or(""))
+            .map(|m| m.start() + 5)
+            .unwrap_or(atom_text.len());
+        let atom_slice = &atom_text[..next_atom_pos];
+        let mut atom = parse_atom(atom_slice);
+        atom.is_async = is_async;
+        atom.trust_level = trust_level;
+        items.push(Item::Atom(atom));
+    }
+
     let atom_indices: Vec<_> = atom_re.find_iter(source).map(|m| m.start()).collect();
     for i in 0..atom_indices.len() {
         let start = atom_indices[i];
+        // 修飾子付き atom の一部として既にパース済みならスキップ
+        let skip = modified_atom_starts.iter().any(|&ms| {
+            start > ms && start < ms + 30 // 修飾子 + "atom" の最大長以内
+        });
+        if skip {
+            continue;
+        }
+        // 直前に修飾子キーワードがある場合もスキップ
+        let prefix = &source[start.saturating_sub(12)..start];
+        if prefix.contains("async") || prefix.contains("trusted") || prefix.contains("unverified") {
+            continue;
+        }
         let end = if i + 1 < atom_indices.len() { atom_indices[i+1] } else { source.len() };
         let atom_source = &source[start..end];
         items.push(Item::Atom(parse_atom(atom_source)));
@@ -634,11 +805,15 @@ pub fn parse_atom(source: &str) -> Atom {
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .map(|s| {
-            // ref 修飾子の検出: "ref v: Vector<T>" → is_ref=true, name="v"
-            let (is_ref, s_stripped) = if s.starts_with("ref ") {
-                (true, s[4..].trim())
+            // ref mut / ref 修飾子の検出:
+            // "ref mut v: Vector<T>" → is_ref=false, is_ref_mut=true
+            // "ref v: Vector<T>" → is_ref=true, is_ref_mut=false
+            let (is_ref, is_ref_mut, s_stripped) = if s.starts_with("ref mut ") {
+                (false, true, s[8..].trim())
+            } else if s.starts_with("ref ") {
+                (true, false, s[4..].trim())
             } else {
-                (false, s)
+                (false, false, s)
             };
             if let Some((param_name, type_name)) = s_stripped.split_once(':') {
                 let type_name_str = type_name.trim().to_string();
@@ -648,9 +823,10 @@ pub fn parse_atom(source: &str) -> Atom {
                     type_name: Some(type_name_str),
                     type_ref: Some(type_ref),
                     is_ref,
+                    is_ref_mut,
                 }
             } else {
-                Param { name: s_stripped.to_string(), type_name: None, type_ref: None, is_ref }
+                Param { name: s_stripped.to_string(), type_name: None, type_ref: None, is_ref, is_ref_mut }
             }
         })
         .collect();
@@ -697,6 +873,28 @@ pub fn parse_atom(source: &str) -> Atom {
         })
         .collect();
 
+    // resources 句のパース: "resources: [db, cache];" または "resources: db, cache;"
+    let resources_re = Regex::new(r"resources:\s*\[?([^\];]+)\]?\s*;").unwrap();
+    let resources: Vec<String> = resources_re.captures_iter(source)
+        .flat_map(|cap| {
+            cap[1].split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
+    // max_unroll 句のパース: "max_unroll: 5;" — BMC 展開回数のオーバーライド
+    let max_unroll_re = Regex::new(r"max_unroll:\s*(\d+)\s*;").unwrap();
+    let max_unroll = max_unroll_re.captures(source)
+        .and_then(|cap| cap[1].parse::<usize>().ok());
+
+    // invariant 句のパース: "invariant: <expr>;"
+    // atom レベルの状態不変量。再帰呼び出しの帰納的検証に使用。
+    let invariant_re = Regex::new(r"(?m)^invariant:\s*([^;]+);").unwrap();
+    let invariant = invariant_re.captures(source)
+        .map(|cap| cap[1].trim().to_string());
+
     Atom {
         name,
         type_params,
@@ -707,6 +905,11 @@ pub fn parse_atom(source: &str) -> Atom {
         ensures,
         body_expr: body_raw,
         consumed_params,
+        resources,
+        is_async: false,
+        trust_level: TrustLevel::Verified,
+        max_unroll,
+        invariant,
     }
 }
 
@@ -851,6 +1054,34 @@ fn parse_mul_div(tokens: &[String], pos: &mut usize) -> Expr {
 fn parse_primary(tokens: &[String], pos: &mut usize) -> Expr {
     if *pos >= tokens.len() { return Expr::Number(0); }
     let token = &tokens[*pos];
+
+    // acquire 式: acquire resource_name { body }
+    if token == "acquire" {
+        *pos += 1;
+        let resource = if *pos < tokens.len() {
+            let r = tokens[*pos].clone();
+            *pos += 1;
+            r
+        } else {
+            "unknown".to_string()
+        };
+        let body = parse_block_or_expr(tokens, pos);
+        return Expr::Acquire { resource, body: Box::new(body) };
+    }
+
+    // async 式: async { body }
+    if token == "async" {
+        *pos += 1;
+        let body = parse_block_or_expr(tokens, pos);
+        return Expr::Async { body: Box::new(body) };
+    }
+
+    // await 式: await expr
+    if token == "await" {
+        *pos += 1;
+        let expr = parse_primary(tokens, pos);
+        return Expr::Await { expr: Box::new(expr) };
+    }
 
     // while, if 処理 (既存通り)
     if token == "while" {
@@ -1305,5 +1536,215 @@ body: a + b;
         assert_eq!(atoms.len(), 1);
         assert_eq!(atoms[0].name, "add");
         assert!(atoms[0].type_params.is_empty());
+    }
+
+    // =========================================================================
+    // 非同期処理 + リソース管理のテスト
+    // =========================================================================
+
+    #[test]
+    fn test_parse_resource_def() {
+        let source = r#"
+resource db_conn priority: 1 mode: exclusive;
+resource cache priority: 2 mode: shared;
+"#;
+        let items = parse_module(source);
+        let resources: Vec<_> = items.iter().filter_map(|i| {
+            if let Item::ResourceDef(r) = i { Some(r) } else { None }
+        }).collect();
+
+        assert_eq!(resources.len(), 2);
+        assert_eq!(resources[0].name, "db_conn");
+        assert_eq!(resources[0].priority, 1);
+        assert_eq!(resources[0].mode, ResourceMode::Exclusive);
+        assert_eq!(resources[1].name, "cache");
+        assert_eq!(resources[1].priority, 2);
+        assert_eq!(resources[1].mode, ResourceMode::Shared);
+    }
+
+    #[test]
+    fn test_parse_atom_with_resources() {
+        let source = r#"
+atom transfer(amount: i64)
+resources: [db, cache];
+requires: amount >= 0;
+ensures: true;
+body: amount;
+"#;
+        let items = parse_module(source);
+        let atoms: Vec<_> = items.iter().filter_map(|i| {
+            if let Item::Atom(a) = i { Some(a) } else { None }
+        }).collect();
+
+        assert_eq!(atoms.len(), 1);
+        let a = &atoms[0];
+        assert_eq!(a.name, "transfer");
+        assert_eq!(a.resources, vec!["db", "cache"]);
+        assert!(!a.is_async);
+    }
+
+    #[test]
+    fn test_parse_acquire_expression() {
+        let expr = parse_expression("acquire mutex_a { x + 1 }");
+        match expr {
+            Expr::Acquire { resource, body } => {
+                assert_eq!(resource, "mutex_a");
+                // body should be a Block containing x + 1
+                match *body {
+                    Expr::Block(_) => {} // OK
+                    _ => panic!("Expected Block in acquire body"),
+                }
+            }
+            _ => panic!("Expected Acquire expression, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_parse_async_expression() {
+        let expr = parse_expression("async { x + 1 }");
+        match expr {
+            Expr::Async { body } => {
+                match *body {
+                    Expr::Block(_) => {} // OK
+                    _ => panic!("Expected Block in async body"),
+                }
+            }
+            _ => panic!("Expected Async expression, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_parse_trusted_atom() {
+        let source = r#"
+trusted atom ffi_read(fd: i64)
+requires: fd >= 0;
+ensures: result >= 0;
+body: fd;
+"#;
+        let items = parse_module(source);
+        let atoms: Vec<_> = items.iter().filter_map(|i| {
+            if let Item::Atom(a) = i { Some(a) } else { None }
+        }).collect();
+
+        assert_eq!(atoms.len(), 1);
+        assert_eq!(atoms[0].name, "ffi_read");
+        assert_eq!(atoms[0].trust_level, TrustLevel::Trusted);
+        assert!(!atoms[0].is_async);
+    }
+
+    #[test]
+    fn test_parse_unverified_atom() {
+        let source = r#"
+unverified atom legacy_code(x: i64)
+requires: true;
+ensures: true;
+body: x;
+"#;
+        let items = parse_module(source);
+        let atoms: Vec<_> = items.iter().filter_map(|i| {
+            if let Item::Atom(a) = i { Some(a) } else { None }
+        }).collect();
+
+        assert_eq!(atoms.len(), 1);
+        assert_eq!(atoms[0].name, "legacy_code");
+        assert_eq!(atoms[0].trust_level, TrustLevel::Unverified);
+    }
+
+    #[test]
+    fn test_parse_async_trusted_atom() {
+        let source = r#"
+async trusted atom fetch_external(url: i64)
+requires: url >= 0;
+ensures: result >= 0;
+body: url;
+"#;
+        let items = parse_module(source);
+        let atoms: Vec<_> = items.iter().filter_map(|i| {
+            if let Item::Atom(a) = i { Some(a) } else { None }
+        }).collect();
+
+        assert_eq!(atoms.len(), 1);
+        assert_eq!(atoms[0].name, "fetch_external");
+        assert!(atoms[0].is_async);
+        assert_eq!(atoms[0].trust_level, TrustLevel::Trusted);
+    }
+
+    #[test]
+    fn test_parse_max_unroll() {
+        let source = r#"
+atom loop_with_acquire(n: i64)
+max_unroll: 5;
+requires: n >= 0;
+ensures: true;
+body: n;
+"#;
+        let items = parse_module(source);
+        let atoms: Vec<_> = items.iter().filter_map(|i| {
+            if let Item::Atom(a) = i { Some(a) } else { None }
+        }).collect();
+
+        assert_eq!(atoms.len(), 1);
+        assert_eq!(atoms[0].max_unroll, Some(5));
+    }
+
+    #[test]
+    fn test_parse_atom_invariant() {
+        let source = r#"
+async atom process(state: i64)
+invariant: state >= 0;
+requires: state >= 0;
+ensures: result >= 0;
+body: state + 1;
+"#;
+        let items = parse_module(source);
+        let atoms: Vec<_> = items.iter().filter_map(|i| {
+            if let Item::Atom(a) = i { Some(a) } else { None }
+        }).collect();
+
+        assert_eq!(atoms.len(), 1);
+        let a = &atoms[0];
+        assert_eq!(a.name, "process");
+        assert!(a.is_async);
+        assert_eq!(a.invariant, Some("state >= 0".to_string()));
+    }
+
+    #[test]
+    fn test_parse_ref_mut_param() {
+        let source = r#"
+atom modify(ref mut v: i64, ref r: i64)
+requires: v >= 0;
+ensures: result >= 0;
+body: v + r;
+"#;
+        let items = parse_module(source);
+        let atoms: Vec<_> = items.iter().filter_map(|i| {
+            if let Item::Atom(a) = i { Some(a) } else { None }
+        }).collect();
+
+        assert_eq!(atoms.len(), 1);
+        let a = &atoms[0];
+        assert_eq!(a.params.len(), 2);
+        // ref mut v
+        assert_eq!(a.params[0].name, "v");
+        assert!(!a.params[0].is_ref);
+        assert!(a.params[0].is_ref_mut);
+        // ref r
+        assert_eq!(a.params[1].name, "r");
+        assert!(a.params[1].is_ref);
+        assert!(!a.params[1].is_ref_mut);
+    }
+
+    #[test]
+    fn test_parse_await_expression() {
+        let expr = parse_expression("await x");
+        match expr {
+            Expr::Await { expr } => {
+                match *expr {
+                    Expr::Variable(ref name) => assert_eq!(name, "x"),
+                    _ => panic!("Expected Variable in await expr"),
+                }
+            }
+            _ => panic!("Expected Await expression, got {:?}", expr),
+        }
     }
 }

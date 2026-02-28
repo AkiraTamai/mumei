@@ -156,6 +156,7 @@ fn load_and_prepare(input: &str) -> (Vec<Item>, verification::ModuleEnv, Vec<Imp
             Item::Atom(atom) => module_env.register_atom(atom),
             Item::TraitDef(trait_def) => module_env.register_trait(trait_def),
             Item::ImplDef(impl_def) => module_env.register_impl(impl_def),
+            Item::ResourceDef(resource_def) => module_env.register_resource(resource_def),
         }
     }
 
@@ -186,7 +187,21 @@ fn cmd_check(input: &str) {
             Item::EnumDef(e) => { enum_count += 1; println!("  🔷 Enum: '{}'", e.name); }
             Item::TraitDef(t) => { trait_count += 1; println!("  📜 Trait: '{}'", t.name); }
             Item::ImplDef(i) => { println!("  🔧 Impl: {} for {}", i.trait_name, i.target_type); }
-            Item::Atom(a) => { atom_count += 1; println!("  ✨ Atom: '{}'", a.name); }
+            Item::Atom(a) => {
+                atom_count += 1;
+                let async_marker = if a.is_async { " (async)" } else { "" };
+                let res_marker = if !a.resources.is_empty() {
+                    format!(" [resources: {}]", a.resources.join(", "))
+                } else { String::new() };
+                println!("  ✨ Atom: '{}'{}{}", a.name, async_marker, res_marker);
+            }
+            Item::ResourceDef(r) => {
+                let mode_str = match r.mode {
+                    parser::ResourceMode::Exclusive => "exclusive",
+                    parser::ResourceMode::Shared => "shared",
+                };
+                println!("  🔒 Resource: '{}' (priority={}, mode={})", r.name, r.priority, mode_str);
+            }
         }
     }
     println!("✅ Check passed: {} types, {} structs, {} enums, {} traits, {} atoms",
@@ -440,10 +455,24 @@ fn cmd_build(input: &str, output: &str) {
                 ts_bundle.push_str("\n\n");
             }
 
+            // --- リソース定義の登録 ---
+            Item::ResourceDef(resource_def) => {
+                let mode_str = match resource_def.mode {
+                    parser::ResourceMode::Exclusive => "exclusive",
+                    parser::ResourceMode::Shared => "shared",
+                };
+                println!("  🔒 Registered Resource: '{}' (priority={}, mode={})",
+                    resource_def.name, resource_def.priority, mode_str);
+            }
+
             // --- Atom の処理 ---
             Item::Atom(atom) => {
                 atom_count += 1;
-                println!("  ✨ [1/4] Polishing Syntax: Atom '{}' identified.", atom.name);
+                let async_marker = if atom.is_async { " (async)" } else { "" };
+                let res_marker = if !atom.resources.is_empty() {
+                    format!(" [resources: {}]", atom.resources.join(", "))
+                } else { String::new() };
+                println!("  ✨ [1/4] Polishing Syntax: Atom '{}'{}{} identified.", atom.name, async_marker, res_marker);
 
                 // --- 2. Verification (形式検証: Z3 + StdLib) ---
                 // インポートされた atom は検証済み（契約のみ信頼）なのでスキップ

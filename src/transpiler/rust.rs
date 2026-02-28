@@ -115,11 +115,13 @@ pub fn transpile_impl_rust(impl_def: &ImplDef) -> String {
 
 pub fn transpile_to_rust(atom: &Atom) -> String {
     // 引数の型を精緻型のベース型からマッピング (Type System 2.0)
-    // ref パラメータは &T に、consume パラメータはそのまま T（所有権移動）に変換
+    // ref パラメータは &T に、ref mut は &mut T に、consume はそのまま T（所有権移動）に変換
     let params: Vec<String> = atom.params.iter()
         .map(|p| {
             let rust_type = map_type_rust(p.type_name.as_deref());
-            if p.is_ref {
+            if p.is_ref_mut {
+                format!("{}: &mut {}", p.name, rust_type)
+            } else if p.is_ref {
                 format!("{}: &{}", p.name, rust_type)
             } else {
                 format!("{}: {}", p.name, rust_type)
@@ -139,9 +141,10 @@ pub fn transpile_to_rust(atom: &Atom) -> String {
     });
     let return_type = if has_float_param || body_contains_float(&body_ast) { "f64" } else { "i64" };
 
+    let async_keyword = if atom.is_async { "async " } else { "" };
     format!(
-        "/// Verified Atom: {}\n/// Requires: {}\n/// Ensures: {}\npub fn {}({}) -> {} {{\n    {}\n}}",
-        atom.name, atom.requires, atom.ensures, atom.name, params_str, return_type, body
+        "/// Verified Atom: {}\n/// Requires: {}\n/// Ensures: {}\npub {}fn {}({}) -> {} {{\n    {}\n}}",
+        atom.name, atom.requires, atom.ensures, async_keyword, atom.name, params_str, return_type, body
     )
 }
 
@@ -157,6 +160,8 @@ fn body_contains_float(expr: &Expr) -> bool {
         Expr::While { cond, body, .. } => body_contains_float(cond) || body_contains_float(body),
         Expr::Call(_, args) => args.iter().any(body_contains_float),
         Expr::Match { target, arms } => body_contains_float(target) || arms.iter().any(|a| body_contains_float(&a.body)),
+        Expr::Acquire { body, .. } | Expr::Async { body } => body_contains_float(body),
+        Expr::Await { expr } => body_contains_float(expr),
         _ => false,
     }
 }
@@ -288,6 +293,20 @@ fn format_expr_rust(expr: &Expr) -> String {
                 format!("{}{} => {}", pat, guard, body)
             }).collect();
             format!("match {} {{ {} }}", target_str, arms_str.join(", "))
+        },
+
+        Expr::Acquire { resource, body } => {
+            // Rust: スコープガードパターン（MutexGuard の RAII）
+            let body_str = format_expr_rust(body);
+            format!("{{\n        let _guard_{r} = {r}.lock().unwrap();\n        {body}\n    }}", r = resource, body = body_str)
+        },
+        Expr::Async { body } => {
+            let body_str = format_expr_rust(body);
+            format!("async {{ {} }}", body_str)
+        },
+        Expr::Await { expr } => {
+            let expr_str = format_expr_rust(expr);
+            format!("{}.await", expr_str)
         },
     }
 }

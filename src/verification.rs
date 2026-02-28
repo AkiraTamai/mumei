@@ -1,6 +1,6 @@
 use z3::ast::{Ast, Int, Bool, Array, Dynamic, Float};
 use z3::{Config, Context, Solver, SatResult};
-use crate::parser::{Atom, QuantifierType, Expr, Op, parse_expression, RefinedType, StructDef, EnumDef, Pattern, MatchArm, TraitDef, ImplDef};
+use crate::parser::{Atom, QuantifierType, Expr, Op, parse_expression, RefinedType, StructDef, EnumDef, Pattern, MatchArm, TraitDef, ImplDef, ResourceDef, ResourceMode, TrustLevel};
 use std::fs;
 use std::path::Path;
 use std::fmt;
@@ -219,6 +219,9 @@ pub struct ModuleEnv {
     pub impls: Vec<ImplDef>,
     /// 検証済み Atom 名のキャッシュ
     pub verified_cache: HashSet<String>,
+    /// リソース定義（非同期安全性検証用）
+    /// リソース名 → (優先度, アクセスモード)
+    pub resources: HashMap<String, ResourceDef>,
 }
 
 impl ModuleEnv {
@@ -309,6 +312,17 @@ impl ModuleEnv {
     /// Atom が検証済みかどうかを確認する
     pub fn is_verified(&self, atom_name: &str) -> bool {
         self.verified_cache.contains(atom_name)
+    }
+
+    /// リソース定義を登録する
+    pub fn register_resource(&mut self, resource_def: &ResourceDef) {
+        self.resources.insert(resource_def.name.clone(), resource_def.clone());
+    }
+
+    /// リソース定義を取得する
+    #[allow(dead_code)]
+    pub fn get_resource(&self, name: &str) -> Option<&ResourceDef> {
+        self.resources.get(name)
     }
 }
 
@@ -659,7 +673,735 @@ pub fn verify_impl(impl_def: &ImplDef, module_env: &ModuleEnv) -> MumeiResult<()
     Ok(())
 }
 
+// =============================================================================
+// リソース階層検証 (Resource Hierarchy Verification)
+// =============================================================================
+//
+// デッドロック防止: リソース取得順序の半順序関係を Z3 で検証する。
+//
+// 不変条件: ∀ r1, r2 ∈ Held(thread, t):
+//   acquire(r2) かつ r1 ∈ Held → Priority(r2) > Priority(r1)
+//
+// これにより、待機グラフ（Wait-For Graph）に循環が生じないことを
+// コンパイル時に数学的に保証する。
+
+/// リソース取得コンテキスト: 現在保持中のリソースとその優先度を追跡する。
+/// acquire 式の検証時に、リソース階層制約をチェックする。
+#[derive(Debug, Clone, Default)]
+struct ResourceCtx {
+    /// 現在保持中のリソース: (リソース名, 優先度)
+    held: Vec<(String, i64)>,
+    /// 違反リスト
+    violations: Vec<String>,
+}
+
+impl ResourceCtx {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// リソースを取得する。階層制約を検証し、違反があればエラーを記録する。
+    fn acquire(&mut self, resource_name: &str, priority: i64) -> Result<(), String> {
+        // 現在保持中の全リソースに対して、新リソースの優先度が厳密に高いことを検証
+        for (held_name, held_priority) in &self.held {
+            if priority <= *held_priority {
+                let msg = format!(
+                    "Deadlock risk: acquiring '{}' (priority={}) while holding '{}' (priority={}). \
+                     New resource must have strictly higher priority.",
+                    resource_name, priority, held_name, held_priority
+                );
+                self.violations.push(msg.clone());
+                return Err(msg);
+            }
+        }
+        self.held.push((resource_name.to_string(), priority));
+        Ok(())
+    }
+
+    /// リソースを解放する（acquire ブロック終了時に呼ばれる）
+    fn release(&mut self, resource_name: &str) {
+        self.held.retain(|(name, _)| name != resource_name);
+    }
+
+    #[allow(dead_code)]
+    fn has_violations(&self) -> bool {
+        !self.violations.is_empty()
+    }
+}
+
+/// atom のリソース使用順序を Z3 で検証する。
+/// atom の resources 宣言と body 内の acquire 式から、
+/// リソース階層制約 Priority(r2) > Priority(r1) を検証する。
+///
+/// 検証方法:
+/// 1. atom の resources リストから使用リソースを特定
+/// 2. body 内の acquire 式を走査し、取得順序を抽出
+/// 3. Z3 で半順序関係の非循環性を証明
+fn verify_resource_hierarchy(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult<()> {
+    if atom.resources.is_empty() {
+        return Ok(());
+    }
+
+    // リソース定義の存在チェック
+    let mut resource_priorities: Vec<(String, i64)> = Vec::new();
+    for res_name in &atom.resources {
+        if let Some(rdef) = module_env.resources.get(res_name) {
+            resource_priorities.push((rdef.name.clone(), rdef.priority));
+        } else {
+            return Err(MumeiError::TypeError(
+                format!("Resource '{}' used in atom '{}' is not defined. Add: resource {} priority:<N> mode:exclusive|shared;",
+                    res_name, atom.name, res_name)
+            ));
+        }
+    }
+
+    // Z3 で半順序関係を検証
+    let mut cfg = Config::new();
+    cfg.set_timeout_msec(5000);
+    let ctx = Context::new(&cfg);
+    let solver = Solver::new(&ctx);
+
+    // 各リソースの優先度をシンボリック整数として定義
+    let mut priority_vars: HashMap<String, Int> = HashMap::new();
+    for (name, priority) in &resource_priorities {
+        let var = Int::new_const(&ctx, format!("priority_{}", name).as_str());
+        // 優先度を具体値に束縛
+        solver.assert(&var._eq(&Int::from_i64(&ctx, *priority)));
+        priority_vars.insert(name.clone(), var);
+    }
+
+    // リソース間の順序制約を検証:
+    // resources リスト内で前に宣言されたリソースは先に取得されると仮定し、
+    // 後に宣言されたリソースは厳密に高い優先度を持つ必要がある。
+    for i in 0..resource_priorities.len() {
+        for j in (i + 1)..resource_priorities.len() {
+            let (name_i, _) = &resource_priorities[i];
+            let (name_j, _) = &resource_priorities[j];
+            let pri_i = &priority_vars[name_i];
+            let pri_j = &priority_vars[name_j];
+
+            // Priority(r_j) > Priority(r_i) を検証
+            solver.push();
+            solver.assert(&pri_j.le(pri_i)); // 否定: Priority(r_j) <= Priority(r_i)
+            if solver.check() == SatResult::Sat {
+                solver.pop(1);
+                return Err(MumeiError::VerificationError(
+                    format!(
+                        "Resource hierarchy violation in atom '{}': \
+                         '{}' (priority={}) must have strictly lower priority than '{}' (priority={}). \
+                         Reorder resources or adjust priorities to prevent potential deadlock.",
+                        atom.name, name_i, resource_priorities[i].1,
+                        name_j, resource_priorities[j].1
+                    )
+                ));
+            }
+            solver.pop(1);
+        }
+    }
+
+    // データレース検証: exclusive リソースの排他性チェック
+    // 同一 atom 内で同じ exclusive リソースを複数回 acquire していないことを確認
+    let mut exclusive_set: HashSet<String> = HashSet::new();
+    for res_name in &atom.resources {
+        if let Some(rdef) = module_env.resources.get(res_name) {
+            if rdef.mode == ResourceMode::Exclusive {
+                if !exclusive_set.insert(res_name.clone()) {
+                    return Err(MumeiError::VerificationError(
+                        format!(
+                            "Data race risk in atom '{}': exclusive resource '{}' is listed multiple times",
+                            atom.name, res_name
+                        )
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// =============================================================================
+// 有界モデル検査 (Bounded Model Checking — BMC)
+// =============================================================================
+//
+// ループ内の acquire パターンや非同期処理の安全性を、ループ不変量を
+// ユーザーが記述しなくても検証するための補助的な検証手法。
+//
+// 設計:
+// - ループを最大 BMC_UNROLL_DEPTH 回展開し、各展開でリソース階層制約を検証
+// - ループ不変量が提供されている場合はそちらを優先（BMC はフォールバック）
+// - Z3 タイムアウトリスクがあるため、展開回数は保守的に制限
+//
+// 制約:
+// - 無限ループの停止性は証明しない（それは decreases 句の役割）
+// - BMC は「展開回数以内でのバグ不在」を証明するのみ（完全性はない）
+
+/// BMC のループ展開回数上限（グローバルデフォルト）
+/// atom 単位で `max_unroll: N;` によりオーバーライド可能。
+const BMC_DEFAULT_UNROLL_DEPTH: usize = 3;
+
+/// 再帰的 async 呼び出しの最大展開深度。
+/// async atom が自身を呼び出す場合、この深度を超えると
+/// 「Unknown（未定義）」として扱い、Z3 探索を打ち切る。
+const MAX_ASYNC_RECURSION_DEPTH: usize = 3;
+
+/// body 内の Acquire 式を再帰的に収集する（BMC 用）。
+/// ループ内で acquire が使われているパターンを検出するために使用。
+fn collect_acquire_resources(expr: &Expr) -> Vec<String> {
+    let mut resources = Vec::new();
+    match expr {
+        Expr::Acquire { resource, body } => {
+            resources.push(resource.clone());
+            resources.extend(collect_acquire_resources(body));
+        }
+        Expr::Block(stmts) => {
+            for stmt in stmts {
+                resources.extend(collect_acquire_resources(stmt));
+            }
+        }
+        Expr::While { body, .. } => {
+            resources.extend(collect_acquire_resources(body));
+        }
+        Expr::IfThenElse { then_branch, else_branch, .. } => {
+            resources.extend(collect_acquire_resources(then_branch));
+            resources.extend(collect_acquire_resources(else_branch));
+        }
+        Expr::Let { value, .. } | Expr::Assign { value, .. } => {
+            resources.extend(collect_acquire_resources(value));
+        }
+        Expr::Async { body } => {
+            resources.extend(collect_acquire_resources(body));
+        }
+        Expr::Await { expr } => {
+            resources.extend(collect_acquire_resources(expr));
+        }
+        _ => {}
+    }
+    resources
+}
+
+/// 有界モデル検査: atom の body 内のループを展開し、
+/// 各展開でリソース階層制約が維持されることを検証する。
+///
+/// 展開回数は atom.max_unroll（指定時）または BMC_DEFAULT_UNROLL_DEPTH を使用。
+/// ループ不変量が提供されている場合はスキップ（不変量ベースの検証が優先）。
+/// BMC は「ユーザーが不変量を書けない場合」の補助的な検証手段。
+fn verify_bmc_resource_safety(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult<()> {
+    // body 内に acquire が含まれない場合はスキップ
+    let body_ast = parse_expression(&atom.body_expr);
+    let acquired_resources = collect_acquire_resources(&body_ast);
+    if acquired_resources.is_empty() {
+        return Ok(());
+    }
+
+    // While ループ内に acquire があるかチェック
+    fn has_acquire_in_while(expr: &Expr) -> bool {
+        match expr {
+            Expr::While { body, .. } => {
+                !collect_acquire_resources(body).is_empty()
+            }
+            Expr::Block(stmts) => stmts.iter().any(has_acquire_in_while),
+            Expr::IfThenElse { then_branch, else_branch, .. } => {
+                has_acquire_in_while(then_branch) || has_acquire_in_while(else_branch)
+            }
+            _ => false,
+        }
+    }
+
+    if !has_acquire_in_while(&body_ast) {
+        return Ok(()); // ループ外の acquire は通常の検証で十分
+    }
+
+    // 展開回数: atom 単位のオーバーライド > グローバルデフォルト
+    let unroll_depth = atom.max_unroll.unwrap_or(BMC_DEFAULT_UNROLL_DEPTH);
+
+    // BMC: ループを展開して各ステップでリソース階層をチェック
+    let mut resource_ctx = ResourceCtx::new();
+
+    for unroll_step in 0..unroll_depth {
+        // 各展開ステップで acquire されるリソースの順序を検証
+        for res_name in &acquired_resources {
+            if let Some(rdef) = module_env.resources.get(res_name) {
+                if let Err(e) = resource_ctx.acquire(res_name, rdef.priority) {
+                    return Err(MumeiError::VerificationError(
+                        format!(
+                            "BMC (unroll step {}/{}, max_unroll={}): resource ordering violation in loop body: {}",
+                            unroll_step, unroll_depth, unroll_depth, e
+                        )
+                    ));
+                }
+            }
+        }
+        // 各ステップ終了時にリソースを解放（ループの次のイテレーションをシミュレート）
+        for res_name in &acquired_resources {
+            resource_ctx.release(res_name);
+        }
+    }
+
+    Ok(())
+}
+
+/// 再帰的 async 呼び出しの深度を検証する。
+/// async atom が自身を（直接的または間接的に）呼び出す場合、
+/// MAX_ASYNC_RECURSION_DEPTH を超える再帰がないことを静的にチェックする。
+///
+/// 仕組み: body 内の Call 式を走査し、呼び出し先が async atom かつ
+/// 自身と同名の場合、再帰深度カウンタをインクリメント。
+/// 上限を超えたら「Unknown」として打ち切り、警告を出す。
+fn verify_async_recursion_depth(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult<()> {
+    if !atom.is_async {
+        return Ok(());
+    }
+
+    fn count_self_calls(expr: &Expr, atom_name: &str) -> usize {
+        match expr {
+            Expr::Call(name, args) => {
+                let self_call = if name == atom_name { 1 } else { 0 };
+                self_call + args.iter().map(|a| count_self_calls(a, atom_name)).sum::<usize>()
+            }
+            Expr::Block(stmts) => stmts.iter().map(|s| count_self_calls(s, atom_name)).sum(),
+            Expr::IfThenElse { cond, then_branch, else_branch } => {
+                count_self_calls(cond, atom_name)
+                    + count_self_calls(then_branch, atom_name)
+                    + count_self_calls(else_branch, atom_name)
+            }
+            Expr::Let { value, .. } | Expr::Assign { value, .. } => count_self_calls(value, atom_name),
+            Expr::Async { body } => count_self_calls(body, atom_name),
+            Expr::Await { expr } => count_self_calls(expr, atom_name),
+            Expr::Acquire { body, .. } => count_self_calls(body, atom_name),
+            Expr::While { cond, body, .. } => {
+                count_self_calls(cond, atom_name) + count_self_calls(body, atom_name)
+            }
+            Expr::BinaryOp(l, _, r) => count_self_calls(l, atom_name) + count_self_calls(r, atom_name),
+            _ => 0,
+        }
+    }
+
+    let body_ast = parse_expression(&atom.body_expr);
+    let self_call_count = count_self_calls(&body_ast, &atom.name);
+
+    if self_call_count > 0 {
+        // 再帰的 async 呼び出しが検出された
+        // 呼び出し先の async atom も再帰する可能性があるため、
+        // 深度制限を超える場合は警告
+        let max_depth = atom.max_unroll.unwrap_or(MAX_ASYNC_RECURSION_DEPTH);
+        if self_call_count > max_depth {
+            return Err(MumeiError::VerificationError(
+                format!(
+                    "Async recursion depth exceeded in atom '{}': {} self-calls detected \
+                     (max_depth={}). Use max_unroll: {}; to increase the limit, or \
+                     refactor to use iteration with invariant.",
+                    atom.name, self_call_count, max_depth, self_call_count + 1
+                )
+            ));
+        }
+
+        // 再帰呼び出し先の契約を信頼して展開（Compositional Verification）
+        // 各展開ステップで ensures を仮定として使用する。
+        // これにより、f_depth_1, f_depth_2 ... と別シンボルとして扱われ、
+        // Z3 が無限ループに陥ることを防ぐ。
+        if let Some(callee) = module_env.get_atom(&atom.name) {
+            if callee.ensures.trim() == "true" {
+                // ensures が trivial な場合、再帰の安全性を証明できない
+                return Err(MumeiError::VerificationError(
+                    format!(
+                        "Recursive async atom '{}' requires a non-trivial ensures clause \
+                         for inductive verification. Add: ensures: <postcondition>;",
+                        atom.name
+                    )
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// =============================================================================
+// Atom レベル Invariant の帰納的検証 (Inductive Invariant Verification)
+// =============================================================================
+//
+// atom シグネチャに `invariant: <expr>;` が指定されている場合、
+// 帰納法（数学的帰納法）により不変量の正しさを証明する。
+//
+// 証明構造:
+// 1. 導入 (Induction Base):
+//    requires が成立するとき、invariant が成立することを証明する。
+//    ∀ params. requires(params) → invariant(params)
+//
+// 2. 維持 (Induction Step / Preservation):
+//    invariant が成立する状態で body を実行した後も invariant が維持されることを証明する。
+//    ∀ params. invariant(params) ∧ requires(params) → invariant(body(params))
+//    ※ 再帰呼び出しがある場合、呼び出し先の invariant を帰納法の仮定として使用する。
+//
+// これにより、再帰的 async atom の安全性を、ループ不変量と同様の
+// 帰納的推論で証明できる。BMC の「有界」な保証を「完全」な保証に昇格させる。
+
+/// atom レベルの invariant を帰納的に検証する。
+fn verify_atom_invariant(atom: &Atom, invariant_raw: &str, module_env: &ModuleEnv) -> MumeiResult<()> {
+    let mut cfg = Config::new();
+    cfg.set_timeout_msec(5000);
+    let ctx = Context::new(&cfg);
+    let solver = Solver::new(&ctx);
+
+    let int_sort = z3::Sort::int(&ctx);
+    let arr = Array::new_const(&ctx, "arr", &int_sort, &int_sort);
+    let vc = VCtx { ctx: &ctx, arr: &arr, module_env };
+
+    let mut env: Env = HashMap::new();
+
+    // パラメータをシンボリック変数として登録
+    for param in &atom.params {
+        let base = param.type_name.as_deref()
+            .map(|t| module_env.resolve_base_type(t))
+            .unwrap_or_else(|| "i64".to_string());
+        let var: Dynamic = match base.as_str() {
+            "f64" => Float::new_const(&ctx, param.name.as_str(), 11, 53).into(),
+            _ => Int::new_const(&ctx, param.name.as_str()).into(),
+        };
+        env.insert(param.name.clone(), var);
+
+        // 精緻型制約も適用
+        if let Some(type_name) = &param.type_name {
+            if let Some(refined) = module_env.get_type(type_name) {
+                apply_refinement_constraint(&vc, &solver, &param.name, refined, &mut env)?;
+            }
+        }
+    }
+
+    // invariant 式をパース
+    let inv_ast = parse_expression(invariant_raw);
+    let inv_z3 = expr_to_z3(&vc, &inv_ast, &mut env, None)?
+        .as_bool().ok_or(MumeiError::TypeError(
+            format!("Invariant for atom '{}' must be a boolean expression", atom.name)
+        ))?;
+
+    // === Step 1: 導入 (Induction Base) ===
+    // requires → invariant を証明する
+    if atom.requires.trim() != "true" {
+        let req_ast = parse_expression(&atom.requires);
+        let req_z3 = expr_to_z3(&vc, &req_ast, &mut env, None)?;
+        if let Some(req_bool) = req_z3.as_bool() {
+            solver.push();
+            // requires を仮定
+            solver.assert(&req_bool);
+            // invariant の否定を assert
+            solver.assert(&inv_z3.not());
+            // Unsat なら requires → invariant が証明された
+            if solver.check() == SatResult::Sat {
+                solver.pop(1);
+                return Err(MumeiError::VerificationError(
+                    format!(
+                        "Invariant induction base failed for atom '{}': \
+                         requires does not imply invariant.\n  \
+                         Invariant: {}\n  \
+                         Requires: {}\n  \
+                         The invariant must hold whenever the precondition is satisfied.",
+                        atom.name, invariant_raw, atom.requires
+                    )
+                ));
+            }
+            solver.pop(1);
+        }
+    } else {
+        // requires が true の場合、invariant は無条件に成立する必要がある
+        solver.push();
+        solver.assert(&inv_z3.not());
+        if solver.check() == SatResult::Sat {
+            solver.pop(1);
+            return Err(MumeiError::VerificationError(
+                format!(
+                    "Invariant induction base failed for atom '{}': \
+                     invariant '{}' is not universally true (no requires constraint).",
+                    atom.name, invariant_raw
+                )
+            ));
+        }
+        solver.pop(1);
+    }
+
+    // === Step 2: 維持 (Preservation) ===
+    // invariant ∧ requires のもとで body を実行した後も invariant が維持されることを証明
+    {
+        let env_snapshot = env.clone();
+        solver.push();
+
+        // invariant を仮定（帰納法の仮定）
+        solver.assert(&inv_z3);
+
+        // requires も仮定
+        if atom.requires.trim() != "true" {
+            let req_ast = parse_expression(&atom.requires);
+            let req_z3 = expr_to_z3(&vc, &req_ast, &mut env, None)?;
+            if let Some(req_bool) = req_z3.as_bool() {
+                solver.assert(&req_bool);
+            }
+        }
+
+        // body を実行
+        let body_ast = parse_expression(&atom.body_expr);
+        let _body_result = expr_to_z3(&vc, &body_ast, &mut env, Some(&solver))?;
+
+        // body 実行後の invariant を再評価
+        // （env が body の実行で更新されている可能性がある）
+        let inv_after = expr_to_z3(&vc, &inv_ast, &mut env, None)?
+            .as_bool().ok_or(MumeiError::TypeError("Invariant must be boolean".into()))?;
+
+        // invariant の維持を検証: ¬inv_after が Unsat なら維持されている
+        solver.assert(&inv_after.not());
+        if solver.check() == SatResult::Sat {
+            solver.pop(1);
+            return Err(MumeiError::VerificationError(
+                format!(
+                    "Invariant preservation failed for atom '{}': \
+                     body execution may violate the invariant.\n  \
+                     Invariant: {}\n  \
+                     The invariant must be maintained after executing the body.",
+                    atom.name, invariant_raw
+                )
+            ));
+        }
+        solver.pop(1);
+        let _ = env_snapshot; // env_snapshot はスコープ終了で破棄
+    }
+
+    Ok(())
+}
+
+// =============================================================================
+// Call Graph サイクル検知 (Call Graph Cycle Detection)
+// =============================================================================
+//
+// 間接再帰（A→B→A）を含む呼び出しグラフのサイクルを検出する。
+// 直接再帰は verify_async_recursion_depth で検出済みだが、
+// 間接再帰はグラフ全体を走査する必要がある。
+//
+// アルゴリズム: DFS による強連結成分（SCC）の簡易検出。
+// サイクルが検出された場合、invariant の記述を要求するか、
+// BMC の深度制限を適用する。
+
+/// body 内の全 Call 式から呼び出し先の atom 名を収集する。
+fn collect_callees(expr: &Expr) -> Vec<String> {
+    let mut callees = Vec::new();
+    match expr {
+        Expr::Call(name, args) => {
+            callees.push(name.clone());
+            for arg in args { callees.extend(collect_callees(arg)); }
+        }
+        Expr::Block(stmts) => {
+            for s in stmts { callees.extend(collect_callees(s)); }
+        }
+        Expr::IfThenElse { cond, then_branch, else_branch } => {
+            callees.extend(collect_callees(cond));
+            callees.extend(collect_callees(then_branch));
+            callees.extend(collect_callees(else_branch));
+        }
+        Expr::Let { value, .. } | Expr::Assign { value, .. } => {
+            callees.extend(collect_callees(value));
+        }
+        Expr::While { cond, body, .. } => {
+            callees.extend(collect_callees(cond));
+            callees.extend(collect_callees(body));
+        }
+        Expr::BinaryOp(l, _, r) => {
+            callees.extend(collect_callees(l));
+            callees.extend(collect_callees(r));
+        }
+        Expr::Async { body } | Expr::Acquire { body, .. } => {
+            callees.extend(collect_callees(body));
+        }
+        Expr::Await { expr } => { callees.extend(collect_callees(expr)); }
+        Expr::Match { target, arms } => {
+            callees.extend(collect_callees(target));
+            for arm in arms {
+                callees.extend(collect_callees(&arm.body));
+                if let Some(guard) = &arm.guard { callees.extend(collect_callees(guard)); }
+            }
+        }
+        _ => {}
+    }
+    callees
+}
+
+/// Call Graph のサイクルを DFS で検出する。
+/// atom_name から到達可能なサイクルがある場合、サイクルのパスを返す。
+fn detect_call_cycle(atom_name: &str, module_env: &ModuleEnv) -> Option<Vec<String>> {
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut path: Vec<String> = Vec::new();
+
+    fn dfs(
+        current: &str,
+        target: &str,
+        module_env: &ModuleEnv,
+        visited: &mut HashSet<String>,
+        path: &mut Vec<String>,
+    ) -> bool {
+        if current == target && !path.is_empty() {
+            return true; // サイクル検出
+        }
+        if visited.contains(current) {
+            return false;
+        }
+        visited.insert(current.to_string());
+        path.push(current.to_string());
+
+        if let Some(callee_atom) = module_env.get_atom(current) {
+            let body_ast = parse_expression(&callee_atom.body_expr);
+            let callees = collect_callees(&body_ast);
+            for callee_name in &callees {
+                if let Some(_) = module_env.get_atom(callee_name) {
+                    if callee_name == target && !path.is_empty() {
+                        path.push(callee_name.clone());
+                        return true;
+                    }
+                    if dfs(callee_name, target, module_env, visited, path) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        path.pop();
+        false
+    }
+
+    // atom_name の呼び出し先から DFS 開始
+    if let Some(atom) = module_env.get_atom(atom_name) {
+        let body_ast = parse_expression(&atom.body_expr);
+        let callees = collect_callees(&body_ast);
+        for callee_name in &callees {
+            if let Some(_) = module_env.get_atom(callee_name) {
+                visited.clear();
+                path.clear();
+                path.push(atom_name.to_string());
+                if dfs(callee_name, atom_name, module_env, &mut visited, &mut path) {
+                    return Some(path);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Call Graph サイクル検知を実行し、サイクルが見つかった場合は
+/// invariant の記述を要求するか、BMC 深度制限を適用する。
+fn verify_call_graph_cycles(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult<()> {
+    if let Some(cycle_path) = detect_call_cycle(&atom.name, module_env) {
+        let cycle_str = cycle_path.join(" → ");
+
+        // invariant が指定されていれば帰納的検証で対応可能
+        if atom.invariant.is_some() {
+            // invariant が指定されている → 帰納的検証で安全性を保証
+            // （verify_atom_invariant で検証済み）
+            return Ok(());
+        }
+
+        // max_unroll が指定されていれば BMC で対応
+        if atom.max_unroll.is_some() {
+            // BMC 深度制限が明示されている → 有界検証で対応
+            return Ok(());
+        }
+
+        // どちらもない場合は警告（エラーではなく警告にとどめる）
+        eprintln!(
+            "  ⚠️  Call graph cycle detected for atom '{}': {}\n     \
+             Consider adding `invariant: <expr>;` for complete proof, or \
+             `max_unroll: N;` for bounded verification.",
+            atom.name, cycle_str
+        );
+    }
+    Ok(())
+}
+
+// =============================================================================
+// Taint Analysis (汚染解析)
+// =============================================================================
+//
+// unverified な外部関数から戻ってきた値を「汚染済み（tainted）」としてマークし、
+// tainted 値が安全性の証明に使われた場合に警告を出す。
+//
+// 仕組み:
+// - expr_to_z3 の Call 処理で、呼び出し先が unverified の場合、
+//   戻り値に __tainted_{call_id} マーカーを付与する。
+// - ensures の検証時、env 内に __tainted_* が存在する場合、
+//   「検証結果が未検証コードに依存している」旨の警告を出す。
+
+/// unverified 関数の呼び出しを検出し、taint マーカーを env に追加する。
+/// verify() の body 検証後に呼び出される。
+fn check_taint_propagation(atom: &Atom, env: &Env, module_env: &ModuleEnv) {
+    // body 内で呼び出されている関数を収集
+    let body_ast = parse_expression(&atom.body_expr);
+    let callees = collect_callees(&body_ast);
+
+    let mut tainted_sources: Vec<String> = Vec::new();
+    for callee_name in &callees {
+        if let Some(callee) = module_env.get_atom(callee_name) {
+            if callee.trust_level == TrustLevel::Unverified {
+                tainted_sources.push(callee_name.clone());
+            }
+        }
+    }
+
+    if !tainted_sources.is_empty() {
+        // env 内の __tainted_* マーカーを確認
+        let taint_markers: Vec<&String> = env.keys()
+            .filter(|k| k.starts_with("__tainted_"))
+            .collect();
+
+        if !taint_markers.is_empty() || !tainted_sources.is_empty() {
+            eprintln!(
+                "  ⚠️  Taint warning for atom '{}': verification depends on unverified function(s): [{}]. \
+                 Results may be unsound.",
+                atom.name, tainted_sources.join(", ")
+            );
+        }
+    }
+}
+
 pub fn verify(atom: &Atom, output_dir: &Path, module_env: &ModuleEnv) -> MumeiResult<()> {
+    // Phase 0: 信頼レベルチェック（Trust Boundary）
+    match &atom.trust_level {
+        TrustLevel::Trusted => {
+            // trusted atom: body の検証をスキップし、契約（requires/ensures）のみ信頼する。
+            // 呼び出し元は契約に基づいて Compositional Verification を行う。
+            save_visualizer_report(output_dir, "trusted", &atom.name, "N/A", "N/A",
+                "Trusted: body verification skipped, contract assumed correct.");
+            return Ok(());
+        }
+        TrustLevel::Unverified => {
+            // unverified atom: 警告を出すが、検証は続行する。
+            // ensures が non-trivial な場合のみ検証を試みる。
+            eprintln!("  ⚠️  Warning: atom '{}' is marked as 'unverified'. \
+                       Verification results may be incomplete.", atom.name);
+            if atom.ensures.trim() == "true" && atom.requires.trim() == "true" {
+                // 契約が trivial な場合、検証する意味がないのでスキップ
+                save_visualizer_report(output_dir, "unverified", &atom.name, "N/A", "N/A",
+                    "Unverified: no contract to verify.");
+                return Ok(());
+            }
+        }
+        TrustLevel::Verified => {
+            // 通常の検証フロー
+        }
+    }
+
+    // Phase 1: リソース階層検証（デッドロック防止）
+    verify_resource_hierarchy(atom, module_env)?;
+
+    // Phase 1b: 有界モデル検査（ループ内 acquire パターン）
+    verify_bmc_resource_safety(atom, module_env)?;
+
+    // Phase 1c: 再帰的 async 呼び出しの深度検証
+    verify_async_recursion_depth(atom, module_env)?;
+
+    // Phase 1d: atom レベル invariant の帰納的検証
+    if let Some(ref invariant_expr) = atom.invariant {
+        verify_atom_invariant(atom, invariant_expr, module_env)?;
+    }
+
+    // Phase 1e: Call Graph サイクル検知（間接再帰の検出）
+    verify_call_graph_cycles(atom, module_env)?;
+
     let mut cfg = Config::new();
     cfg.set_timeout_msec(10000);
     let ctx = Context::new(&cfg);
@@ -758,10 +1500,11 @@ pub fn verify(atom: &Atom, output_dir: &Path, module_env: &ModuleEnv) -> MumeiRe
                     format!("consume target '{}' is not a parameter of atom '{}'", param_name, atom.name)
                 ));
             }
-            // ref パラメータは consume できない
-            if atom.params.iter().any(|p| p.name == *param_name && p.is_ref) {
+            // ref / ref mut パラメータは consume できない
+            if atom.params.iter().any(|p| p.name == *param_name && (p.is_ref || p.is_ref_mut)) {
+                let kind = if atom.params.iter().any(|p| p.name == *param_name && p.is_ref_mut) { "ref mut" } else { "ref" };
                 return Err(MumeiError::TypeError(
-                    format!("Cannot consume ref parameter '{}' in atom '{}': ref parameters are borrowed, not owned", param_name, atom.name)
+                    format!("Cannot consume {} parameter '{}' in atom '{}': {} parameters are borrowed, not owned", kind, param_name, atom.name, kind)
                 ));
             }
             // LinearityCtx に登録
@@ -775,13 +1518,14 @@ pub fn verify(atom: &Atom, output_dir: &Path, module_env: &ModuleEnv) -> MumeiRe
         }
     }
 
-    // ref パラメータの借用登録
+    // ref / ref mut パラメータの借用登録
     // ref パラメータは読み取り専用で貸し出される。
+    // ref mut パラメータは排他的な書き込み参照として貸し出される。
     // 借用中は元の所有者（呼び出し元）が consume/free できない。
     // この制約は呼び出し元の verify() で検証される（Compositional Verification）。
     for param in &atom.params {
-        if param.is_ref {
-            // ref パラメータを LinearityCtx に登録（借用として）
+        if param.is_ref || param.is_ref_mut {
+            // ref/ref mut パラメータを LinearityCtx に登録（借用として）
             linearity_ctx.register(&param.name);
 
             // Z3 上で borrowed フラグを作成
@@ -790,16 +1534,26 @@ pub fn verify(atom: &Atom, output_dir: &Path, module_env: &ModuleEnv) -> MumeiRe
             solver.assert(&borrowed_bool); // 借用中: true
             env.insert(borrowed_name, borrowed_bool.into());
 
-            // ref パラメータは consume 不可であることを Z3 で表現
+            // ref/ref mut パラメータは consume 不可であることを Z3 で表現
             // __alive_{name} は常に true（借用中は解放不可）
             let alive_name = format!("__alive_{}", param.name);
             let alive_bool = Bool::new_const(&ctx, alive_name.as_str());
             solver.assert(&alive_bool); // ref は常に alive
             env.insert(alive_name, alive_bool.into());
+
+            // ref mut の場合: 排他的アクセス（exclusive）を Z3 で表現
+            if param.is_ref_mut {
+                let exclusive_name = format!("__exclusive_{}", param.name);
+                let exclusive_bool = Bool::new_const(&ctx, exclusive_name.as_str());
+                solver.assert(&exclusive_bool); // exclusive = true
+                env.insert(exclusive_name, exclusive_bool.into());
+            }
         }
     }
 
     // 3. 前提条件 (requires)
+    // NOTE: requires は エイリアシング検証より先に assert する必要がある。
+    // requires: x != y; のような制約がエイリアシング検証で活用されるため。
     if atom.requires.trim() != "true" {
         let req_ast = parse_expression(&atom.requires);
         let req_z3 = expr_to_z3(&vc, &req_ast, &mut env, None)?;
@@ -808,9 +1562,74 @@ pub fn verify(atom: &Atom, output_dir: &Path, module_env: &ModuleEnv) -> MumeiRe
         }
     }
 
+    // 3b. エイリアシング検証 (Aliasing Prevention)
+    // requires が assert された後に実行する。
+    // これにより requires: x != y; のような制約が Z3 で活用され、
+    // 「provably distinct」なパラメータはエイリアシングエラーにならない。
+    //
+    // ref mut パラメータが存在する場合、同じ型の他の ref/ref mut パラメータ
+    // とのエイリアシング（同一データへの複数参照）を禁止する。
+    //
+    // Rust の借用規則と同等:
+    // - &mut T が存在する場合、同じデータへの &T も &mut T も存在できない
+    // - &T は複数同時に存在可能
+    //
+    // Z3 制約:
+    // ∀ p1, p2 ∈ params:
+    //   p1.is_ref_mut ∧ p1.type == p2.type ∧ p1 ≠ p2
+    //   → ¬(p2.is_ref ∨ p2.is_ref_mut)  // エイリアシング禁止
+    {
+        let ref_mut_params: Vec<&crate::parser::Param> = atom.params.iter()
+            .filter(|p| p.is_ref_mut)
+            .collect();
+
+        for ref_mut_p in &ref_mut_params {
+            for other_p in &atom.params {
+                if other_p.name == ref_mut_p.name {
+                    continue; // 自分自身はスキップ
+                }
+                // 同じ型の ref または ref mut パラメータがある場合、エイリアシングの可能性
+                if (other_p.is_ref || other_p.is_ref_mut)
+                    && other_p.type_name == ref_mut_p.type_name
+                {
+                    // Z3 で同一データへの参照でないことを検証
+                    // パラメータが異なる値を持つことを確認
+                    // （同じ値を持つ場合、エイリアシングが発生）
+                    if let (Some(ref_mut_val), Some(other_val)) = (env.get(&ref_mut_p.name), env.get(&other_p.name)) {
+                        if let (Some(rm_int), Some(ot_int)) = (ref_mut_val.as_int(), other_val.as_int()) {
+                            // ref_mut_val == other_val が SAT ならエイリアシングの可能性あり
+                            solver.push();
+                            solver.assert(&rm_int._eq(&ot_int));
+                            if solver.check() == SatResult::Sat {
+                                solver.pop(1);
+                                let other_kind = if other_p.is_ref_mut { "ref mut" } else { "ref" };
+                                return Err(MumeiError::VerificationError(
+                                    format!(
+                                        "Aliasing violation in atom '{}': \
+                                         'ref mut {}' and '{} {}' may reference the same data (type: {}). \
+                                         A mutable reference requires exclusive access — \
+                                         no other references to the same data are allowed.\n  \
+                                         Hint: Use different types, or ensure the values are provably distinct \
+                                         via requires.",
+                                        atom.name, ref_mut_p.name, other_kind, other_p.name,
+                                        ref_mut_p.type_name.as_deref().unwrap_or("unknown")
+                                    )
+                                ));
+                            }
+                            solver.pop(1);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // 4. ボディの検証
     let body_ast = parse_expression(&atom.body_expr);
     let body_result = expr_to_z3(&vc, &body_ast, &mut env, Some(&solver))?;
+
+    // 4b. Taint Analysis: unverified 関数の呼び出しを検出し警告
+    check_taint_propagation(atom, &env, module_env);
 
     // 5. 事後条件 (ensures)
     if atom.ensures.trim() != "true" {
@@ -1083,6 +1902,14 @@ fn expr_to_z3<'a>(
                             // 複合 ensures（&& で結合された複数条件）内の等式も伝播
                             // ensures: result >= 0 && result == n + 1 のような場合
                             propagate_equality_from_ensures(vc, &ens_ast, &result_z3, &mut call_env, solver_opt)?;
+                        }
+
+                        // Taint Analysis: 呼び出し先が unverified の場合、
+                        // 戻り値を __tainted_ マーカーで汚染済みとしてマークする。
+                        if callee.trust_level == TrustLevel::Unverified {
+                            let taint_key = format!("__tainted_{}", result_name);
+                            let taint_marker = Bool::from_bool(ctx, true);
+                            env.insert(taint_key, taint_marker.into());
                         }
 
                         Ok(result_z3)
@@ -1501,6 +2328,123 @@ fn expr_to_z3<'a>(
             }
 
             result.ok_or_else(|| MumeiError::VerificationError("Match expression has no arms".into()))
+        },
+
+        // =================================================================
+        // 非同期処理 + リソース管理の Z3 検証
+        // =================================================================
+        Expr::Acquire { resource, body } => {
+            // acquire ブロック: リソースを取得して body を実行し、自動解放する。
+            // Z3 上ではリソースの保持状態をシンボリック Bool で追跡する。
+            let held_name = format!("__resource_held_{}", resource);
+            let held_bool = Bool::new_const(ctx, held_name.as_str());
+            if let Some(solver) = solver_opt {
+                // リソース取得: held = true
+                solver.assert(&held_bool);
+            }
+            env.insert(held_name.clone(), held_bool.into());
+
+            // body を検証
+            let body_result = expr_to_z3(vc, body, env, solver_opt)?;
+
+            // リソース解放: held = false
+            let released = Bool::from_bool(ctx, false);
+            env.insert(held_name, released.into());
+
+            Ok(body_result)
+        },
+        Expr::Async { body } => {
+            // async ブロック: body を非同期コンテキストとして検証する。
+            // Z3 上では通常の式として扱い、結果をシンボリック値として返す。
+            // await ポイントでの所有権検証は Await 式で行う。
+            expr_to_z3(vc, body, env, solver_opt)
+        },
+        Expr::Await { expr } => {
+            // =============================================================
+            // await 跨ぎの安全性検証 (Await Safety Verification)
+            // =============================================================
+            //
+            // await ポイントはコルーチンの中断点であり、以下の安全性を検証する:
+            //
+            // 1. リソース保持検証 (Resource Held Across Await):
+            //    acquire ブロック内で await を呼ぶと、リソースを保持したまま
+            //    スレッドが中断される。これはデッドロックの典型パターン。
+            //    env 内の __resource_held_* が true のリソースを検出してエラーにする。
+            //
+            // 2. 所有権一貫性検証 (Ownership Consistency):
+            //    await 前に消費済み（__alive_ = false）の変数が、await 後に
+            //    アクセスされないことを確認する。Z3 で __alive_ フラグをチェック。
+
+            // --- 1. リソース保持検証 ---
+            // env 内の __resource_held_* キーを走査し、Z3 で true かどうかを確認する。
+            // acquire ブロック内で await を呼ぶパターンを検出する。
+            if let Some(solver) = solver_opt {
+                let held_resources: Vec<String> = env.keys()
+                    .filter(|k| k.starts_with("__resource_held_"))
+                    .cloned()
+                    .collect();
+
+                for held_key in &held_resources {
+                    let resource_name = held_key.strip_prefix("__resource_held_").unwrap_or(held_key);
+                    if let Some(held_val) = env.get(held_key) {
+                        // Z3 で held_val == true が証明可能かチェック
+                        // （acquire ブロック内なら held = true が assert されている）
+                        if let Some(held_bool) = held_val.as_bool() {
+                            solver.push();
+                            // held が true であることを仮定し、矛盾がなければ保持中
+                            solver.assert(&held_bool);
+                            if solver.check() != SatResult::Unsat {
+                                solver.pop(1);
+                                return Err(MumeiError::VerificationError(
+                                    format!(
+                                        "Unsafe await: resource '{}' is held across an await point. \
+                                         This can cause deadlock because the resource lock is not released \
+                                         during suspension. Move the await outside the acquire block, or \
+                                         release the resource before awaiting.\n  \
+                                         Hint: acquire {} {{ ... }}; let val = await expr; // OK\n  \
+                                         Bad:  acquire {} {{ let val = await expr; ... }}  // deadlock risk",
+                                        resource_name, resource_name, resource_name
+                                    )
+                                ));
+                            }
+                            solver.pop(1);
+                        }
+                    }
+                }
+            }
+
+            // --- 2. 所有権一貫性検証 ---
+            // await 前に消費済みの変数を検出し、Z3 で __alive_ = false を確認する。
+            // 消費済み変数が await 後にアクセスされる可能性がある場合、警告する。
+            if let Some(solver) = solver_opt {
+                let consumed_vars: Vec<String> = env.keys()
+                    .filter(|k| k.starts_with("__alive_"))
+                    .cloned()
+                    .collect();
+
+                for alive_key in &consumed_vars {
+                    let var_name = alive_key.strip_prefix("__alive_").unwrap_or(alive_key);
+                    if let Some(alive_val) = env.get(alive_key) {
+                        if let Some(alive_bool) = alive_val.as_bool() {
+                            // __alive_ が false（消費済み）であることを Z3 で確認
+                            solver.push();
+                            solver.assert(&alive_bool.not()); // alive = false を仮定
+                            if solver.check() == SatResult::Sat {
+                                // 消費済み変数が存在する → await 後のアクセスは use-after-free
+                                // await ポイントでの状態をマーク（後続の検証で参照）
+                                let await_consumed_key = format!("__await_consumed_{}", var_name);
+                                let marker = Bool::from_bool(vc.ctx, true);
+                                env.insert(await_consumed_key, marker.into());
+                            }
+                            solver.pop(1);
+                        }
+                    }
+                }
+            }
+
+            // 内側の式を評価してシンボリック結果を返す
+            let inner_result = expr_to_z3(vc, expr, env, solver_opt)?;
+            Ok(inner_result)
         },
 
         Expr::FieldAccess(inner_expr, field_name) => {

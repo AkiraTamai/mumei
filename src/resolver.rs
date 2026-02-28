@@ -192,6 +192,7 @@ fn resolve_imports_recursive(
                     Item::EnumDef(_) => {},
                     Item::TraitDef(_) => {},
                     Item::ImplDef(_) => {},
+                    Item::ResourceDef(_) => {},
                     Item::Import(_) => {},
                 }
             }
@@ -255,6 +256,14 @@ fn register_imported_items(items: &[Item], alias: Option<&str>, module_env: &mut
             }
             Item::ImplDef(impl_def) => {
                 module_env.register_impl(impl_def);
+            }
+            Item::ResourceDef(resource_def) => {
+                module_env.register_resource(resource_def);
+                if let Some(prefix) = alias {
+                    let mut fqn_resource = resource_def.clone();
+                    fqn_resource.name = format!("{}::{}", prefix, resource_def.name);
+                    module_env.register_resource(&fqn_resource);
+                }
             }
             Item::Import(_) => {
                 // 再帰的に処理済み
@@ -359,9 +368,17 @@ fn compute_hash(source: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-/// Atom の契約+body のハッシュを計算する（Incremental Build 用）
-/// name + requires + ensures + body_expr を結合してハッシュ化する。
+/// Atom の契約+body+メタデータのハッシュを計算する（Incremental Build 用）
+/// 以下のフィールドを結合してハッシュ化する:
+/// - name, requires, ensures, body_expr（基本契約）
+/// - consumed_params, ref params（所有権制約）
+/// - resources, async flag（並行性制約）
+/// - invariant（帰納的不変量）
+/// - trust_level, max_unroll（検証設定）
+///
 /// このハッシュが一致すれば、atom の検証結果は変わらないため再検証をスキップできる。
+/// Call Graph サイクル検知・Taint Analysis の結果も暗黙的にキャッシュされる
+/// （呼び出し先の atom が変更されればハッシュが変わり、呼び出し元も再検証される）。
 pub fn compute_atom_hash(atom: &crate::parser::Atom) -> String {
     let mut hasher = Sha256::new();
     hasher.update(atom.name.as_bytes());
@@ -376,12 +393,43 @@ pub fn compute_atom_hash(atom: &crate::parser::Atom) -> String {
         hasher.update(b"|consume:");
         hasher.update(cp.as_bytes());
     }
-    // ref パラメータも含める
+    // ref / ref mut パラメータも含める
     for p in &atom.params {
         if p.is_ref {
             hasher.update(b"|ref:");
             hasher.update(p.name.as_bytes());
         }
+        if p.is_ref_mut {
+            hasher.update(b"|ref_mut:");
+            hasher.update(p.name.as_bytes());
+        }
+    }
+    // resources も含める（リソース制約の変更を検出）
+    for r in &atom.resources {
+        hasher.update(b"|resource:");
+        hasher.update(r.as_bytes());
+    }
+    // async フラグも含める
+    if atom.is_async {
+        hasher.update(b"|async");
+    }
+    // invariant も含める
+    if let Some(ref inv) = atom.invariant {
+        hasher.update(b"|invariant:");
+        hasher.update(inv.as_bytes());
+    }
+    // trust_level も含める（信頼レベルの変更を検出）
+    let trust_str = match atom.trust_level {
+        crate::parser::TrustLevel::Verified => "verified",
+        crate::parser::TrustLevel::Trusted => "trusted",
+        crate::parser::TrustLevel::Unverified => "unverified",
+    };
+    hasher.update(b"|trust:");
+    hasher.update(trust_str.as_bytes());
+    // max_unroll も含める（BMC 設定の変更を検出）
+    if let Some(max) = atom.max_unroll {
+        hasher.update(b"|max_unroll:");
+        hasher.update(max.to_string().as_bytes());
     }
     format!("{:x}", hasher.finalize())
 }

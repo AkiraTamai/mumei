@@ -531,6 +531,87 @@ fn compile_expr<'a>(
             Ok(phi.as_basic_value())
         },
 
+        // =================================================================
+        // 非同期処理 + リソース管理の LLVM IR 生成
+        // =================================================================
+        //
+        // acquire: pthread_mutex_lock/unlock を外部関数として呼び出す。
+        //          リソース名からグローバル mutex 変数を解決し、lock → body → unlock。
+        //          Z3 検証済みのためデッドロックは発生しないが、ランタイムの
+        //          相互排他は必要（検証は順序の正しさのみ保証）。
+        //
+        // async:   現在は同期的に body をコンパイル。
+        //          将来: LLVM coroutine intrinsics (llvm.coro.*) による
+        //          ステートマシン変換を生成。
+        //
+        // await:   現在は内側の式をそのままコンパイル。
+        //          将来: llvm.coro.suspend + resume ポイントを生成。
+        //
+        Expr::Acquire { resource, body } => {
+            // --- mutex_lock/unlock の外部関数宣言 ---
+            // pthread_mutex_lock(mutex: *mut pthread_mutex_t) -> i32
+            // pthread_mutex_unlock(mutex: *mut pthread_mutex_t) -> i32
+            // Mumei ランタイムでは、リソース名に対応するグローバル mutex を
+            // __mumei_resource_{name} として外部シンボルで参照する。
+            let ptr_type = context.ptr_type(AddressSpace::default());
+            let i32_type = context.i32_type();
+
+            let lock_fn = module.get_function("pthread_mutex_lock").unwrap_or_else(|| {
+                let fn_type = i32_type.fn_type(&[ptr_type.into()], false);
+                module.add_function("pthread_mutex_lock", fn_type, Some(inkwell::module::Linkage::External))
+            });
+            let unlock_fn = module.get_function("pthread_mutex_unlock").unwrap_or_else(|| {
+                let fn_type = i32_type.fn_type(&[ptr_type.into()], false);
+                module.add_function("pthread_mutex_unlock", fn_type, Some(inkwell::module::Linkage::External))
+            });
+
+            // グローバル mutex 変数: @__mumei_resource_{name}
+            // リンク時にランタイムライブラリまたはユーザーコードが提供する。
+            let global_name = format!("__mumei_resource_{}", resource);
+            let mutex_global = module.get_global(&global_name).unwrap_or_else(|| {
+                // i8 型のグローバル変数として宣言（実際の型はランタイム依存）
+                // pthread_mutex_t のサイズはプラットフォーム依存のため、
+                // opaque pointer として扱い、リンカが解決する。
+                let i8_type = context.i8_type();
+                let global = module.add_global(i8_type, Some(AddressSpace::default()), &global_name);
+                global.set_linkage(inkwell::module::Linkage::External);
+                global
+            });
+            let mutex_ptr = mutex_global.as_pointer_value();
+
+            // pthread_mutex_lock(&__mumei_resource_{name})
+            llvm!(builder.build_call(lock_fn, &[mutex_ptr.into()], &format!("lock_{}", resource)));
+
+            // body をコンパイル
+            let body_result = compile_expr(context, builder, module, function, body, variables, array_ptrs, module_env)?;
+
+            // pthread_mutex_unlock(&__mumei_resource_{name})
+            llvm!(builder.build_call(unlock_fn, &[mutex_ptr.into()], &format!("unlock_{}", resource)));
+
+            Ok(body_result)
+        },
+        Expr::Async { body } => {
+            // async ブロック: 現在は同期的に body をコンパイルする。
+            // Z3 で非同期安全性は検証済みのため、同期実行でもセマンティクスは正しい。
+            //
+            // 将来の LLVM coroutine 変換:
+            //   %id = call token @llvm.coro.id(i32 0, ptr null, ptr null, ptr null)
+            //   %hdl = call ptr @llvm.coro.begin(token %id, ptr %alloc)
+            //   ... body ...
+            //   call i1 @llvm.coro.end(ptr %hdl, i1 false)
+            compile_expr(context, builder, module, function, body, variables, array_ptrs, module_env)
+        },
+        Expr::Await { expr } => {
+            // await 式: 現在は内側の式をそのままコンパイルする。
+            // Z3 で await 跨ぎの安全性は検証済み（リソース保持 + 所有権一貫性）。
+            //
+            // 将来の LLVM coroutine suspend:
+            //   %save = call token @llvm.coro.save(ptr %hdl)
+            //   %suspend = call i8 @llvm.coro.suspend(token %save, i1 false)
+            //   switch i8 %suspend, label %suspend.end [i8 0, label %resume; i8 1, label %cleanup]
+            compile_expr(context, builder, module, function, expr, variables, array_ptrs, module_env)
+        },
+
         Expr::FieldAccess(inner_expr, field_name) => {
             // ネスト構造体のフィールドアクセスを再帰的に解決する。
             // v.x → 1段階、v.point.x → 2段階（再帰的に extract_value）

@@ -6,6 +6,7 @@ mod transpiler;
 mod resolver;
 mod manifest;
 mod setup;
+mod lsp;
 
 use clap::{Parser, Subcommand};
 use std::fs;
@@ -84,6 +85,8 @@ enum Command {
         /// Dependency specifier: local path (./path/to/lib) or package name
         dep: String,
     },
+    /// Start Language Server Protocol server (stdio mode)
+    Lsp,
 }
 
 fn main() {
@@ -111,6 +114,9 @@ fn main() {
         Some(Command::Add { dep }) => {
             cmd_add(&dep);
         }
+        Some(Command::Lsp) => {
+            lsp::run();
+        }
         None => {
             // 後方互換: `mumei input.mm -o dist/katana` → build として実行
             if let Some(ref input) = cli.input {
@@ -123,6 +129,7 @@ fn main() {
                 eprintln!("  init    Generate a new project template");
                 eprintln!("  setup   Download & configure Z3 + LLVM toolchain");
                 eprintln!("  add     Add a dependency to mumei.toml");
+                eprintln!("  lsp     Start Language Server Protocol server");
                 eprintln!("  doctor  Check development environment");
                 eprintln!("Run `mumei --help` for full usage.");
                 std::process::exit(1);

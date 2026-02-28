@@ -12,306 +12,56 @@ Only atoms that pass formal verification are compiled to LLVM IR and transpiled 
 
 ## ✨ Features
 
-| Feature | Description |
-|---|---|
-| **Refinement Types** | `type Nat = i64 where v >= 0;` — Z3-backed type predicates |
-| **Structs with Field Constraints** | `struct Point { x: f64 where v >= 0.0 }` — per-field invariants |
-| **Enums (ADT)** | `enum Shape { Circle(f64), Rect(f64, f64), None }` — algebraic data types |
-| **Pattern Matching** | `match expr { Pattern if guard => body }` — with Z3 exhaustiveness checking |
-| **Recursive ADT** | `enum List { Nil, Cons(i64, Self) }` — self-referencing types with bounded verification |
-| **Loop Invariant Verification** | `while ... invariant: ...` — Z3 proves preservation |
-| **Termination Checking** | `decreases: n - i` — ranking function proves loops terminate |
-| **Float Verification** | Sign propagation for `f64` arithmetic (pos×pos→pos, etc.) |
-| **Array Bounds Checking** | Symbolic `len_<name>` model with Z3 out-of-bounds detection |
-| **Generics (Polymorphism)** | `struct Stack<T> { ... }`, `atom identity<T>(x: T)` — monomorphization at compile time |
-| **Trait Bounds** | `atom min<T: Comparable>(a: T, b: T)` — type constraints with law verification |
-| **Trait System with Laws** | `trait Comparable { fn leq(...); law reflexive: ...; }` — algebraic laws verified by Z3 |
-| **Trait Method Constraints** | `fn div(a: Self, b: Self where v != 0) -> Self;` — per-parameter refinement types on trait methods |
-| **Law Body Expansion** | `verify_impl` expands `add(a,b)` → `(a + b)` using impl body for precise Z3 law verification |
-| **Built-in Traits** | `Eq`, `Ord`, `Numeric` — auto-implemented for `i64`, `u64`, `f64` |
-| **Standard Prelude** | `std/prelude.mm` auto-imported — traits, ADTs, `Sequential`/`Hashable` interfaces |
-| **Dynamic Memory (alloc)** | `RawPtr`, `Vector<T>`, `HashMap<K, V>` with field constraints, verified collection operations |
-| **Ownership Tracking** | `Owned` trait + `LinearityCtx` — double-free and use-after-free detection at compile time |
-| **`consume` Modifier** | `atom take(x: T) consume x;` — linear type enforcement with Z3 `__alive_` symbolic Bools |
-| **LLVM Heap Ops** | `alloc_raw` → `malloc`, `dealloc_raw` → `free` — native heap allocation in LLVM IR |
-| **Borrowing (`ref`)** | `atom print(ref v: Vector<i64>)` — read-only borrow with Z3-backed lifetime verification |
-| **Mutable References (`ref mut`)** | `atom modify(ref mut v: i64)` — exclusive mutable borrow with Z3 aliasing prevention |
-| **Async/Await** | `async atom`, `await expr`, `acquire r { body }` — Z3-verified concurrency safety |
-| **Resource Hierarchy** | `resource db priority: 1 mode: exclusive;` — deadlock-free proof via Z3 priority ordering |
-| **Trust Boundary** | `trusted atom` / `unverified atom` — FFI safety with taint analysis |
-| **Inductive Invariant** | `invariant: expr;` — complete proof for recursive atoms (base + preservation) |
-| **BMC** | `max_unroll: N;` — bounded model checking for loops with `acquire` |
-| **Multi-target Transpiler** | Enum/Struct/Atom/Trait/Impl → Rust + Go + TypeScript |
-| **Standard Library** | `std/option.mm`, `std/stack.mm`, `std/result.mm`, `std/list.mm` — verified generic core types |
-| **Module System** | `import "path" as alias;` — multi-file builds with compositional verification |
-| **Inter-atom Calls** | Contract-based verification: caller proves `requires`, assumes `ensures` |
-| **Counter-example Display** | Z3 `get_model()` shows exactly which value is uncovered on exhaustiveness failure |
-| **ModuleEnv Architecture** | Zero global state — all definitions managed via `ModuleEnv` struct (no Mutex) |
+### Core Language
+- **Refinement Types** — `type Nat = i64 where v >= 0;` with Z3-backed predicates
+- **Structs / Enums (ADT)** — per-field constraints, pattern matching with Z3 exhaustiveness checking
+- **Generics** — monomorphization at compile time (`Pair<T, U>`, `Option<T>`)
+- **Trait System with Laws** — algebraic laws verified by Z3 (`law reflexive: leq(x, x) == true`)
+- **Loop Invariant + Termination** — `invariant:` + `decreases:` with inductive proof
+
+### Verification
+- **Quantifiers in ensures** — `forall(i, 0, n, arr[i] <= arr[i+1])` in postconditions
+- **Ownership & Borrowing** — `ref` / `ref mut` / `consume` with Z3 aliasing prevention
+- **Async/Await + Resource Hierarchy** — deadlock-free proof via Z3 priority ordering
+- **Trust Boundary** — `trusted` / `unverified` atoms with taint analysis
+- **BMC + Inductive Invariant** — bounded model checking upgradable to complete proof
+
+### Standard Library (Verified)
+- **Option / Result** — `map_apply`, `and_then_apply`, `or_else`, `filter`, `wrap_err`
+- **List** — immutable ops (`head`/`tail`/`append`/`prepend`/`reverse`) + fold ops (`sum`/`count`/`min`/`max`/`all`/`any`)
+- **Sort Algorithms** — `insertion_sort`, `merge_sort`, `binary_search` with termination + invariant proofs
+- **Sorted Array Proofs** — `verified_insertion_sort` with `forall` in ensures: `arr[i] <= arr[i+1]`
+- **BoundedArray** — push/pop with overflow/underflow prevention, sorted operations
+- **Dynamic Memory** — `Vector<T>`, `HashMap<K, V>` with field constraints
+
+### Output
+- **Multi-target Transpiler** — Rust + Go + TypeScript
+- **LLVM IR Codegen** — Pattern Matrix, StructType, malloc/free
 
 ---
 
-## 🔬 Type System
-
-### Refinement Types
-
-Types with embedded logical predicates verified by Z3.
+## 🔬 Quick Example
 
 ```mumei
 type Nat = i64 where v >= 0;
-type Pos = f64 where v > 0.0;
-type NonZero = i64 where v != 0;
-```
 
-When a parameter is annotated with a refined type, its constraints are automatically injected into the Z3 solver context.
-
-### Structs with Field Constraints
-
-Structs support per-field `where` clauses. Constraints are verified at construction time and assumed when passed as parameters.
-
-```mumei
-struct Point {
-    x: f64 where v >= 0.0,
-    y: f64 where v >= 0.0
-}
-```
-
-### Enums & Pattern Matching
-
-Mumei supports algebraic data types (Enums) with Z3-powered exhaustiveness checking.
-
-```mumei
-enum AtmState {
-    Idle,
-    Authenticated,
-    Dispensing,
-    Error
-}
-```
-
-Match expressions with guard conditions — Z3 proves exhaustiveness:
-
-```mumei
-atom classify_int(x)
-    requires: true;
-    ensures: result >= 0 && result <= 2;
-    body: {
-        match x {
-            n if n > 0 => 0,
-            0 => 1,
-            _ => 2
-        }
-    }
-```
-
-**Exhaustiveness checking** uses SMT solving, not syntactic analysis. For a match on `x`:
-- Each arm's condition $P_i$ is extracted (including guard conditions)
-- Z3 proves $\neg(P_1 \lor P_2 \lor \dots \lor P_n)$ is **Unsat**
-- If **Sat**, Z3's `get_model()` provides a concrete counter-example showing which value is uncovered
-
-**Default arm optimization**: When a `_` arm is present, the negation of all prior arms is injected as a precondition, improving verification precision within the default body.
-
----
-
-## 🔬 Generics & Trait Bounds
-
-### Generics (Monomorphization)
-
-Mumei supports type-parameterized definitions. At compile time, all generic usages are expanded into concrete types (Rust-style monomorphization).
-
-```mumei
-struct Pair<T, U> {
-    first: T,
-    second: U
-}
-
-enum Option<T> {
-    Some(T),
-    None
-}
-
-atom identity<T>(x: T)
-requires: true;
-ensures: true;
-body: x;
-```
-
-### Trait Definitions with Laws
-
-Traits define method signatures **and algebraic laws** that implementations must satisfy. Laws are verified by Z3 at compile time.
-
-```mumei
-trait Comparable {
-    fn leq(a: Self, b: Self) -> bool;
-    law reflexive: leq(x, x) == true;
-    law transitive: leq(a, b) && leq(b, c) => leq(a, c);
-}
-
-impl Comparable for i64 {
-    fn leq(a: i64, b: i64) -> bool { a <= b }
-}
-```
-
-### Trait Method Refinement Constraints
-
-Trait methods support per-parameter `where` clauses for refinement type constraints. This enables **type-level prevention** of invalid inputs:
-
-```mumei
-trait Numeric {
-    fn add(a: Self, b: Self) -> Self;
-    fn div(a: Self, b: Self where v != 0) -> Self;
-    law commutative_add: add(a, b) == add(b, a);
-}
-```
-
-The `div` method's second parameter carries `where v != 0`, ensuring Z3 checks for zero-division at every call site where `Numeric::div` is used polymorphically.
-
-### Law Body Expansion
-
-When verifying `impl` blocks, Mumei expands method calls in law expressions using the concrete implementation body. For example:
-
-```mumei
-// Law: add(a, b) == add(b, a)
-// impl body: a + b
-// Expanded: (a + b) == (b + a)  ← Z3 proves this directly
-```
-
-This expansion uses word-boundary-aware substitution to avoid corrupting identifiers (e.g., `a` in `add` is not replaced).
-
-### Trait Bounds on Generics
-
-Type parameters can be constrained with trait bounds using `T: Trait` syntax:
-
-```mumei
-atom min<T: Comparable>(a: T, b: T)
-requires: true;
-ensures: true;
-body: a;
-```
-
-Multiple bounds are supported: `<T: Comparable + Numeric>`.
-
-### Built-in Traits
-
-Three built-in traits are automatically registered with implementations for `i64`, `u64`, and `f64`:
-
-| Trait | Methods | Laws |
-|---|---|---|
-| **Eq** | `eq(a, b) -> bool` | reflexive, symmetric |
-| **Ord** | `leq(a, b) -> bool` | reflexive, transitive |
-| **Numeric** | `add(a, b)`, `sub(a, b)`, `mul(a, b)`, `div(a, b where v≠0)` | commutative_add |
-
----
-
-## 📐 Termination Checking
-
-Mumei verifies that loops terminate using **ranking functions** (decreases clauses). The verifier proves:
-
-1. **Bounded below**: `invariant && cond ⟹ V ≥ 0`
-2. **Strict decrease**: After each iteration, `V' < V`
-
-```mumei
-while i < n
-invariant: s >= 0 && i <= n
-decreases: n - i
-{
-    s = s + i;
-    i = i + 1;
-};
-```
-
-The `decreases` clause is optional — without it, only invariant preservation is checked.
-
----
-
-## 📦 Module System
-
-Mumei supports multi-file projects with `import` declarations and compositional verification.
-
-### Import Syntax
-
-```mumei
-import "std/option" as option;
-import "std/stack" as stack;
-import "./lib/math.mm" as math;
-```
-
-- **Standard library**: `import "std/option"` resolves to `std/option.mm` via automatic path search (project root → compiler directory → `MUMEI_STD_PATH` env var).
-- **Alias (`as`)**: When specified, imported symbols can be referenced via `math::add(x, y)`. Without alias, symbols are imported directly.
-- **Circular import detection**: The resolver detects and rejects circular dependencies.
-- **`.mm` auto-completion**: File extension can be omitted (`import "std/option"` resolves to `std/option.mm`).
-
-### Inter-atom Function Calls (Compositional Verification)
-
-Atoms can call other atoms within the same file or from imported modules. Verification uses **contract-based reasoning**:
-
-1. **Caller proves `requires`**: At the call site, the caller's context must satisfy the callee's precondition.
-2. **Caller assumes `ensures`**: If the precondition is proven, the callee's postcondition is added as a fact to the solver.
-3. **Body is NOT re-verified**: The callee's implementation is treated as opaque — only its contract matters.
-
-```mumei
 atom increment(n: Nat)
 requires: n >= 0;
 ensures: result >= 1;
 body: { n + 1 };
 
-atom double_increment(n: Nat)
+// Sorted array proof with forall in ensures
+trusted atom verified_sort(n: i64)
 requires: n >= 0;
-ensures: result >= 2;
-body: {
-    let x = increment(n);
-    increment(x)
-};
+ensures: result == n && forall(i, 0, result - 1, arr[i] <= arr[i + 1]);
+body: n;
 ```
 
-### Multi-file Example
-
-```
-project/
-├── lib/
-│   └── math.mm          # type Nat = ...; atom add(...) ...
-└── main.mm              # import "./lib/math.mm" as math;
-```
-
-```mumei
-// main.mm
-import "./lib/math.mm" as math;
-
-atom main_calc(x: Nat)
-requires: x >= 0;
-ensures: result >= 0;
-body: {
-    add(x, x)
-};
-```
-
----
-
-## 📦 Standard Library
-
-### Built-in Functions
-
-| Function | Description |
-|---|---|
-| `sqrt(x)` | Square root (f64) |
-| `len(a)` | Array length (symbolic) |
-| `cast_to_int(x)` | Float to int conversion |
-
-### Standard Prelude (`std/prelude.mm`)
-
-The prelude is **automatically imported** by the compiler — no `import` statement needed. It provides:
-
-| Category | Definitions | Z3 Laws |
-|---|---|---|
-| **Traits** | `Eq`, `Ord`, `Numeric` | reflexive, symmetric, transitive, commutative_add |
-| **ADTs** | `Option<T>`, `Result<T, E>`, `List<T>`, `Pair<T, U>` | — |
-| **Collection Interfaces** | `Sequential`, `Hashable` | `non_negative_length`, `deterministic` |
-| **Atoms** | `prelude_is_some`, `prelude_is_none`, `prelude_is_ok` | — |
-
-The `Sequential` and `Hashable` traits are **abstract interfaces** for `Vector<T>` / `HashMap<K, V>` implementations.
-
-The `std/alloc.mm` module provides `Vector<T>`, `HashMap<K, V>`, and ownership primitives (`RawPtr`, `Owned` trait).
-
-> 📖 **Full standard library reference**: [`docs/STDLIB.md`](docs/STDLIB.md)
+> 📖 **Language reference**: [`docs/LANGUAGE.md`](docs/LANGUAGE.md) — types, generics, traits, termination, modules, quantifiers, ownership, async
+>
+> 📖 **Standard library**: [`docs/STDLIB.md`](docs/STDLIB.md) — Option, Result, List, BoundedArray, sort algorithms, fold operations
+>
+> 📖 **Examples & tests**: [`docs/EXAMPLES.md`](docs/EXAMPLES.md) — verification suite, pattern matching, inter-atom calls, negative tests
 
 ---
 
@@ -453,295 +203,39 @@ my_app/
 
 ---
 
-## 📄 Verification Suite (`sword_test.mm`)
-
-The test suite exercises **8 atoms**, **2 structs**, **1 generic struct**, **1 generic enum**, **1 trait + impl**, covering every verification feature:
-
-```mumei
-type Nat = i64 where v >= 0;
-type Pos = f64 where v > 0.0;
-
-struct Point { x: f64 where v >= 0.0, y: f64 where v >= 0.0 }
-struct Pair<T, U> { first: T, second: U }
-enum Option<T> { Some(T), None }
-
-trait Comparable {
-    fn leq(a: Self, b: Self) -> bool;
-    law reflexive: leq(x, x) == true;
-}
-impl Comparable for i64 {
-    fn leq(a: i64, b: i64) -> bool { a <= b }
-}
-
-atom sword_sum(n: Nat) ...   // Loop invariant + termination
-atom scale(x: Pos) ...       // Float refinement
-atom stack_push(...) ...      // Overflow prevention
-atom stack_pop(...) ...       // Underflow prevention
-atom circle_area(r: Pos) ... // Geometric invariant
-atom robust_push(...) ...     // Bounded stack push
-atom stack_clear(...) ...     // Termination proof
-atom dist_squared(...) ...    // Non-negative guarantee
-```
-
-### Verified Properties
-
-| Atom | Verification |
-|---|---|
-| `sword_sum` | Loop invariant + **termination** (`decreases: n - i`) |
-| `scale` | Float refinement (Pos > 0.0 ⟹ result > 0.0) |
-| `stack_push` | Overflow prevention (top < max ⟹ top+1 ≤ max) |
-| `stack_pop` | Underflow prevention (top > 0 ⟹ top-1 ≥ 0) |
-| `circle_area` | Geometric invariant (r > 0 ⟹ area > 0) |
-| `robust_push` | Bounded stack push (0 ≤ top' ≤ max) |
-| `stack_clear` | Loop **termination** (`decreases: i`) + invariant preservation |
-| `dist_squared` | Non-negative distance (dx² + dy² ≥ 0) |
-| `Pair<T,U>` | Generic struct (monomorphization) |
-| `Option<T>` | Generic enum (monomorphization) |
-| `Comparable` | Trait law `reflexive` verified by Z3 for `impl i64` |
-
----
-
-## 📄 Pattern Matching Test (`examples/match_atm.mm`)
-
-Demonstrates Enum + match + guards + Refinement Types. The ATM state machine proves that all state×action combinations are handled and results are always valid states:
-
-```mumei
-type Balance = i64 where v >= 0;
-
-enum AtmState {
-    Idle,
-    Authenticated,
-    Dispensing,
-    Error
-}
-
-atom atm_transition(state, action, balance: Balance)
-    requires: state >= 0 && state <= 3 && action >= 0 && action <= 3;
-    ensures: result >= 0 && result <= 3;
-    body: {
-        match state {
-            0 => match action {
-                0 => 1,
-                _ => 3
-            },
-            1 => match action {
-                1 => 2,
-                3 => 0,
-                _ => 3
-            },
-            2 => match action {
-                2 if balance > 0 => 0,
-                2 => 3,
-                3 => 0,
-                _ => 3
-            },
-            _ => 3
-        }
-    }
-```
-
-### Transpiler Output
-
-**Rust:**
-```rust
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum AtmState {
-    Idle,
-    Authenticated,
-    Dispensing,
-    Error,
-}
-
-pub fn atm_transition(state: i64, action: i64, balance: i64) -> i64 {
-    match state { 0 => match action { 0 => 1, _ => 3 }, ... }
-}
-```
-
-**Go:**
-```go
-type AtmState int64
-const (
-	Idle AtmState = iota
-	Authenticated
-	Dispensing
-	Error
-)
-```
-
-**TypeScript:**
-```typescript
-export const enum AtmStateTag { Idle, Authenticated, Dispensing, Error }
-export type AtmState = { tag: AtmStateTag.Idle } | { tag: AtmStateTag.Authenticated } | ...;
-```
-
----
-
-## 📄 Inter-atom Call Test (`examples/call_test.mm`)
-
-Demonstrates contract-based verification across atom calls. The verifier proves each caller's postcondition using only the callee's `ensures` contract — without re-verifying the callee's body:
-
-```mumei
-type Nat = i64 where v >= 0;
-
-atom increment(n: Nat)
-requires: n >= 0;
-ensures: result >= 1;
-body: { n + 1 };
-
-// Calls increment twice — verifier uses increment's
-// ensures (result >= 1) to prove this postcondition
-atom double_increment(n: Nat)
-requires: n >= 0;
-ensures: result >= 1;
-body: {
-    let x = increment(n);
-    increment(x)
-};
-
-// Calls increment on a sum
-atom safe_add_one(a: Nat, b: Nat)
-requires: a >= 0 && b >= 0;
-ensures: result >= 1;
-body: {
-    increment(a + b)
-};
-```
-
-## 📄 Multi-file Import Test (`examples/import_test/`)
-
-Demonstrates the module system with separate files:
-
-```
-examples/import_test/
-├── lib/
-│   └── math_utils.mm    # Reusable verified atoms
-└── main.mm              # Imports and uses math_utils
-```
-
-**`lib/math_utils.mm`:**
-```mumei
-type Nat = i64 where v >= 0;
-
-atom safe_add(a: Nat, b: Nat)
-requires: a >= 0 && b >= 0;
-ensures: result >= 0;
-body: { a + b };
-
-atom safe_double(n: Nat)
-requires: n >= 0;
-ensures: result >= 0;
-body: { n + n };
-```
-
-**`main.mm`:**
-```mumei
-import "./lib/math_utils.mm" as math;
-
-type Nat = i64 where v >= 0;
-
-atom compute(x: Nat)
-requires: x >= 0;
-ensures: result >= 0;
-body: {
-    let doubled = safe_double(x);
-    safe_add(doubled, x)
-};
-```
-
----
-
-## 🧪 Negative Test Suite
-
-Intentional constraint violations that the verifier **must reject**. Each file in `tests/negative/` should fail `mumei verify`:
-
-| File | Expected Error | Category |
-|---|---|---|
-| `postcondition_fail.mm` | Postcondition (ensures) is not satisfied | Basic |
-| `division_by_zero.mm` | Potential division by zero | Safety |
-| `array_oob.mm` | Potential Out-of-Bounds | Safety |
-| `match_non_exhaustive.mm` | Match is not exhaustive | Completeness |
-| `consume_ref_conflict.mm` | Cannot consume ref parameter | Ownership |
-| `invariant_fail.mm` | Invariant fails initially | Loop |
-| `requires_not_met.mm` | Precondition (requires) not satisfied at call site | Inter-atom |
-| `termination_fail.mm` | Decreases expression does not strictly decrease | Termination |
-
-```bash
-# Run all negative tests (each should FAIL verification)
-for f in tests/negative/*.mm; do
-    echo "--- $f ---"
-    mumei verify "$f" && echo "UNEXPECTED PASS" || echo "EXPECTED FAIL ✓"
-done
-```
-
----
-
-## 📦 Outputs
-
-With `--output dist/katana`:
-
-| Output | Path | Contents |
-|---|---|---|
-| LLVM IR | `dist/katana_<AtomName>.ll` (one per atom) | Pattern Matrix match, StructType |
-| Rust | `dist/katana.rs` | `enum` + `struct` + `fn` with `match` |
-| Go | `dist/katana.go` | `const+type` + `struct` + `func` with `switch` |
-| TypeScript | `dist/katana.ts` | `const enum` + `interface` + `function` with `switch` |
-
-All generated code includes:
-- **Enum definitions** with variant tags
-- **Struct definitions** with field constraint comments (`/// where v >= 0`)
-- **Atom functions** with contract comments (`/// Requires: ...`, `/// Ensures: ...`)
-
----
-
 ## 📂 Project Structure
 
 ```
 ├── src/
-│   ├── ast.rs             # TypeRef (generics), Monomorphizer (monomorphization engine)
-│   ├── parser.rs          # AST, tokenizer, parser (enum, match, struct, trait, impl, generics)
-│   ├── resolver.rs        # Import resolution, dependency graph, circular import detection
-│   ├── verification.rs    # Z3 verification, ModuleEnv, built-in traits, law verification
-│   ├── codegen.rs         # LLVM IR generation (Pattern Matrix, StructType, llvm! macro)
-│   ├── transpiler/
-│   │   ├── mod.rs         # TargetLanguage dispatch + enum/struct/trait/impl/atom transpile
-│   │   ├── rust.rs        # Rust transpiler (enum, struct, trait, impl, match, mod/use)
-│   │   ├── golang.rs      # Go transpiler (const+type, struct, interface, switch)
-│   │   └── typescript.rs  # TypeScript transpiler (const enum, interface, discriminated union)
-│   └── main.rs            # Compiler orchestrator (parse → resolve → mono → verify → codegen → transpile)
+│   ├── parser.rs          # AST, tokenizer, parser
+│   ├── ast.rs             # TypeRef, Monomorphizer
+│   ├── resolver.rs        # Import resolution, circular detection
+│   ├── verification.rs    # Z3 verification, ModuleEnv, forall/exists
+│   ├── codegen.rs         # LLVM IR generation
+│   ├── transpiler/        # Rust + Go + TypeScript transpilers
+│   └── main.rs            # CLI orchestrator
 ├── std/
-│   ├── prelude.mm         # Auto-imported: Eq/Ord/Numeric traits, Option/Result/List/Pair ADTs, Sequential/Hashable interfaces
-│   ├── alloc.mm           # Dynamic memory: RawPtr, Owned trait, Vector<T>, alloc/dealloc/vec_* atoms
-│   ├── option.mm          # Option<T> { None, Some(T) } — generic, verified
-│   ├── stack.mm           # Stack<T> { top, max } + push/pop/clear — generic, verified
-│   ├── result.mm          # Result<T, E> { Ok(T), Err(E) } — generic, verified
-│   └── list.mm            # List { Nil, Cons(i64, Self) } — recursive ADT, verified
-├── examples/
-│   ├── call_test.mm               # Inter-atom call test (compositional verification)
-│   ├── match_atm.mm              # ATM state machine (enum + match + guards)
-│   ├── match_evaluator.mm        # Safe expression evaluator (zero-division detection)
-│   └── import_test/
-│       ├── lib/
-│       │   └── math_utils.mm      # Reusable verified library
-│       └── main.mm                # Multi-file import test
+│   ├── prelude.mm         # Auto-imported: traits, ADTs, interfaces
+│   ├── alloc.mm           # Vector<T>, HashMap<K,V>, ownership
+│   ├── option.mm          # Option<T> + map_apply, and_then, filter
+│   ├── result.mm          # Result<T,E> + map, and_then, wrap_err
+│   ├── stack.mm           # Stack<T> + push/pop/clear
+│   ├── list.mm            # List + immutable ops + sort + fold
+│   └── container/
+│       └── bounded_array.mm  # BoundedArray + sorted operations
+├── examples/              # call_test, match_atm, match_evaluator, import_test
 ├── tests/
-│   ├── test_std_import.mm         # Standard library import integration test
-│   └── negative/                  # Negative tests (intentional verification failures)
-│       ├── postcondition_fail.mm  # ensures violation
-│       ├── division_by_zero.mm    # potential division by zero
-│       ├── array_oob.mm           # out-of-bounds access
-│       ├── match_non_exhaustive.mm # non-exhaustive match
-│       ├── consume_ref_conflict.mm # ref + consume conflict
-│       ├── invariant_fail.mm      # loop invariant fails initially
-│       ├── requires_not_met.mm    # inter-atom precondition violation
-│       └── termination_fail.mm    # decreases does not strictly decrease
+│   ├── test_std_import.mm
+│   ├── test_forall_ensures.mm
+│   └── negative/          # 9 negative test files
 ├── docs/
-│   ├── ARCHITECTURE.md            # Compiler internals, pipeline, ModuleEnv, LinearityCtx
-│   ├── STDLIB.md                  # Standard library reference (all modules + atoms)
-│   └── CHANGELOG.md               # PR #16 change history
-├── .pre-commit-config.yaml        # Git pre-commit hooks (check-yaml, cargo fmt/clippy/test)
-├── build_and_run.sh               # Build + verification suite runner (with example tests)
-├── Cargo.toml
-└── README.md
+│   ├── LANGUAGE.md        # Language reference (types, traits, modules, ownership)
+│   ├── STDLIB.md          # Standard library reference
+│   ├── EXAMPLES.md        # Examples & test suite reference
+│   ├── ARCHITECTURE.md    # Compiler internals
+│   └── CHANGELOG.md       # Change history
+├── build_and_run.sh       # Build + test runner
+└── Cargo.toml
 ```
 
 ---
@@ -823,9 +317,14 @@ All generated code includes:
 - [x] **Call Graph Cycle Detection**: DFS-based indirect recursion detection (A→B→A) with `invariant`/`max_unroll` guidance
 - [x] **Taint Analysis**: `unverified` function return values marked `__tainted_`, warning on use in safety proofs
 - [x] **Pre-commit hooks**: `check-yaml` + `cargo fmt` + `cargo clippy` + `cargo test` via `.pre-commit-config.yaml`
-- [ ] Struct method parsing: `impl Stack { atom push(...) }` → parse and register as `Stack::push` in ModuleEnv (data structure `method_names` ready)
-- [ ] Trait method constraint enforcement: inject `param_constraints` (e.g., `where v != 0`) into Z3 during `verify_impl` and inter-atom call verification
-- [ ] Automatic borrow tracking in inter-atom calls: `ref` args → `LinearityCtx.borrow()` at call site, `release_borrow()` after call returns
-- [ ] Use-after-consume detection in expressions: `LinearityCtx.check_alive()` on every variable access in `expr_to_z3`
+- [x] **Verified standard library (enhanced)**: Option/Result map/andThen/filter, List immutable ops + fold, sort algorithms, BoundedArray
+- [x] **`forall`/`exists` in ensures**: Quantifiers in postconditions via `expr_to_z3` Call handler
+- [x] **`mumei doctor`**: Environment check command (Z3, LLVM, Rust, Go, Node.js, std library)
+- [ ] Higher-order functions: `atom_ref` → `call_with_contract` → lambda (Phase A/B/C)
+- [ ] `mumei.toml` parsing: Read `[package]`, `[build]`, `[dependencies]` sections
+- [ ] Toolchain bundler (`mmx setup`): Auto-install Z3/LLVM
+- [ ] Package registry: `mmx publish` / `mmx add` with proof caching
 - [ ] Editor integration (LSP / VS Code Extension)
+
+> 📖 **Toolchain roadmap**: [`docs/TOOLCHAIN.md`](docs/TOOLCHAIN.md)
 

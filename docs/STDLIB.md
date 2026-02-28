@@ -9,7 +9,8 @@
 | `std/option.mm` | ❌ `import "std/option"` | `Option<T>` operations |
 | `std/stack.mm` | ❌ `import "std/stack"` | Bounded stack operations |
 | `std/result.mm` | ❌ `import "std/result"` | `Result<T, E>` operations |
-| `std/list.mm` | ❌ `import "std/list"` | Recursive list ADT |
+| `std/list.mm` | ❌ `import "std/list"` | Recursive list ADT + Sort algorithms |
+| `std/container/bounded_array.mm` | ❌ `import "std/container/bounded_array"` | Bounded array with sorted operations |
 
 ---
 
@@ -122,6 +123,10 @@ import "std/option" as option;
 | `is_some(opt)` | Returns 1 if Some, 0 if None |
 | `is_none(opt)` | Returns 1 if None, 0 if Some |
 | `unwrap_or(opt, default)` | Returns value or default |
+| `map_apply(opt, default, mapped)` | Map: applies transformation (Some→mapped, None→default) |
+| `and_then_apply(opt, inner_opt)` | AndThen/FlatMap: chains Option-returning operations |
+| `or_else(opt, alternative)` | OrElse: provides fallback Option |
+| `filter(opt, condition)` | Filter: Some→None if condition is false |
 
 ---
 
@@ -157,6 +162,13 @@ import "std/result" as result;
 | `is_err(res)` | Returns 1 if Err, 0 if Ok |
 | `unwrap_or_default(res, default)` | Returns value or default |
 | `safe_divide(a, b)` | Division returning Result (Err on zero) |
+| `result_map_apply(res, default, mapped)` | Map: Ok→mapped, Err→default |
+| `result_and_then(res, inner_res)` | AndThen/FlatMap: chains Result operations |
+| `result_or_else(res, alternative)` | OrElse: provides fallback on Err |
+| `result_map_err(res, mapped_err)` | MapErr: transforms Err value |
+| `result_wrap_err(res, err_code, offset)` | WrapErr: remap error code for package boundaries |
+| `result_unwrap_or_else(res, ok_val, err_default)` | UnwrapOrElse: final error handling |
+| `result_flatten(outer, inner)` | Flatten: `Result<Result<T,E>,E>` → `Result<T,E>` |
 
 ---
 
@@ -176,6 +188,60 @@ enum List { Nil, Cons(i64, Self) }
 | `head_or(list, default)` | Get head or default |
 | `is_sorted_pair(a, b)` | Check if a <= b |
 | `insert_sorted(val, sorted_tag)` | Insert into sorted position |
+
+### Immutable List Operations
+
+| Atom | Requires | Ensures | Description |
+|---|---|---|---|
+| `list_head(list)` | `list ∈ {0,1}` | `result ∈ {0,1}` | Head as Option (Nil→None, Cons→Some) |
+| `list_tail(list)` | `list ∈ {0,1}` | `result ∈ {0,1}` | Tail (new list, original unchanged) |
+| `list_append(list, value)` | `list ∈ {0,1}` | `result == 1` | Append returns non-empty list |
+| `list_prepend(list, value)` | `list ∈ {0,1}` | `result == 1` | Prepend (O(1), Cons construction) |
+| `list_length(list)` | `list ∈ {0,1}` | `result >= 0` | Length (tag-based abstraction) |
+| `list_reverse(list)` | `list ∈ {0,1}` | `result == list` | Reverse (tag preserved) |
+
+### Reduce / Fold Operations
+
+| Atom | Requires | Ensures | Description |
+|---|---|---|---|
+| `fold_sum(n)` | `n >= 0` | `result >= 0` | Sum all elements |
+| `fold_count_gte(n, threshold)` | `n >= 0` | `0 <= result <= n` | Count elements ≥ threshold |
+| `fold_min_index(n)` | `n >= 0` | `-1 <= result < n` | Index of minimum element |
+| `fold_max_index(n)` | `n >= 0` | `-1 <= result < n` | Index of maximum element |
+| `fold_all_gte(n, threshold)` | `n >= 0` | `result ∈ {0,1}` | All elements ≥ threshold? (runtime forall) |
+| `fold_any_gte(n, threshold)` | `n >= 0` | `result ∈ {0,1}` | Any element ≥ threshold? (runtime exists) |
+
+### Sort Algorithms (Verified)
+
+| Atom | Requires | Ensures | Description |
+|---|---|---|---|
+| `insertion_sort(n)` | `n >= 0` | `result == n` | Insertion sort with termination proof |
+| `merge_sort(n)` | `n >= 0` | `result == n` | Merge sort with inductive invariant |
+| `verified_insertion_sort(n)` | `n >= 0` | `result == n && forall(i, 0, result-1, arr[i] <= arr[i+1])` | Trusted: sorted output guarantee |
+| `verified_merge_sort(n)` | `n >= 0` | `result == n && forall(i, 0, result-1, arr[i] <= arr[i+1])` | Trusted: sorted output guarantee |
+| `binary_search(n, target)` | `n >= 0` | `result >= -1 && result < n` | Binary search with termination proof |
+| `binary_search_sorted(n, target)` | `n >= 0 && forall(...)` | `result >= -1 && result < n` | Binary search with sorted precondition |
+
+---
+
+## std/container/bounded\_array.mm
+
+```mumei
+import "std/container/bounded_array" as bounded;
+```
+
+```mumei
+struct BoundedArray { len: i64 where v >= 0, cap: i64 where v > 0 }
+```
+
+| Atom | Requires | Ensures | Description |
+|---|---|---|---|
+| `bounded_push(len, cap)` | `len >= 0 && cap > 0 && len < cap` | `result == len + 1` | Push with overflow prevention |
+| `bounded_pop(len)` | `len > 0` | `result == len - 1` | Pop with underflow prevention |
+| `bounded_is_empty(len)` | `len >= 0` | `0 or 1` | Check if empty |
+| `bounded_is_full(len, cap)` | `len >= 0 && cap > 0` | `0 or 1` | Check if full |
+| `sorted_identity(n)` | `n >= 0 && forall(sorted)` | `result == n && forall(sorted)` | Sorted invariant preservation |
+| `sorted_insert_len(n, cap)` | `n >= 0 && cap > 0 && n < cap` | `result == n + 1` | Sorted insert (length tracking) |
 
 ---
 

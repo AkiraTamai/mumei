@@ -126,6 +126,26 @@ else
     EXAMPLES_FAILED=$((EXAMPLES_FAILED + 1))
 fi
 
+# 6f. forall in ensures test
+echo -n "  test_forall_ensures.mm ... "
+if $MUMEI verify tests/test_forall_ensures.mm 2>/dev/null; then
+    echo "✅"
+    EXAMPLES_PASSED=$((EXAMPLES_PASSED + 1))
+else
+    echo "❌"
+    EXAMPLES_FAILED=$((EXAMPLES_FAILED + 1))
+fi
+
+# 6g. Negative test: forall ensures fail (should FAIL)
+echo -n "  negative/forall_ensures_fail.mm (expect fail) ... "
+if $MUMEI verify tests/negative/forall_ensures_fail.mm 2>/dev/null; then
+    echo "❌ (unexpected pass)"
+    EXAMPLES_FAILED=$((EXAMPLES_FAILED + 1))
+else
+    echo "✅ (expected fail)"
+    EXAMPLES_PASSED=$((EXAMPLES_PASSED + 1))
+fi
+
 echo ""
 echo "  Examples: $EXAMPLES_PASSED passed, $EXAMPLES_FAILED failed"
 
@@ -154,8 +174,13 @@ echo "  ✅ Struct 'Point'      : Field constraints (x >= 0.0, y >= 0.0)"
 echo "  ✅ Generic 'Pair<T,U>' : Polymorphic struct (monomorphization)"
 echo "  ✅ Generic 'Option<T>' : Polymorphic enum (monomorphization)"
 echo "  ✅ Trait 'Comparable'  : Law 'reflexive' verified by Z3"
-echo "  ✅ Std Library         : std/option, std/stack, std/result, std/list"
+echo "  ✅ Std Library         : std/option, std/stack, std/result, std/list, std/container/bounded_array"
 echo "  ✅ Built-in Traits     : Eq, Ord, Numeric for i64/u64/f64"
+echo "  ✅ forall in ensures   : Quantifier support in postconditions (Z3 ∀/∃)"
+echo "  ✅ Sort Algorithms     : insertion_sort, merge_sort, binary_search (verified)"
+echo "  ✅ Fold Operations     : fold_sum, fold_count_gte, fold_all_gte, fold_any_gte"
+echo "  ✅ Option/Result Ops   : map_apply, and_then_apply, or_else, filter, wrap_err"
+echo "  ✅ Immutable List      : list_head, list_tail, list_append, list_prepend"
 echo ""
 if [ "$EXAMPLES_FAILED" -gt 0 ]; then
     echo "⚠️  $EXAMPLES_FAILED example(s) failed. Check output above."

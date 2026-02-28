@@ -67,6 +67,8 @@ enum Command {
         /// Project directory name
         name: String,
     },
+    /// Check development environment (Z3, LLVM, std library)
+    Doctor,
 }
 
 fn main() {
@@ -85,6 +87,9 @@ fn main() {
         Some(Command::Init { name }) => {
             cmd_init(&name);
         }
+        Some(Command::Doctor) => {
+            cmd_doctor();
+        }
         None => {
             // 後方互換: `mumei input.mm -o dist/katana` → build として実行
             if let Some(ref input) = cli.input {
@@ -95,6 +100,7 @@ fn main() {
                 eprintln!("  verify  Z3 formal verification only");
                 eprintln!("  check   Parse + resolve only (fast syntax check)");
                 eprintln!("  init    Generate a new project template");
+                eprintln!("  doctor  Check development environment");
                 eprintln!("Run `mumei --help` for full usage.");
                 std::process::exit(1);
             }
@@ -353,6 +359,147 @@ body: {{
     println!("  mumei build src/main.mm -o dist/output");
     println!("  mumei verify src/main.mm");
     println!("  mumei check src/main.mm");
+}
+
+// =============================================================================
+// mumei doctor — environment check
+// =============================================================================
+
+fn cmd_doctor() {
+    use std::process::Command as Cmd;
+
+    println!("🩺 Mumei Doctor: checking development environment...");
+    println!();
+
+    let mut ok_count = 0;
+    let mut warn_count = 0;
+    let mut fail_count = 0;
+
+    // --- 1. Mumei compiler version ---
+    println!("  Mumei compiler: v{}", env!("CARGO_PKG_VERSION"));
+    ok_count += 1;
+
+    // --- 2. Z3 solver ---
+    match Cmd::new("z3").arg("--version").output() {
+        Ok(output) => {
+            let version = String::from_utf8_lossy(&output.stdout);
+            let version = version.trim();
+            if version.is_empty() {
+                println!("  ⚠️  Z3: installed but version unknown");
+                warn_count += 1;
+            } else {
+                println!("  ✅ Z3: {}", version);
+                ok_count += 1;
+            }
+        }
+        Err(_) => {
+            println!("  ❌ Z3: not found");
+            println!("     Install: brew install z3");
+            fail_count += 1;
+        }
+    }
+
+    // --- 3. LLVM ---
+    let llvm_found = ["llc-18", "llc"].iter().any(|cmd| {
+        Cmd::new(cmd).arg("--version").output().is_ok()
+    });
+    if llvm_found {
+        // Try to get version
+        let version_output = Cmd::new("llc-18").arg("--version").output()
+            .or_else(|_| Cmd::new("llc").arg("--version").output());
+        if let Ok(output) = version_output {
+            let version = String::from_utf8_lossy(&output.stdout);
+            let first_line = version.lines().next().unwrap_or("unknown");
+            println!("  ✅ LLVM: {}", first_line.trim());
+        } else {
+            println!("  ✅ LLVM: installed");
+        }
+        ok_count += 1;
+    } else {
+        println!("  ❌ LLVM: not found");
+        println!("     Install: brew install llvm@18");
+        fail_count += 1;
+    }
+
+    // --- 4. Rust toolchain ---
+    match Cmd::new("rustc").arg("--version").output() {
+        Ok(output) => {
+            let version = String::from_utf8_lossy(&output.stdout);
+            println!("  ✅ Rust: {}", version.trim());
+            ok_count += 1;
+        }
+        Err(_) => {
+            println!("  ⚠️  Rust: not found (optional, for generated .rs syntax check)");
+            warn_count += 1;
+        }
+    }
+
+    // --- 5. Go toolchain ---
+    match Cmd::new("go").arg("version").output() {
+        Ok(output) => {
+            let version = String::from_utf8_lossy(&output.stdout);
+            println!("  ✅ Go: {}", version.trim());
+            ok_count += 1;
+        }
+        Err(_) => {
+            println!("  ⚠️  Go: not found (optional, for generated .go compilation)");
+            warn_count += 1;
+        }
+    }
+
+    // --- 6. Node.js / TypeScript ---
+    match Cmd::new("node").arg("--version").output() {
+        Ok(output) => {
+            let version = String::from_utf8_lossy(&output.stdout);
+            println!("  ✅ Node.js: {}", version.trim());
+            ok_count += 1;
+        }
+        Err(_) => {
+            println!("  ⚠️  Node.js: not found (optional, for generated .ts execution)");
+            warn_count += 1;
+        }
+    }
+
+    // --- 7. std library ---
+    let std_paths = ["std/prelude.mm", "std/option.mm", "std/result.mm", "std/list.mm",
+                     "std/stack.mm", "std/alloc.mm", "std/container/bounded_array.mm"];
+    let mut std_found = 0;
+    let mut std_missing = Vec::new();
+    for path in &std_paths {
+        if Path::new(path).exists() {
+            std_found += 1;
+        } else {
+            std_missing.push(*path);
+        }
+    }
+    if std_missing.is_empty() {
+        println!("  ✅ std library: {}/{} modules found", std_found, std_paths.len());
+        ok_count += 1;
+    } else {
+        println!("  ⚠️  std library: {}/{} modules found (missing: {})",
+            std_found, std_paths.len(), std_missing.join(", "));
+        warn_count += 1;
+    }
+
+    // --- 8. mumei.toml (if in project directory) ---
+    if Path::new("mumei.toml").exists() {
+        println!("  ✅ mumei.toml: found in current directory");
+        ok_count += 1;
+    } else {
+        println!("  ℹ️  mumei.toml: not found (not in a Mumei project directory)");
+    }
+
+    // --- Summary ---
+    println!();
+    if fail_count > 0 {
+        println!("❌ Doctor: {} ok, {} warnings, {} errors", ok_count, warn_count, fail_count);
+        println!("   Fix the errors above to use Mumei.");
+        std::process::exit(1);
+    } else if warn_count > 0 {
+        println!("✅ Doctor: {} ok, {} warnings — Mumei is ready (optional tools missing)", ok_count, warn_count);
+    } else {
+        println!("✅ Doctor: {} ok — all tools available", ok_count);
+    }
 }
 
 // =============================================================================

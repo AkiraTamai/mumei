@@ -1733,6 +1733,71 @@ fn expr_to_z3<'a>(
         },
         Expr::Call(name, args) => {
             match name.as_str() {
+                // =============================================================
+                // ensures / invariant 内の forall/exists 量化子サポート
+                // =============================================================
+                // forall(var, start, end, condition) → Z3 ∀ var ∈ [start, end). condition
+                // exists(var, start, end, condition) → Z3 ∃ var ∈ [start, end). condition
+                //
+                // これにより ensures: forall(i, 0, result - 1, arr[i] <= arr[i+1])
+                // のようなソート済み不変量を事後条件として記述・検証できる。
+                "forall" | "exists" => {
+                    if args.len() != 4 {
+                        return Err(MumeiError::VerificationError(
+                            format!("{}() requires exactly 4 arguments: (var, start, end, condition)", name)
+                        ));
+                    }
+                    // 第1引数: 束縛変数名
+                    let var_name = match &args[0] {
+                        Expr::Variable(v) => v.clone(),
+                        _ => return Err(MumeiError::VerificationError(
+                            format!("{}(): first argument must be a variable name", name)
+                        )),
+                    };
+
+                    // 第2引数: 範囲の開始
+                    let start_z3 = expr_to_z3(vc, &args[1], env, None)?
+                        .as_int().ok_or(MumeiError::TypeError(
+                            format!("{}(): start must be integer", name)
+                        ))?;
+
+                    // 第3引数: 範囲の終了
+                    let end_z3 = expr_to_z3(vc, &args[2], env, None)?
+                        .as_int().ok_or(MumeiError::TypeError(
+                            format!("{}(): end must be integer", name)
+                        ))?;
+
+                    // 束縛変数を一時的に env に追加して condition を評価
+                    let bound_var = Int::new_const(ctx, var_name.as_str());
+                    let old_val = env.insert(var_name.clone(), bound_var.clone().into());
+
+                    let range_cond = Bool::and(ctx, &[
+                        &bound_var.ge(&start_z3),
+                        &bound_var.lt(&end_z3),
+                    ]);
+
+                    let condition_z3 = expr_to_z3(vc, &args[3], env, None)?
+                        .as_bool().ok_or(MumeiError::TypeError(
+                            format!("{}(): condition must be boolean", name)
+                        ))?;
+
+                    // 束縛変数を env から復元
+                    if let Some(old) = old_val {
+                        env.insert(var_name, old);
+                    } else {
+                        env.remove(&var_name);
+                    }
+
+                    let quantifier_expr = if name == "forall" {
+                        // ∀ var ∈ [start, end). condition
+                        z3::ast::forall_const(ctx, &[&bound_var], &[], &range_cond.implies(&condition_z3))
+                    } else {
+                        // ∃ var ∈ [start, end). condition
+                        z3::ast::exists_const(ctx, &[&bound_var], &[], &Bool::and(ctx, &[&range_cond, &condition_z3]))
+                    };
+
+                    Ok(quantifier_expr.into())
+                },
                 "len" => {
                     // len(arr_name) → 配列名に紐づくシンボリック長を返す
                     // len_<name> >= 0 の制約を自動付与

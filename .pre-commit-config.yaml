@@ -1,0 +1,29 @@
+repos:
+  # YAML 構文チェック（この設定ファイル自体を含む全 .yaml/.yml を検証）
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: check-yaml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+  # Rust フォーマット + Lint
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt
+        entry: cargo fmt --all --
+        language: system
+        types: [rust]
+        pass_filenames: false
+      - id: cargo-clippy
+        name: cargo clippy
+        entry: cargo clippy --all-targets -- -D warnings
+        language: system
+        types: [rust]
+        pass_filenames: false
+      - id: cargo-test
+        name: cargo test (parser)
+        entry: cargo test --lib
+        language: system
+        types: [rust]
+        pass_filenames: false

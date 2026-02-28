@@ -13,10 +13,10 @@ source.mm → parse → resolve → monomorphize → verify (Z3) → codegen (LL
 
 | File | Role |
 |---|---|
-| `src/parser.rs` | AST definitions, tokenizer, parser (struct/enum/trait/impl/atom/match/generics/ref/consume) |
+| `src/parser.rs` | AST definitions, tokenizer, parser (struct/enum/trait/impl/atom/match/generics/ref/consume/async/acquire/await/resource/trusted/unverified/invariant) |
 | `src/ast.rs` | `TypeRef`, `Monomorphizer` — generic type expansion engine |
 | `src/resolver.rs` | Import resolution, circular detection, prelude auto-load, incremental build cache |
-| `src/verification.rs` | Z3 verification, `ModuleEnv`, `LinearityCtx`, law expansion, equality propagation |
+| `src/verification.rs` | Z3 verification, `ModuleEnv`, `LinearityCtx`, law expansion, equality propagation, resource hierarchy, BMC, async recursion depth, inductive invariant, trust boundary |
 | `src/codegen.rs` | LLVM IR generation — Pattern Matrix, StructType, malloc/free, nested extract_value |
 | `src/transpiler/` | Multi-target: Rust (`&T`), Go (interface), TypeScript (`/* readonly */`) |
 | `src/main.rs` | CLI orchestrator — `build`/`verify`/`check`/`init` with incremental cache |
@@ -230,10 +230,60 @@ BMC is a **complement** to loop invariants, not a replacement:
 - BMC provides **bounded** proofs (first N iterations only)
 - If no invariant is provided, BMC acts as a safety net
 
-### Verification Steps (per atom with resources)
+### Trust Boundary (trusted / unverified)
 
+External code that hasn't been verified by Mumei can be explicitly marked:
+
+```mumei
+// FFI wrapper: contract is trusted, body is not verified
+trusted atom ffi_read(fd: i64)
+requires: fd >= 0;
+ensures: result >= 0;
+body: fd;
+
+// Legacy code: warning emitted, partial verification attempted
+unverified atom legacy_process(x: i64)
+requires: x >= 0;
+ensures: result >= 0;
+body: x + 1;
+
+// Combination: async + trusted
+async trusted atom fetch_external(url: i64)
+requires: url >= 0;
+ensures: result >= 0;
+body: url;
+```
+
+Trust levels:
+- **Verified** (default): Full Z3 verification of body, requires, ensures
+- **Trusted**: Body verification skipped; contract (requires/ensures) assumed correct
+- **Unverified**: Warning emitted; verification attempted only if contract is non-trivial
+
+### Inductive Invariant Verification
+
+For recursive async atoms, `invariant:` provides **complete** proofs (vs BMC's bounded proofs):
+
+```mumei
+async atom process(state: i64)
+invariant: state >= 0;
+requires: state >= 0;
+ensures: result >= 0;
+body: state + 1;
+```
+
+Z3 proof structure:
+1. **Induction Base**: `requires(params) → invariant(params)`
+2. **Preservation**: `invariant(params) ∧ requires(params) → invariant(body(params))`
+
+This upgrades BMC's "no bugs in first N iterations" to "no bugs in **all** iterations".
+
+### Verification Steps (per atom)
+
+0. `TrustLevel` check: skip/warn for trusted/unverified atoms
 1. `verify_resource_hierarchy()`: Z3 checks priority ordering
-1b. `verify_bmc_resource_safety()`: BMC for loop-internal acquire patterns
+1b. `verify_bmc_resource_safety()`: BMC for loop-internal acquire patterns (respects `max_unroll:`)
+1c. `verify_async_recursion_depth()`: Recursive async call depth limit
+1d. `verify_atom_invariant()`: Inductive invariant proof (base + preservation)
 2. `expr_to_z3(Acquire)`: Tracks `__resource_held_{name}` as Z3 Bool
 3. `expr_to_z3(Await)`: Resource-held-across-await + ownership consistency checks
 4. Standard `verify()` pipeline continues (requires/ensures/linearity)

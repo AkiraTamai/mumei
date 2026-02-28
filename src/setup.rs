@@ -27,6 +27,29 @@ use crate::manifest;
 // =============================================================================
 const Z3_VERSION: &str = "4.13.4";
 const LLVM_VERSION: &str = "18.1.8";
+
+// =============================================================================
+// エラー型
+// =============================================================================
+
+#[derive(Debug)]
+pub enum SetupError {
+    UnsupportedPlatform(String),
+    Io(String),
+    Command(String),
+}
+
+impl std::fmt::Display for SetupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SetupError::UnsupportedPlatform(msg) => write!(f, "{}", msg),
+            SetupError::Io(msg) => write!(f, "{}", msg),
+            SetupError::Command(msg) => write!(f, "{}", msg),
+        }
+    }
+}
+
+impl std::error::Error for SetupError {}
 // =============================================================================
 // プラットフォーム検出
 // =============================================================================
@@ -97,10 +120,12 @@ impl Platform {
 // =============================================================================
 // メイン処理
 // =============================================================================
+
 /// `mumei setup` のエントリポイント
 pub fn run(force: bool) {
     println!("🔧 Mumei Setup: configuring toolchain...");
     println!();
+
     // プラットフォーム検出
     let platform = match Platform::detect() {
         Ok(p) => {
@@ -114,18 +139,216 @@ pub fn run(force: bool) {
             std::process::exit(1);
         }
     };
+
     let mumei_home = manifest::mumei_home();
     let toolchains_dir = mumei_home.join("toolchains");
-    // ディレクトリ作成
+
     if let Err(e) = fs::create_dir_all(&toolchains_dir) {
         eprintln!("  ❌ Failed to create {}: {}", toolchains_dir.display(), e);
         std::process::exit(1);
     }
+
     // --- Z3 ---
     let z3_dir = toolchains_dir.join(format!("z3-{}", Z3_VERSION));
-    if z3_dir.exists() && !force {
-        println!("  ✅ Z3 {}: already installed (use --force to re-download)", Z3_VERSION);
+    if let Err(e) = install_z3(&platform, &toolchains_dir, &z3_dir, force) {
+        eprintln!("  ❌ Z3 install failed: {}", e);
+        eprintln!("     Fallback: install from system package manager (e.g. brew/apt) and re-run.");
+    }
+
+    // --- LLVM ---
+    let llvm_dir = toolchains_dir.join(format!("llvm-{}", LLVM_VERSION));
+    if let Err(e) = install_llvm(&platform, &toolchains_dir, &llvm_dir, force) {
+        eprintln!("  ❌ LLVM install failed: {}", e);
+        eprintln!("     Fallback: install from system package manager (e.g. brew/apt) and re-run.");
+    }
+
+    // --- env スクリプト生成 ---
+    if let Err(e) = generate_env_script(&mumei_home, &z3_dir, &llvm_dir) {
+        eprintln!("  ⚠️  Failed to generate env script: {}", e);
+    }
+
+    // --- 簡易検証 ---
+    verify_installation(&z3_dir, &llvm_dir);
+
+    println!();
+    println!("🎉 Setup complete!");
+    println!("   Run: source ~/.mumei/env");
+}
+
+fn install_z3(platform: &Platform, toolchains_dir: &Path, z3_dir: &Path, force: bool) -> Result<(), SetupError> {
+    if z3_dir.exists() {
+        if !force {
+            println!("  ✅ Z3 {}: already installed", Z3_VERSION);
+            return Ok(());
+        }
+        fs::remove_dir_all(z3_dir)
+            .map_err(|e| SetupError::Io(format!("Failed to remove {}: {}", z3_dir.display(), e)))?;
+    }
+
+    println!("  📦 Downloading Z3 {}...", Z3_VERSION);
+    println!("     URL: {}", platform.z3_download_url());
+
+    let archive_path = download_with_curl(&platform.z3_download_url(), toolchains_dir, "z3.zip")?;
+    extract_zip(&archive_path, toolchains_dir)?;
+
+    let extracted = toolchains_dir.join(platform.z3_archive_name());
+    if !extracted.exists() {
+        return Err(SetupError::Io(format!("Expected extracted directory not found: {}", extracted.display())));
+    }
+
+    fs::rename(&extracted, z3_dir)
+        .map_err(|e| SetupError::Io(format!("Failed to move {} -> {}: {}", extracted.display(), z3_dir.display(), e)))?;
+
+    let _ = fs::remove_file(&archive_path);
+    println!("  ✅ Z3 {}: installed to {}", Z3_VERSION, z3_dir.display());
+    Ok(())
+}
+
+fn install_llvm(platform: &Platform, toolchains_dir: &Path, llvm_dir: &Path, force: bool) -> Result<(), SetupError> {
+    if llvm_dir.exists() {
+        if !force {
+            println!("  ✅ LLVM {}: already installed", LLVM_VERSION);
+            return Ok(());
+        }
+        fs::remove_dir_all(llvm_dir)
+            .map_err(|e| SetupError::Io(format!("Failed to remove {}: {}", llvm_dir.display(), e)))?;
+    }
+
+    println!("  📦 Downloading LLVM {}...", LLVM_VERSION);
+    println!("     URL: {}", platform.llvm_download_url());
+    println!("     ⚠️  This is a large download (~hundreds of MB)");
+
+    let archive_path = download_with_curl(&platform.llvm_download_url(), toolchains_dir, "llvm.tar.xz")?;
+    extract_tar_xz(&archive_path, toolchains_dir)?;
+
+    let extracted = toolchains_dir.join(platform.llvm_archive_name());
+    if !extracted.exists() {
+        return Err(SetupError::Io(format!("Expected extracted directory not found: {}", extracted.display())));
+    }
+
+    fs::rename(&extracted, llvm_dir)
+        .map_err(|e| SetupError::Io(format!("Failed to move {} -> {}: {}", extracted.display(), llvm_dir.display(), e)))?;
+
+    let _ = fs::remove_file(&archive_path);
+    println!("  ✅ LLVM {}: installed to {}", LLVM_VERSION, llvm_dir.display());
+    Ok(())
+}
+
+fn generate_env_script(mumei_home: &Path, z3_dir: &Path, llvm_dir: &Path) -> Result<(), SetupError> {
+    fs::create_dir_all(mumei_home)
+        .map_err(|e| SetupError::Io(format!("Failed to create {}: {}", mumei_home.display(), e)))?;
+
+    let env_path = mumei_home.join("env");
+
+    let content = format!(
+        r#"#!/bin/sh
+# Mumei toolchain environment  generated by `mumei setup`
+# Usage: source ~/.mumei/env
+
+# Z3
+export Z3_SYS_Z3_HEADER=\"{z3}/include/z3.h\"
+export Z3_SYS_Z3_LIB_DIR=\"{z3}/lib\"
+export CPATH=\"{z3}/include:$CPATH\"
+export LIBRARY_PATH=\"{z3}/lib:$LIBRARY_PATH\"
+
+# LLVM
+export LLVM_SYS_180_PREFIX=\"{llvm}\"
+export PATH=\"{llvm}/bin:$PATH\"
+export LDFLAGS=\"-L{llvm}/lib -L{z3}/lib $LDFLAGS\"
+export CPPFLAGS=\"-I{llvm}/include -I{z3}/include $CPPFLAGS\"
+"#,
+        z3 = z3_dir.display(),
+        llvm = llvm_dir.display(),
+    );
+
+    fs::write(&env_path, content)
+        .map_err(|e| SetupError::Io(format!("Failed to write {}: {}", env_path.display(), e)))?;
+
+    println!("  ✅ Generated {}", env_path.display());
+    Ok(())
+}
+
+fn verify_installation(z3_dir: &Path, llvm_dir: &Path) {
+    println!();
+    println!("🔍 Verifying toolchain...");
+
+    let z3_bin = z3_dir.join("bin").join("z3");
+    if z3_bin.exists() {
+        let out = Cmd::new(&z3_bin).arg("--version").output();
+        match out {
+            Ok(o) => {
+                let s = String::from_utf8_lossy(&o.stdout);
+                println!("  ✅ Z3 (toolchain): {}", s.trim());
+            }
+            Err(e) => println!("  ⚠️  Z3 (toolchain) exists but failed to run: {}", e),
+        }
     } else {
-        println!("  📦 Downloading Z3 {}...", Z3_VERSION);
-        match download_and_extract_zip(&platform.z3_download_url(), &toolchains_dir, &platform.z3_archive_name(), &z3_dir) {
-            Ok(_) =>
+        println!("  ⚠️  Z3 (toolchain): not found at {}", z3_bin.display());
+    }
+
+    // llc は LLVM アーカイブに入っている想定
+    let llc_bin = llvm_dir.join("bin").join("llc");
+    if llc_bin.exists() {
+        let out = Cmd::new(&llc_bin).arg("--version").output();
+        match out {
+            Ok(o) => {
+                let s = String::from_utf8_lossy(&o.stdout);
+                let first = s.lines().next().unwrap_or("");
+                println!("  ✅ LLVM (toolchain): {}", first.trim());
+            }
+            Err(e) => println!("  ⚠️  LLVM (toolchain) exists but failed to run: {}", e),
+        }
+    } else {
+        println!("  ⚠️  LLVM (toolchain): not found at {}", llc_bin.display());
+    }
+}
+
+// =============================================================================
+// Download/extract helpers (external tools)
+// =============================================================================
+
+fn download_with_curl(url: &str, dest_dir: &Path, filename: &str) -> Result<PathBuf, SetupError> {
+    let dest = dest_dir.join(filename);
+    let status = Cmd::new("curl")
+        .args(["-fSL", "--progress-bar", "-o"])
+        .arg(&dest)
+        .arg(url)
+        .status()
+        .map_err(|e| SetupError::Command(format!("Failed to run curl: {}", e)))?;
+
+    if !status.success() {
+        return Err(SetupError::Command(format!("curl failed with exit code: {:?}", status.code())));
+    }
+
+    Ok(dest)
+}
+
+fn extract_zip(archive: &Path, dest_dir: &Path) -> Result<(), SetupError> {
+    let status = Cmd::new("unzip")
+        .args(["-q", "-o"])
+        .arg(archive)
+        .arg("-d")
+        .arg(dest_dir)
+        .status()
+        .map_err(|e| SetupError::Command(format!("Failed to run unzip: {}", e)))?;
+
+    if !status.success() {
+        return Err(SetupError::Command(format!("unzip failed with exit code: {:?}", status.code())));
+    }
+    Ok(())
+}
+
+fn extract_tar_xz(archive: &Path, dest_dir: &Path) -> Result<(), SetupError> {
+    let status = Cmd::new("tar")
+        .args(["xf"])
+        .arg(archive)
+        .arg("-C")
+        .arg(dest_dir)
+        .status()
+        .map_err(|e| SetupError::Command(format!("Failed to run tar: {}", e)))?;
+
+    if !status.success() {
+        return Err(SetupError::Command(format!("tar failed with exit code: {:?}", status.code())));
+    }
+    Ok(())
+}

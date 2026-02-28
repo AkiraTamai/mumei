@@ -1162,7 +1162,7 @@ fn verify_atom_invariant(atom: &Atom, invariant_raw: &str, module_env: &ModuleEn
             ));
         }
         solver.pop(1);
-        env = env_snapshot; // env を復元
+        let _ = env_snapshot; // env_snapshot はスコープ終了で破棄
     }
 
     Ok(())

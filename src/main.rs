@@ -4,6 +4,10 @@ mod verification;
 mod codegen;
 mod transpiler;
 mod resolver;
+#[allow(dead_code)]
+mod manifest;
+mod setup;
+mod lsp;
 
 use clap::{Parser, Subcommand};
 use std::fs;
@@ -12,7 +16,7 @@ use crate::transpiler::{TargetLanguage, transpile, transpile_enum, transpile_str
 use crate::parser::{Item, ImportDecl};
 
 // =============================================================================
-// CLI: mumei build / verify / check / init
+// CLI: mumei build / verify / check / init / setup / doctor
 // =============================================================================
 //
 // Usage:
@@ -20,6 +24,8 @@ use crate::parser::{Item, ImportDecl};
 //   mumei verify input.mm                 # Z3 verification only
 //   mumei check input.mm                  # parse + resolve + monomorphize (no Z3)
 //   mumei init my_project                 # generate project template
+//   mumei setup                           # download & configure Z3 + LLVM toolchain
+//   mumei add <dep>                       # add dependency to mumei.toml
 //   mumei input.mm -o dist/katana         # backward compat → same as build
 
 #[derive(Parser)]
@@ -69,6 +75,19 @@ enum Command {
     },
     /// Check development environment (Z3, LLVM, std library)
     Doctor,
+    /// Download and configure Z3 + LLVM toolchain into ~/.mumei/
+    Setup {
+        /// Force re-download even if already installed
+        #[arg(long)]
+        force: bool,
+    },
+    /// Add a dependency to mumei.toml
+    Add {
+        /// Dependency specifier: local path (./path/to/lib) or package name
+        dep: String,
+    },
+    /// Start Language Server Protocol server (stdio mode)
+    Lsp,
 }
 
 fn main() {
@@ -90,6 +109,15 @@ fn main() {
         Some(Command::Doctor) => {
             cmd_doctor();
         }
+        Some(Command::Setup { force }) => {
+            setup::run(force);
+        }
+        Some(Command::Add { dep }) => {
+            cmd_add(&dep);
+        }
+        Some(Command::Lsp) => {
+            lsp::run();
+        }
         None => {
             // 後方互換: `mumei input.mm -o dist/katana` → build として実行
             if let Some(ref input) = cli.input {
@@ -100,6 +128,9 @@ fn main() {
                 eprintln!("  verify  Z3 formal verification only");
                 eprintln!("  check   Parse + resolve only (fast syntax check)");
                 eprintln!("  init    Generate a new project template");
+                eprintln!("  setup   Download & configure Z3 + LLVM toolchain");
+                eprintln!("  add     Add a dependency to mumei.toml");
+                eprintln!("  lsp     Start Language Server Protocol server");
                 eprintln!("  doctor  Check development environment");
                 eprintln!("Run `mumei --help` for full usage.");
                 std::process::exit(1);
@@ -320,10 +351,22 @@ fn cmd_init(name: &str) {
     let toml_content = format!(r#"[package]
 name = "{}"
 version = "0.1.0"
+# authors = ["Your Name"]
+# description = "A formally verified Mumei project"
 
 [dependencies]
 # 依存パッケージをここに記述
-# example = {{ git = "https://github.com/user/example-mm", rev = "main" }}
+# example = {{ path = "./libs/example" }}
+# math = {{ git = "https://github.com/user/math-mm", tag = "v1.0.0" }}
+
+[build]
+targets = ["rust", "go", "typescript"]
+verify = true
+max_unroll = 3
+
+[proof]
+cache = true
+timeout_ms = 10000
 "#, name);
     fs::write(project_dir.join("mumei.toml"), toml_content).unwrap();
 
@@ -483,10 +526,51 @@ fn cmd_doctor() {
 
     // --- 8. mumei.toml (if in project directory) ---
     if Path::new("mumei.toml").exists() {
-        println!("  ✅ mumei.toml: found in current directory");
-        ok_count += 1;
+        // mumei.toml が見つかったらパースして内容を表示
+        match manifest::load(Path::new("mumei.toml")) {
+            Ok(m) => {
+                println!("  ✅ mumei.toml: {} v{}", m.package.name, m.package.version);
+                if !m.dependencies.is_empty() {
+                    println!("     dependencies: {}", m.dependencies.keys()
+                        .map(|k| k.as_str()).collect::<Vec<_>>().join(", "));
+                }
+                if !m.build.targets.is_empty() {
+                    println!("     targets: {}", m.build.targets.join(", "));
+                }
+                ok_count += 1;
+            }
+            Err(e) => {
+                println!("  ⚠️  mumei.toml: found but parse error: {}", e);
+                warn_count += 1;
+            }
+        }
     } else {
         println!("  ℹ️  mumei.toml: not found (not in a Mumei project directory)");
+    }
+
+    // --- 9. ~/.mumei/ toolchain ---
+    let mumei_home = manifest::mumei_home();
+    let toolchains_dir = mumei_home.join("toolchains");
+    if toolchains_dir.exists() {
+        let mut tc_list = Vec::new();
+        if let Ok(entries) = fs::read_dir(&toolchains_dir) {
+            for entry in entries.flatten() {
+                if entry.path().is_dir() {
+                    if let Some(name) = entry.file_name().to_str() {
+                        tc_list.push(name.to_string());
+                    }
+                }
+            }
+        }
+        if tc_list.is_empty() {
+            println!("  ℹ️  ~/.mumei/toolchains: empty (run `mumei setup`)");
+        } else {
+            tc_list.sort();
+            println!("  ✅ ~/.mumei/toolchains: {}", tc_list.join(", "));
+            ok_count += 1;
+        }
+    } else {
+        println!("  ℹ️  ~/.mumei/toolchains: not found (run `mumei setup`)");
     }
 
     // --- Summary ---
@@ -702,6 +786,84 @@ fn cmd_build(input: &str, output: &str) {
 
     // Incremental Build: ビルドキャッシュを保存
     resolver::save_build_cache(build_base_dir, &build_cache_new);
+}
+
+// =============================================================================
+// mumei add — add dependency to mumei.toml
+// =============================================================================
+
+fn cmd_add(dep: &str) {
+    // mumei.toml を探す
+    let manifest_path = Path::new("mumei.toml");
+    if !manifest_path.exists() {
+        eprintln!("❌ Error: mumei.toml not found in current directory.");
+        eprintln!("   Run `mumei init <project>` first, or cd into a Mumei project.");
+        std::process::exit(1);
+    }
+
+    // 現在の mumei.toml を読み込み
+    let content = fs::read_to_string(manifest_path).unwrap_or_else(|e| {
+        eprintln!("❌ Error: Cannot read mumei.toml: {}", e);
+        std::process::exit(1);
+    });
+
+    // パース確認
+    if let Err(e) = manifest::load(manifest_path) {
+        eprintln!("❌ Error: mumei.toml parse error: {}", e);
+        std::process::exit(1);
+    }
+
+    // 依存の種類を判定
+    let dep_entry = if dep.starts_with("./") || dep.starts_with("../") || dep.starts_with('/') {
+        // ローカルパス依存
+        let dep_path = Path::new(dep);
+        if !dep_path.exists() {
+            eprintln!("❌ Error: Path '{}' does not exist.", dep);
+            std::process::exit(1);
+        }
+        // パッケージ名はディレクトリ名から推定
+        let pkg_name = dep_path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown")
+            .replace('-', "_");
+        let toml_line = format!("{} = {{ path = \"{}\" }}", pkg_name, dep);
+        println!("📦 Adding local dependency: {} → {}", pkg_name, dep);
+        (pkg_name, toml_line)
+    } else if dep.contains("github.com") || dep.contains("gitlab.com") {
+        // Git URL 依存
+        let pkg_name = dep.split('/')
+            .last()
+            .unwrap_or("unknown")
+            .trim_end_matches(".git")
+            .replace('-', "_");
+        let toml_line = format!("{} = {{ git = \"{}\" }}", pkg_name, dep);
+        println!("📦 Adding git dependency: {} → {}", pkg_name, dep);
+        (pkg_name, toml_line)
+    } else {
+        // パッケージ名のみ（レジストリ依存 — 将来対応）
+        let toml_line = format!("{} = \"*\"", dep);
+        println!("📦 Adding dependency: {} (registry lookup not yet implemented)", dep);
+        (dep.to_string(), toml_line)
+    };
+
+    // mumei.toml に追記
+    let new_content = if content.contains("[dependencies]") {
+        // [dependencies] セクションが既にある場合、その直後に追記
+        content.replace(
+            "[dependencies]",
+            &format!("[dependencies]\n{}", dep_entry.1),
+        )
+    } else {
+        // [dependencies] セクションがない場合、末尾に追加
+        format!("{}\n[dependencies]\n{}\n", content.trim_end(), dep_entry.1)
+    };
+
+    fs::write(manifest_path, new_content).unwrap_or_else(|e| {
+        eprintln!("❌ Error: Cannot write mumei.toml: {}", e);
+        std::process::exit(1);
+    });
+
+    println!("✅ Added '{}' to mumei.toml", dep_entry.0);
 }
 
 // end of src/main.rs

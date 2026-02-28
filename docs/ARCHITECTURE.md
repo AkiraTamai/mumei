@@ -375,4 +375,3 @@ exclusion — not deadlock prevention.
 | `async atom f(x: T)` | `pub async fn f(x: T)` | `func f(x T) // goroutine` | `async function f(x: number)` |
 | `await expr` | `expr.await` | `<-ch` | `await expr` |
 | `acquire r { body }` | `let _g = r.lock(); { body }` | `r.Lock(); { body }; r.Unlock()` | `await r.acquire(); { body }; r.release()` |
-

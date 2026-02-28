@@ -380,7 +380,7 @@ body: {
 // Phase 4: forall in requires で配列がソート済みであることを前提とする。
 // verified_insertion_sort の ensures と組み合わせて使用する。
 atom binary_search_sorted(n: i64, target: i64)
-requires: n >= 0 && forall(i, 0, n, arr[i] <= arr[i + 1]);
+requires: n >= 0 && forall(i, 0, n - 1, arr[i] <= arr[i + 1]);
 ensures: result >= 0 - 1 && result < n;
 body: {
     let low = 0;

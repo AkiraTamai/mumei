@@ -14,7 +14,7 @@
 //! - `textDocument/publishDiagnostics` — Z3 検証エラーのリアルタイム表示
 //! - `textDocument/definition` — 定義ジャンプ
 use std::collections::HashMap;
-use std::io::{self, BufRead, Read, Write};
+use std::io::{self, BufRead, Write};
 use crate::parser;
 // =============================================================================
 // メイン処理

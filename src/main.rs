@@ -4,6 +4,7 @@ mod verification;
 mod codegen;
 mod transpiler;
 mod resolver;
+#[allow(dead_code)]
 mod manifest;
 mod setup;
 mod lsp;
@@ -350,10 +351,22 @@ fn cmd_init(name: &str) {
     let toml_content = format!(r#"[package]
 name = "{}"
 version = "0.1.0"
+# authors = ["Your Name"]
+# description = "A formally verified Mumei project"
 
 [dependencies]
 # 依存パッケージをここに記述
-# example = {{ git = "https://github.com/user/example-mm", rev = "main" }}
+# example = {{ path = "./libs/example" }}
+# math = {{ git = "https://github.com/user/math-mm", tag = "v1.0.0" }}
+
+[build]
+targets = ["rust", "go", "typescript"]
+verify = true
+max_unroll = 3
+
+[proof]
+cache = true
+timeout_ms = 10000
 "#, name);
     fs::write(project_dir.join("mumei.toml"), toml_content).unwrap();
 

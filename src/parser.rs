@@ -186,6 +186,13 @@ pub struct Param {
     /// ref パラメータは読み取り専用で貸し出され、所有権は移動しない。
     /// 借用中は所有者が free/consume できないことを Z3 で保証する。
     pub is_ref: bool,
+    /// 排他的可変参照修飾子: `ref mut v: Vector<T>` の場合 true。
+    /// ref mut パラメータは書き込み可能な排他的参照。
+    /// Z3 で以下の排他性制約を検証する:
+    /// - ref mut が存在する場合、同じ変数への他の ref/ref mut は存在できない
+    /// - ref mut パラメータへの書き込みは所有者に反映される
+    /// - ref mut は同時に1つのみ存在可能（エイリアシング防止）
+    pub is_ref_mut: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -798,11 +805,15 @@ pub fn parse_atom(source: &str) -> Atom {
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .map(|s| {
-            // ref 修飾子の検出: "ref v: Vector<T>" → is_ref=true, name="v"
-            let (is_ref, s_stripped) = if s.starts_with("ref ") {
-                (true, s[4..].trim())
+            // ref mut / ref 修飾子の検出:
+            // "ref mut v: Vector<T>" → is_ref=false, is_ref_mut=true
+            // "ref v: Vector<T>" → is_ref=true, is_ref_mut=false
+            let (is_ref, is_ref_mut, s_stripped) = if s.starts_with("ref mut ") {
+                (false, true, s[8..].trim())
+            } else if s.starts_with("ref ") {
+                (true, false, s[4..].trim())
             } else {
-                (false, s)
+                (false, false, s)
             };
             if let Some((param_name, type_name)) = s_stripped.split_once(':') {
                 let type_name_str = type_name.trim().to_string();
@@ -812,9 +823,10 @@ pub fn parse_atom(source: &str) -> Atom {
                     type_name: Some(type_name_str),
                     type_ref: Some(type_ref),
                     is_ref,
+                    is_ref_mut,
                 }
             } else {
-                Param { name: s_stripped.to_string(), type_name: None, type_ref: None, is_ref }
+                Param { name: s_stripped.to_string(), type_name: None, type_ref: None, is_ref, is_ref_mut }
             }
         })
         .collect();
@@ -1694,6 +1706,32 @@ body: state + 1;
         assert_eq!(a.name, "process");
         assert!(a.is_async);
         assert_eq!(a.invariant, Some("state >= 0".to_string()));
+    }
+
+    #[test]
+    fn test_parse_ref_mut_param() {
+        let source = r#"
+atom modify(ref mut v: i64, ref r: i64)
+requires: v >= 0;
+ensures: result >= 0;
+body: v + r;
+"#;
+        let items = parse_module(source);
+        let atoms: Vec<_> = items.iter().filter_map(|i| {
+            if let Item::Atom(a) = i { Some(a) } else { None }
+        }).collect();
+
+        assert_eq!(atoms.len(), 1);
+        let a = &atoms[0];
+        assert_eq!(a.params.len(), 2);
+        // ref mut v
+        assert_eq!(a.params[0].name, "v");
+        assert!(!a.params[0].is_ref);
+        assert!(a.params[0].is_ref_mut);
+        // ref r
+        assert_eq!(a.params[1].name, "r");
+        assert!(a.params[1].is_ref);
+        assert!(!a.params[1].is_ref_mut);
     }
 
     #[test]

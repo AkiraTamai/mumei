@@ -134,10 +134,13 @@ pub fn transpile_to_ts(atom: &Atom) -> String {
     // TSでは number (f64/i64) または bigint (u64的な扱い) ですが、
     // 汎用性を考慮しすべて number として出力します。
     // ref パラメータは Readonly<T> コメントで論理的な読み取り専用を示す。
+    // ref mut パラメータは @mutable JSDoc で可変参照を示す。
     // consume パラメータは @consume JSDoc で使用禁止を示す。
     let params: String = atom.params.iter()
         .map(|p| {
-            if p.is_ref {
+            if p.is_ref_mut {
+                format!("/* &mut */ {}: number", p.name)
+            } else if p.is_ref {
                 format!("/* readonly */ {}: number", p.name)
             } else {
                 format!("{}: number", p.name)

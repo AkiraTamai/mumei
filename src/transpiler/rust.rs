@@ -115,11 +115,13 @@ pub fn transpile_impl_rust(impl_def: &ImplDef) -> String {
 
 pub fn transpile_to_rust(atom: &Atom) -> String {
     // 引数の型を精緻型のベース型からマッピング (Type System 2.0)
-    // ref パラメータは &T に、consume パラメータはそのまま T（所有権移動）に変換
+    // ref パラメータは &T に、ref mut は &mut T に、consume はそのまま T（所有権移動）に変換
     let params: Vec<String> = atom.params.iter()
         .map(|p| {
             let rust_type = map_type_rust(p.type_name.as_deref());
-            if p.is_ref {
+            if p.is_ref_mut {
+                format!("{}: &mut {}", p.name, rust_type)
+            } else if p.is_ref {
                 format!("{}: &{}", p.name, rust_type)
             } else {
                 format!("{}: {}", p.name, rust_type)

@@ -121,8 +121,16 @@ pub fn transpile_impl_go(impl_def: &ImplDef) -> String {
 
 pub fn transpile_to_go(atom: &Atom) -> String {
     // パラメータの型を精緻型名からマッピング
+    // ref mut はポインタ型 *T、ref は値渡し（Go は暗黙的に参照渡し）
     let params: Vec<String> = atom.params.iter()
-        .map(|p| format!("{} {}", p.name, map_type_go(p.type_name.as_deref())))
+        .map(|p| {
+            let go_type = map_type_go(p.type_name.as_deref());
+            if p.is_ref_mut {
+                format!("{} *{}", p.name, go_type)
+            } else {
+                format!("{} {}", p.name, go_type)
+            }
+        })
         .collect();
     let params_str = params.join(", ");
 

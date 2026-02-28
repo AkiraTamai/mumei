@@ -1500,10 +1500,11 @@ pub fn verify(atom: &Atom, output_dir: &Path, module_env: &ModuleEnv) -> MumeiRe
                     format!("consume target '{}' is not a parameter of atom '{}'", param_name, atom.name)
                 ));
             }
-            // ref パラメータは consume できない
-            if atom.params.iter().any(|p| p.name == *param_name && p.is_ref) {
+            // ref / ref mut パラメータは consume できない
+            if atom.params.iter().any(|p| p.name == *param_name && (p.is_ref || p.is_ref_mut)) {
+                let kind = if atom.params.iter().any(|p| p.name == *param_name && p.is_ref_mut) { "ref mut" } else { "ref" };
                 return Err(MumeiError::TypeError(
-                    format!("Cannot consume ref parameter '{}' in atom '{}': ref parameters are borrowed, not owned", param_name, atom.name)
+                    format!("Cannot consume {} parameter '{}' in atom '{}': {} parameters are borrowed, not owned", kind, param_name, atom.name, kind)
                 ));
             }
             // LinearityCtx に登録
@@ -1517,13 +1518,14 @@ pub fn verify(atom: &Atom, output_dir: &Path, module_env: &ModuleEnv) -> MumeiRe
         }
     }
 
-    // ref パラメータの借用登録
+    // ref / ref mut パラメータの借用登録
     // ref パラメータは読み取り専用で貸し出される。
+    // ref mut パラメータは排他的な書き込み参照として貸し出される。
     // 借用中は元の所有者（呼び出し元）が consume/free できない。
     // この制約は呼び出し元の verify() で検証される（Compositional Verification）。
     for param in &atom.params {
-        if param.is_ref {
-            // ref パラメータを LinearityCtx に登録（借用として）
+        if param.is_ref || param.is_ref_mut {
+            // ref/ref mut パラメータを LinearityCtx に登録（借用として）
             linearity_ctx.register(&param.name);
 
             // Z3 上で borrowed フラグを作成
@@ -1532,12 +1534,80 @@ pub fn verify(atom: &Atom, output_dir: &Path, module_env: &ModuleEnv) -> MumeiRe
             solver.assert(&borrowed_bool); // 借用中: true
             env.insert(borrowed_name, borrowed_bool.into());
 
-            // ref パラメータは consume 不可であることを Z3 で表現
+            // ref/ref mut パラメータは consume 不可であることを Z3 で表現
             // __alive_{name} は常に true（借用中は解放不可）
             let alive_name = format!("__alive_{}", param.name);
             let alive_bool = Bool::new_const(&ctx, alive_name.as_str());
             solver.assert(&alive_bool); // ref は常に alive
             env.insert(alive_name, alive_bool.into());
+
+            // ref mut の場合: 排他的アクセス（exclusive）を Z3 で表現
+            if param.is_ref_mut {
+                let exclusive_name = format!("__exclusive_{}", param.name);
+                let exclusive_bool = Bool::new_const(&ctx, exclusive_name.as_str());
+                solver.assert(&exclusive_bool); // exclusive = true
+                env.insert(exclusive_name, exclusive_bool.into());
+            }
+        }
+    }
+
+    // =================================================================
+    // エイリアシング検証 (Aliasing Prevention)
+    // =================================================================
+    // ref mut パラメータが存在する場合、同じ型の他の ref/ref mut パラメータ
+    // とのエイリアシング（同一データへの複数参照）を禁止する。
+    //
+    // Rust の借用規則と同等:
+    // - &mut T が存在する場合、同じデータへの &T も &mut T も存在できない
+    // - &T は複数同時に存在可能
+    //
+    // Z3 制約:
+    // ∀ p1, p2 ∈ params:
+    //   p1.is_ref_mut ∧ p1.type == p2.type ∧ p1 ≠ p2
+    //   → ¬(p2.is_ref ∨ p2.is_ref_mut)  // エイリアシング禁止
+    {
+        let ref_mut_params: Vec<&crate::parser::Param> = atom.params.iter()
+            .filter(|p| p.is_ref_mut)
+            .collect();
+
+        for ref_mut_p in &ref_mut_params {
+            for other_p in &atom.params {
+                if other_p.name == ref_mut_p.name {
+                    continue; // 自分自身はスキップ
+                }
+                // 同じ型の ref または ref mut パラメータがある場合、エイリアシングの可能性
+                if (other_p.is_ref || other_p.is_ref_mut)
+                    && other_p.type_name == ref_mut_p.type_name
+                {
+                    // Z3 で同一データへの参照でないことを検証
+                    // パラメータが異なる値を持つことを確認
+                    // （同じ値を持つ場合、エイリアシングが発生）
+                    if let (Some(ref_mut_val), Some(other_val)) = (env.get(&ref_mut_p.name), env.get(&other_p.name)) {
+                        if let (Some(rm_int), Some(ot_int)) = (ref_mut_val.as_int(), other_val.as_int()) {
+                            // ref_mut_val == other_val が SAT ならエイリアシングの可能性あり
+                            solver.push();
+                            solver.assert(&rm_int._eq(&ot_int));
+                            if solver.check() == SatResult::Sat {
+                                solver.pop(1);
+                                let other_kind = if other_p.is_ref_mut { "ref mut" } else { "ref" };
+                                return Err(MumeiError::VerificationError(
+                                    format!(
+                                        "Aliasing violation in atom '{}': \
+                                         'ref mut {}' and '{} {}' may reference the same data (type: {}). \
+                                         A mutable reference requires exclusive access — \
+                                         no other references to the same data are allowed.\n  \
+                                         Hint: Use different types, or ensure the values are provably distinct \
+                                         via requires.",
+                                        atom.name, ref_mut_p.name, other_kind, other_p.name,
+                                        ref_mut_p.type_name.as_deref().unwrap_or("unknown")
+                                    )
+                                ));
+                            }
+                            solver.pop(1);
+                        }
+                    }
+                }
+            }
         }
     }
 

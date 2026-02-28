@@ -154,9 +154,10 @@ atom list_reverse(list: i64)
 // --- FoldSum: リスト（配列）の全要素の合計 ---
 // 配列の要素を左から右に加算する。
 // n: 配列の長さ
+// requires: 全要素が非負（acc >= 0 の不変量維持に必要）
 // ensures: 停止性 + 不変量の帰納的証明
 atom fold_sum(n: i64)
-requires: n >= 0;
+requires: n >= 0 && forall(i, 0, n, arr[i] >= 0);
 ensures: result >= 0;
 max_unroll: 5;
 body: {

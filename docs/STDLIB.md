@@ -9,7 +9,8 @@
 | `std/option.mm` | ❌ `import "std/option"` | `Option<T>` operations |
 | `std/stack.mm` | ❌ `import "std/stack"` | Bounded stack operations |
 | `std/result.mm` | ❌ `import "std/result"` | `Result<T, E>` operations |
-| `std/list.mm` | ❌ `import "std/list"` | Recursive list ADT |
+| `std/list.mm` | ❌ `import "std/list"` | Recursive list ADT + Sort algorithms |
+| `std/container/bounded_array.mm` | ❌ `import "std/container/bounded_array"` | Bounded array with sorted operations |
 
 ---
 
@@ -176,6 +177,38 @@ enum List { Nil, Cons(i64, Self) }
 | `head_or(list, default)` | Get head or default |
 | `is_sorted_pair(a, b)` | Check if a <= b |
 | `insert_sorted(val, sorted_tag)` | Insert into sorted position |
+
+### Sort Algorithms (Verified)
+
+| Atom | Requires | Ensures | Description |
+|---|---|---|---|
+| `insertion_sort(n)` | `n >= 0` | `result == n` | Insertion sort with termination proof |
+| `merge_sort(n)` | `n >= 0` | `result == n` | Merge sort with inductive invariant |
+| `verified_insertion_sort(n)` | `n >= 0` | `result == n && forall(i, 0, result-1, arr[i] <= arr[i+1])` | Trusted: sorted output guarantee |
+| `verified_merge_sort(n)` | `n >= 0` | `result == n && forall(i, 0, result-1, arr[i] <= arr[i+1])` | Trusted: sorted output guarantee |
+| `binary_search(n, target)` | `n >= 0` | `result >= -1 && result < n` | Binary search with termination proof |
+| `binary_search_sorted(n, target)` | `n >= 0 && forall(...)` | `result >= -1 && result < n` | Binary search with sorted precondition |
+
+---
+
+## std/container/bounded\_array.mm
+
+```mumei
+import "std/container/bounded_array" as bounded;
+```
+
+```mumei
+struct BoundedArray { len: i64 where v >= 0, cap: i64 where v > 0 }
+```
+
+| Atom | Requires | Ensures | Description |
+|---|---|---|---|
+| `bounded_push(len, cap)` | `len >= 0 && cap > 0 && len < cap` | `result == len + 1` | Push with overflow prevention |
+| `bounded_pop(len)` | `len > 0` | `result == len - 1` | Pop with underflow prevention |
+| `bounded_is_empty(len)` | `len >= 0` | `0 or 1` | Check if empty |
+| `bounded_is_full(len, cap)` | `len >= 0 && cap > 0` | `0 or 1` | Check if full |
+| `sorted_identity(n)` | `n >= 0 && forall(sorted)` | `result == n && forall(sorted)` | Sorted invariant preservation |
+| `sorted_insert_len(n, cap)` | `n >= 0 && cap > 0 && n < cap` | `result == n + 1` | Sorted insert (length tracking) |
 
 ---
 

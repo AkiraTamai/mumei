@@ -160,6 +160,8 @@ fn body_contains_float(expr: &Expr) -> bool {
         Expr::While { cond, body, .. } => body_contains_float(cond) || body_contains_float(body),
         Expr::Call(_, args) => args.iter().any(body_contains_float),
         Expr::Match { target, arms } => body_contains_float(target) || arms.iter().any(|a| body_contains_float(&a.body)),
+        Expr::Acquire { body, .. } | Expr::Async { body } => body_contains_float(body),
+        Expr::Await { expr } => body_contains_float(expr),
         _ => false,
     }
 }

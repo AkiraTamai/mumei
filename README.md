@@ -317,9 +317,14 @@ my_app/
 - [x] **Call Graph Cycle Detection**: DFS-based indirect recursion detection (A→B→A) with `invariant`/`max_unroll` guidance
 - [x] **Taint Analysis**: `unverified` function return values marked `__tainted_`, warning on use in safety proofs
 - [x] **Pre-commit hooks**: `check-yaml` + `cargo fmt` + `cargo clippy` + `cargo test` via `.pre-commit-config.yaml`
-- [ ] Struct method parsing: `impl Stack { atom push(...) }` → parse and register as `Stack::push` in ModuleEnv (data structure `method_names` ready)
-- [ ] Trait method constraint enforcement: inject `param_constraints` (e.g., `where v != 0`) into Z3 during `verify_impl` and inter-atom call verification
-- [ ] Automatic borrow tracking in inter-atom calls: `ref` args → `LinearityCtx.borrow()` at call site, `release_borrow()` after call returns
-- [ ] Use-after-consume detection in expressions: `LinearityCtx.check_alive()` on every variable access in `expr_to_z3`
+- [x] **Verified standard library (enhanced)**: Option/Result map/andThen/filter, List immutable ops + fold, sort algorithms, BoundedArray
+- [x] **`forall`/`exists` in ensures**: Quantifiers in postconditions via `expr_to_z3` Call handler
+- [x] **`mumei doctor`**: Environment check command (Z3, LLVM, Rust, Go, Node.js, std library)
+- [ ] Higher-order functions: `atom_ref` → `call_with_contract` → lambda (Phase A/B/C)
+- [ ] `mumei.toml` parsing: Read `[package]`, `[build]`, `[dependencies]` sections
+- [ ] Toolchain bundler (`mmx setup`): Auto-install Z3/LLVM
+- [ ] Package registry: `mmx publish` / `mmx add` with proof caching
 - [ ] Editor integration (LSP / VS Code Extension)
+
+> 📖 **Toolchain roadmap**: [`docs/TOOLCHAIN.md`](docs/TOOLCHAIN.md)
 

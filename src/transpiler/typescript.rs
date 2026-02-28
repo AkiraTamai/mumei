@@ -148,9 +148,11 @@ pub fn transpile_to_ts(atom: &Atom) -> String {
 
     let body = format_expr_ts(&parse_expression(&atom.body_expr));
 
+    let async_keyword = if atom.is_async { "async " } else { "" };
+    let return_type = if atom.is_async { "Promise<number>" } else { "number" };
     format!(
-        "/**\n * Verified Atom: {}\n * Requires: {}\n * Ensures: {}\n */\nfunction {}({}): number {{\n    {}\n}}",
-        atom.name, atom.requires, atom.ensures, atom.name, params, body
+        "/**\n * Verified Atom: {}\n * Requires: {}\n * Ensures: {}\n */\n{}function {}({}): {} {{\n    {}\n}}",
+        atom.name, atom.requires, atom.ensures, async_keyword, atom.name, params, return_type, body
     )
 }
 
@@ -260,6 +262,19 @@ fn format_expr_ts(expr: &Expr) -> String {
                 }
             }
             format!("(() => {{ switch ({}) {{ {} }} }})()", target_str, cases.join(" "))
+        },
+
+        Expr::Acquire { resource, body } => {
+            let body_str = format_expr_ts(body);
+            format!("await {r}.acquire();\n    try {{\n        {body}\n    }} finally {{\n        {r}.release();\n    }}", r = resource, body = body_str)
+        },
+        Expr::Async { body } => {
+            let body_str = format_expr_ts(body);
+            format!("(async () => {{ {} }})()", body_str)
+        },
+        Expr::Await { expr } => {
+            let expr_str = format_expr_ts(expr);
+            format!("await {}", expr_str)
         },
     }
 }

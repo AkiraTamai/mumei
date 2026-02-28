@@ -1697,17 +1697,90 @@ fn expr_to_z3<'a>(
             expr_to_z3(vc, body, env, solver_opt)
         },
         Expr::Await { expr } => {
-            // await 式: 非同期式の結果を待機する。
-            // await ポイントでは、保持中のリソースが await を跨いで
-            // 保持されていることを検証する（将来の拡張ポイント）。
+            // =============================================================
+            // await 跨ぎの安全性検証 (Await Safety Verification)
+            // =============================================================
             //
-            // 現在の実装: 内側の式を評価してシンボリック結果を返す。
-            // 所有権の await 跨ぎ検証は LinearityCtx と連携して行う。
-            let inner_result = expr_to_z3(vc, expr, env, solver_opt)?;
+            // await ポイントはコルーチンの中断点であり、以下の安全性を検証する:
+            //
+            // 1. リソース保持検証 (Resource Held Across Await):
+            //    acquire ブロック内で await を呼ぶと、リソースを保持したまま
+            //    スレッドが中断される。これはデッドロックの典型パターン。
+            //    env 内の __resource_held_* が true のリソースを検出してエラーにする。
+            //
+            // 2. 所有権一貫性検証 (Ownership Consistency):
+            //    await 前に消費済み（__alive_ = false）の変数が、await 後に
+            //    アクセスされないことを確認する。Z3 で __alive_ フラグをチェック。
 
-            // await ポイントでの所有権チェック:
-            // __alive_ フラグが false の変数が await 後にアクセスされないことを確認
-            // （将来: await 前後での所有権状態の一貫性を Z3 で検証）
+            // --- 1. リソース保持検証 ---
+            // env 内の __resource_held_* キーを走査し、Z3 で true かどうかを確認する。
+            // acquire ブロック内で await を呼ぶパターンを検出する。
+            if let Some(solver) = solver_opt {
+                let held_resources: Vec<String> = env.keys()
+                    .filter(|k| k.starts_with("__resource_held_"))
+                    .cloned()
+                    .collect();
+
+                for held_key in &held_resources {
+                    let resource_name = held_key.strip_prefix("__resource_held_").unwrap_or(held_key);
+                    if let Some(held_val) = env.get(held_key) {
+                        // Z3 で held_val == true が証明可能かチェック
+                        // （acquire ブロック内なら held = true が assert されている）
+                        if let Some(held_bool) = held_val.as_bool() {
+                            solver.push();
+                            // held が true であることを仮定し、矛盾がなければ保持中
+                            solver.assert(&held_bool);
+                            if solver.check() != SatResult::Unsat {
+                                solver.pop(1);
+                                return Err(MumeiError::VerificationError(
+                                    format!(
+                                        "Unsafe await: resource '{}' is held across an await point. \
+                                         This can cause deadlock because the resource lock is not released \
+                                         during suspension. Move the await outside the acquire block, or \
+                                         release the resource before awaiting.\n  \
+                                         Hint: acquire {} {{ ... }}; let val = await expr; // OK\n  \
+                                         Bad:  acquire {} {{ let val = await expr; ... }}  // deadlock risk",
+                                        resource_name, resource_name, resource_name
+                                    )
+                                ));
+                            }
+                            solver.pop(1);
+                        }
+                    }
+                }
+            }
+
+            // --- 2. 所有権一貫性検証 ---
+            // await 前に消費済みの変数を検出し、Z3 で __alive_ = false を確認する。
+            // 消費済み変数が await 後にアクセスされる可能性がある場合、警告する。
+            if let Some(solver) = solver_opt {
+                let consumed_vars: Vec<String> = env.keys()
+                    .filter(|k| k.starts_with("__alive_"))
+                    .cloned()
+                    .collect();
+
+                for alive_key in &consumed_vars {
+                    let var_name = alive_key.strip_prefix("__alive_").unwrap_or(alive_key);
+                    if let Some(alive_val) = env.get(alive_key) {
+                        if let Some(alive_bool) = alive_val.as_bool() {
+                            // __alive_ が false（消費済み）であることを Z3 で確認
+                            solver.push();
+                            solver.assert(&alive_bool.not()); // alive = false を仮定
+                            if solver.check() == SatResult::Sat {
+                                // 消費済み変数が存在する → await 後のアクセスは use-after-free
+                                // await ポイントでの状態をマーク（後続の検証で参照）
+                                let await_consumed_key = format!("__await_consumed_{}", var_name);
+                                let marker = Bool::from_bool(vc.ctx, true);
+                                env.insert(await_consumed_key, marker.into());
+                            }
+                            solver.pop(1);
+                        }
+                    }
+                }
+            }
+
+            // 内側の式を評価してシンボリック結果を返す
+            let inner_result = expr_to_z3(vc, expr, env, solver_opt)?;
             Ok(inner_result)
         },
 

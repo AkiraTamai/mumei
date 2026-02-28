@@ -132,9 +132,10 @@ pub fn transpile_to_go(atom: &Atom) -> String {
     // mathパッケージが必要な関数(sqrt等)があるか簡易チェック（実用上はASTを走査すべきですが、ここでは含めます）
     let imports = if atom.body_expr.contains("sqrt") { "import \"math\"\n\n" } else { "" };
 
+    let async_comment = if atom.is_async { "// NOTE: This function is async (use goroutine for concurrent execution)\n" } else { "" };
     format!(
-        "{}// {} is a verified Atom.\n// Requires: {}\n// Ensures: {}\nfunc {}({}) int64 {{\n    {}\n}}",
-        imports, atom.name, atom.requires, atom.ensures, atom.name, params_str, body
+        "{}{}// {} is a verified Atom.\n// Requires: {}\n// Ensures: {}\nfunc {}({}) int64 {{\n    {}\n}}",
+        imports, async_comment, atom.name, atom.requires, atom.ensures, atom.name, params_str, body
     )
 }
 
@@ -257,6 +258,22 @@ fn format_expr_go(expr: &Expr) -> String {
                 }
             }
             format!("switch {} {{\n    {}\n    }}", target_str, cases.join("\n    "))
+        },
+
+        Expr::Acquire { resource, body } => {
+            // Go: sync.Mutex の Lock/Unlock パターン
+            let body_str = format_expr_go(body);
+            format!("{r}.Lock()\n    defer {r}.Unlock()\n    {body}", r = resource, body = body_str)
+        },
+        Expr::Async { body } => {
+            // Go: goroutine + channel パターン
+            let body_str = format_expr_go(body);
+            format!("func() int64 {{\n        ch := make(chan int64, 1)\n        go func() {{ ch <- func() int64 {{ {} }}() }}()\n        return <-ch\n    }}()", body_str)
+        },
+        Expr::Await { expr } => {
+            // Go: channel receive（goroutine の結果を待機）
+            let expr_str = format_expr_go(expr);
+            format!("<-{}", expr_str)
         },
     }
 }

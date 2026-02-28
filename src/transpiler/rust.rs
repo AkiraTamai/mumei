@@ -139,9 +139,10 @@ pub fn transpile_to_rust(atom: &Atom) -> String {
     });
     let return_type = if has_float_param || body_contains_float(&body_ast) { "f64" } else { "i64" };
 
+    let async_keyword = if atom.is_async { "async " } else { "" };
     format!(
-        "/// Verified Atom: {}\n/// Requires: {}\n/// Ensures: {}\npub fn {}({}) -> {} {{\n    {}\n}}",
-        atom.name, atom.requires, atom.ensures, atom.name, params_str, return_type, body
+        "/// Verified Atom: {}\n/// Requires: {}\n/// Ensures: {}\npub {}fn {}({}) -> {} {{\n    {}\n}}",
+        atom.name, atom.requires, atom.ensures, async_keyword, atom.name, params_str, return_type, body
     )
 }
 
@@ -288,6 +289,20 @@ fn format_expr_rust(expr: &Expr) -> String {
                 format!("{}{} => {}", pat, guard, body)
             }).collect();
             format!("match {} {{ {} }}", target_str, arms_str.join(", "))
+        },
+
+        Expr::Acquire { resource, body } => {
+            // Rust: スコープガードパターン（MutexGuard の RAII）
+            let body_str = format_expr_rust(body);
+            format!("{{\n        let _guard_{r} = {r}.lock().unwrap();\n        {body}\n    }}", r = resource, body = body_str)
+        },
+        Expr::Async { body } => {
+            let body_str = format_expr_rust(body);
+            format!("async {{ {} }}", body_str)
+        },
+        Expr::Await { expr } => {
+            let expr_str = format_expr_rust(expr);
+            format!("{}.await", expr_str)
         },
     }
 }

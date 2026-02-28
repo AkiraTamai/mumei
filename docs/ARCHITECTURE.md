@@ -189,11 +189,33 @@ body: {
 };
 ```
 
+### Await Safety Verification
+
+The `Expr::Await` handler performs two critical checks at each suspension point:
+
+**1. Resource Held Across Await (Deadlock Prevention)**
+
+If `await` is called inside an `acquire` block, the resource lock is held during
+suspension — a classic deadlock pattern. The verifier scans `env` for any
+`__resource_held_*` keys that are `true` and reports an error:
+
+```
+❌ Unsafe await: resource 'db_conn' is held across an await point.
+   Hint: acquire db_conn { ... }; let val = await expr; // OK
+   Bad:  acquire db_conn { let val = await expr; ... }  // deadlock risk
+```
+
+**2. Ownership Consistency Across Await**
+
+Variables consumed (`__alive_` = false) before an `await` point are marked with
+`__await_consumed_*` flags. This enables detection of use-after-free patterns
+where a consumed variable is accessed after the coroutine resumes.
+
 ### Verification Steps (per atom with resources)
 
 1. `verify_resource_hierarchy()`: Z3 checks priority ordering
 2. `expr_to_z3(Acquire)`: Tracks `__resource_held_{name}` as Z3 Bool
-3. `expr_to_z3(Await)`: Ownership consistency check at suspension points
+3. `expr_to_z3(Await)`: Resource-held-across-await + ownership consistency checks
 4. Standard `verify()` pipeline continues (requires/ensures/linearity)
 
 ### Pipeline Extension

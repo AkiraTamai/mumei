@@ -231,6 +231,15 @@ impl Monomorphizer {
             Expr::ArrayAccess(_, idx) => {
                 self.collect_from_expr(idx);
             }
+            Expr::Acquire { body, .. } => {
+                self.collect_from_expr(body);
+            }
+            Expr::Async { body } => {
+                self.collect_from_expr(body);
+            }
+            Expr::Await { expr } => {
+                self.collect_from_expr(expr);
+            }
             Expr::Number(_) | Expr::Float(_) | Expr::Variable(_) => {}
         }
     }

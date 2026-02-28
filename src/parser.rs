@@ -10,6 +10,33 @@ pub enum Op {
     And, Or, Implies,
 }
 
+// =============================================================================
+// 非同期処理 + リソース管理 (Async/Await + Resource Hierarchy)
+// =============================================================================
+
+/// リソースの優先度（Priority）定義。
+/// デッドロック防止のため、リソース取得順序を静的に制約する。
+/// 不変条件: スレッド T がリソース L1 を保持したまま L2 を要求する場合、
+///           Priority(L2) > Priority(L1) でなければならない。
+#[derive(Debug, Clone)]
+pub struct ResourceDef {
+    /// リソース名（例: "mutex_a", "db_conn"）
+    pub name: String,
+    /// 優先度（数値が大きいほど後に取得すべき）
+    pub priority: i64,
+    /// アクセスモード: exclusive（書き込み）または shared（読み取り）
+    pub mode: ResourceMode,
+}
+
+/// リソースのアクセスモード
+#[derive(Debug, Clone, PartialEq)]
+pub enum ResourceMode {
+    /// 排他的アクセス（書き込み可能、他者はアクセス不可）
+    Exclusive,
+    /// 共有アクセス（読み取り専用、他者も読み取り可能）
+    Shared,
+}
+
 #[derive(Debug, Clone)]
 pub enum Expr {
     Number(i64),
@@ -50,6 +77,23 @@ pub enum Expr {
     Match {
         target: Box<Expr>,
         arms: Vec<MatchArm>,
+    },
+    /// リソース取得: acquire resource_name { body }
+    /// body 実行中はリソースを保持し、ブロック終了時に自動解放する。
+    /// Z3 検証時にリソース階層制約をチェックする。
+    Acquire {
+        resource: String,
+        body: Box<Expr>,
+    },
+    /// 非同期式: async { body }
+    /// body を非同期コンテキストで実行する。暗黙的に Control エフェクトを持つ。
+    Async {
+        body: Box<Expr>,
+    },
+    /// 待機式: await expr
+    /// 非同期式の結果を待機する。await ポイントで所有権の検証が行われる。
+    Await {
+        expr: Box<Expr>,
     },
 }
 
@@ -163,6 +207,13 @@ pub struct Atom {
     /// consume されたパラメータは body 内で使用後、再利用不可となる。
     /// LinearityCtx が Z3 と連携して二重使用・Use-After-Free を検出する。
     pub consumed_params: Vec<String>,
+    /// この atom が使用するリソース名リスト（非同期安全性検証用）
+    /// `atom transfer() resources: [db, cache];` の場合: resources = ["db", "cache"]
+    /// Z3 がリソース階層制約を検証し、デッドロックの可能性を検出する。
+    pub resources: Vec<String>,
+    /// この atom が非同期（async）かどうか
+    /// `async atom fetch(url: Str)` の場合: is_async = true
+    pub is_async: bool,
 }
 
 /// 構造体フィールド定義（オプションで精緻型制約を保持）
@@ -268,6 +319,8 @@ pub enum Item {
     Import(ImportDecl),
     TraitDef(TraitDef),
     ImplDef(ImplDef),
+    /// リソース定義: resource name priority mode;
+    ResourceDef(ResourceDef),
 }
 
 // --- 3. Generics パースヘルパー ---
@@ -603,9 +656,51 @@ pub fn parse_module(source: &str) -> Vec<Item> {
         items.push(Item::ImplDef(ImplDef { trait_name, target_type, method_bodies }));
     }
 
+    // resource 定義: resource name priority:<N> mode:exclusive|shared;
+    let resource_re = Regex::new(r"(?m)^resource\s+(\w+)\s+priority:\s*(-?\d+)\s+mode:\s*(exclusive|shared)\s*;").unwrap();
+    for cap in resource_re.captures_iter(source) {
+        let name = cap[1].to_string();
+        let priority = cap[2].parse::<i64>().unwrap_or(0);
+        let mode = match &cap[3] {
+            "exclusive" => ResourceMode::Exclusive,
+            _ => ResourceMode::Shared,
+        };
+        items.push(Item::ResourceDef(ResourceDef { name, priority, mode }));
+    }
+
+    // async atom のパース: "async atom" を先に検出
+    let async_atom_re = Regex::new(r"async\s+atom\s+\w+").unwrap();
+    let async_atom_indices: Vec<_> = async_atom_re.find_iter(source).map(|m| m.start()).collect();
+    let mut async_atom_starts: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for &start in &async_atom_indices {
+        async_atom_starts.insert(start);
+        let end_idx = source.len();
+        // "async atom" の次の atom または async atom、または EOF までを切り出す
+        let atom_source = &source[start..];
+        // "async " を除去して parse_atom に渡す
+        let stripped = atom_source.strip_prefix("async").unwrap_or(atom_source).trim_start();
+        // 次の atom/async atom の開始位置を探す
+        let next_atom_pos = atom_re.find(stripped.get(5..).unwrap_or(""))
+            .map(|m| m.start() + 5)
+            .unwrap_or(stripped.len());
+        let atom_slice = &stripped[..next_atom_pos];
+        let mut atom = parse_atom(atom_slice);
+        atom.is_async = true;
+        items.push(Item::Atom(atom));
+    }
+
     let atom_indices: Vec<_> = atom_re.find_iter(source).map(|m| m.start()).collect();
     for i in 0..atom_indices.len() {
         let start = atom_indices[i];
+        // "async atom" の一部として既にパース済みならスキップ
+        if start >= 6 && async_atom_starts.contains(&(start - 6)) {
+            continue;
+        }
+        // "async " が直前にある場合もスキップ
+        let prefix = &source[start.saturating_sub(6)..start];
+        if prefix.trim_start().ends_with("async") || prefix.ends_with("async ") {
+            continue;
+        }
         let end = if i + 1 < atom_indices.len() { atom_indices[i+1] } else { source.len() };
         let atom_source = &source[start..end];
         items.push(Item::Atom(parse_atom(atom_source)));
@@ -697,6 +792,17 @@ pub fn parse_atom(source: &str) -> Atom {
         })
         .collect();
 
+    // resources 句のパース: "resources: [db, cache];" または "resources: db, cache;"
+    let resources_re = Regex::new(r"resources:\s*\[?([^\];]+)\]?\s*;").unwrap();
+    let resources: Vec<String> = resources_re.captures_iter(source)
+        .flat_map(|cap| {
+            cap[1].split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
     Atom {
         name,
         type_params,
@@ -707,6 +813,8 @@ pub fn parse_atom(source: &str) -> Atom {
         ensures,
         body_expr: body_raw,
         consumed_params,
+        resources,
+        is_async: false,
     }
 }
 
@@ -851,6 +959,34 @@ fn parse_mul_div(tokens: &[String], pos: &mut usize) -> Expr {
 fn parse_primary(tokens: &[String], pos: &mut usize) -> Expr {
     if *pos >= tokens.len() { return Expr::Number(0); }
     let token = &tokens[*pos];
+
+    // acquire 式: acquire resource_name { body }
+    if token == "acquire" {
+        *pos += 1;
+        let resource = if *pos < tokens.len() {
+            let r = tokens[*pos].clone();
+            *pos += 1;
+            r
+        } else {
+            "unknown".to_string()
+        };
+        let body = parse_block_or_expr(tokens, pos);
+        return Expr::Acquire { resource, body: Box::new(body) };
+    }
+
+    // async 式: async { body }
+    if token == "async" {
+        *pos += 1;
+        let body = parse_block_or_expr(tokens, pos);
+        return Expr::Async { body: Box::new(body) };
+    }
+
+    // await 式: await expr
+    if token == "await" {
+        *pos += 1;
+        let expr = parse_primary(tokens, pos);
+        return Expr::Await { expr: Box::new(expr) };
+    }
 
     // while, if 処理 (既存通り)
     if token == "while" {

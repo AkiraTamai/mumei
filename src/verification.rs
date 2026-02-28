@@ -1168,6 +1168,196 @@ fn verify_atom_invariant(atom: &Atom, invariant_raw: &str, module_env: &ModuleEn
     Ok(())
 }
 
+// =============================================================================
+// Call Graph サイクル検知 (Call Graph Cycle Detection)
+// =============================================================================
+//
+// 間接再帰（A→B→A）を含む呼び出しグラフのサイクルを検出する。
+// 直接再帰は verify_async_recursion_depth で検出済みだが、
+// 間接再帰はグラフ全体を走査する必要がある。
+//
+// アルゴリズム: DFS による強連結成分（SCC）の簡易検出。
+// サイクルが検出された場合、invariant の記述を要求するか、
+// BMC の深度制限を適用する。
+
+/// body 内の全 Call 式から呼び出し先の atom 名を収集する。
+fn collect_callees(expr: &Expr) -> Vec<String> {
+    let mut callees = Vec::new();
+    match expr {
+        Expr::Call(name, args) => {
+            callees.push(name.clone());
+            for arg in args { callees.extend(collect_callees(arg)); }
+        }
+        Expr::Block(stmts) => {
+            for s in stmts { callees.extend(collect_callees(s)); }
+        }
+        Expr::IfThenElse { cond, then_branch, else_branch } => {
+            callees.extend(collect_callees(cond));
+            callees.extend(collect_callees(then_branch));
+            callees.extend(collect_callees(else_branch));
+        }
+        Expr::Let { value, .. } | Expr::Assign { value, .. } => {
+            callees.extend(collect_callees(value));
+        }
+        Expr::While { cond, body, .. } => {
+            callees.extend(collect_callees(cond));
+            callees.extend(collect_callees(body));
+        }
+        Expr::BinaryOp(l, _, r) => {
+            callees.extend(collect_callees(l));
+            callees.extend(collect_callees(r));
+        }
+        Expr::Async { body } | Expr::Acquire { body, .. } => {
+            callees.extend(collect_callees(body));
+        }
+        Expr::Await { expr } => { callees.extend(collect_callees(expr)); }
+        Expr::Match { target, arms } => {
+            callees.extend(collect_callees(target));
+            for arm in arms {
+                callees.extend(collect_callees(&arm.body));
+                if let Some(guard) = &arm.guard { callees.extend(collect_callees(guard)); }
+            }
+        }
+        _ => {}
+    }
+    callees
+}
+
+/// Call Graph のサイクルを DFS で検出する。
+/// atom_name から到達可能なサイクルがある場合、サイクルのパスを返す。
+fn detect_call_cycle(atom_name: &str, module_env: &ModuleEnv) -> Option<Vec<String>> {
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut path: Vec<String> = Vec::new();
+
+    fn dfs(
+        current: &str,
+        target: &str,
+        module_env: &ModuleEnv,
+        visited: &mut HashSet<String>,
+        path: &mut Vec<String>,
+    ) -> bool {
+        if current == target && !path.is_empty() {
+            return true; // サイクル検出
+        }
+        if visited.contains(current) {
+            return false;
+        }
+        visited.insert(current.to_string());
+        path.push(current.to_string());
+
+        if let Some(callee_atom) = module_env.get_atom(current) {
+            let body_ast = parse_expression(&callee_atom.body_expr);
+            let callees = collect_callees(&body_ast);
+            for callee_name in &callees {
+                if let Some(_) = module_env.get_atom(callee_name) {
+                    if callee_name == target && !path.is_empty() {
+                        path.push(callee_name.clone());
+                        return true;
+                    }
+                    if dfs(callee_name, target, module_env, visited, path) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        path.pop();
+        false
+    }
+
+    // atom_name の呼び出し先から DFS 開始
+    if let Some(atom) = module_env.get_atom(atom_name) {
+        let body_ast = parse_expression(&atom.body_expr);
+        let callees = collect_callees(&body_ast);
+        for callee_name in &callees {
+            if let Some(_) = module_env.get_atom(callee_name) {
+                visited.clear();
+                path.clear();
+                path.push(atom_name.to_string());
+                if dfs(callee_name, atom_name, module_env, &mut visited, &mut path) {
+                    return Some(path);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Call Graph サイクル検知を実行し、サイクルが見つかった場合は
+/// invariant の記述を要求するか、BMC 深度制限を適用する。
+fn verify_call_graph_cycles(atom: &Atom, module_env: &ModuleEnv) -> MumeiResult<()> {
+    if let Some(cycle_path) = detect_call_cycle(&atom.name, module_env) {
+        let cycle_str = cycle_path.join(" → ");
+
+        // invariant が指定されていれば帰納的検証で対応可能
+        if atom.invariant.is_some() {
+            // invariant が指定されている → 帰納的検証で安全性を保証
+            // （verify_atom_invariant で検証済み）
+            return Ok(());
+        }
+
+        // max_unroll が指定されていれば BMC で対応
+        if atom.max_unroll.is_some() {
+            // BMC 深度制限が明示されている → 有界検証で対応
+            return Ok(());
+        }
+
+        // どちらもない場合は警告（エラーではなく警告にとどめる）
+        eprintln!(
+            "  ⚠️  Call graph cycle detected for atom '{}': {}\n     \
+             Consider adding `invariant: <expr>;` for complete proof, or \
+             `max_unroll: N;` for bounded verification.",
+            atom.name, cycle_str
+        );
+    }
+    Ok(())
+}
+
+// =============================================================================
+// Taint Analysis (汚染解析)
+// =============================================================================
+//
+// unverified な外部関数から戻ってきた値を「汚染済み（tainted）」としてマークし、
+// tainted 値が安全性の証明に使われた場合に警告を出す。
+//
+// 仕組み:
+// - expr_to_z3 の Call 処理で、呼び出し先が unverified の場合、
+//   戻り値に __tainted_{call_id} マーカーを付与する。
+// - ensures の検証時、env 内に __tainted_* が存在する場合、
+//   「検証結果が未検証コードに依存している」旨の警告を出す。
+
+/// unverified 関数の呼び出しを検出し、taint マーカーを env に追加する。
+/// verify() の body 検証後に呼び出される。
+fn check_taint_propagation(atom: &Atom, env: &Env, module_env: &ModuleEnv) {
+    // body 内で呼び出されている関数を収集
+    let body_ast = parse_expression(&atom.body_expr);
+    let callees = collect_callees(&body_ast);
+
+    let mut tainted_sources: Vec<String> = Vec::new();
+    for callee_name in &callees {
+        if let Some(callee) = module_env.get_atom(callee_name) {
+            if callee.trust_level == TrustLevel::Unverified {
+                tainted_sources.push(callee_name.clone());
+            }
+        }
+    }
+
+    if !tainted_sources.is_empty() {
+        // env 内の __tainted_* マーカーを確認
+        let taint_markers: Vec<&String> = env.keys()
+            .filter(|k| k.starts_with("__tainted_"))
+            .collect();
+
+        if !taint_markers.is_empty() || !tainted_sources.is_empty() {
+            eprintln!(
+                "  ⚠️  Taint warning for atom '{}': verification depends on unverified function(s): [{}]. \
+                 Results may be unsound.",
+                atom.name, tainted_sources.join(", ")
+            );
+        }
+    }
+}
+
 pub fn verify(atom: &Atom, output_dir: &Path, module_env: &ModuleEnv) -> MumeiResult<()> {
     // Phase 0: 信頼レベルチェック（Trust Boundary）
     match &atom.trust_level {
@@ -1208,6 +1398,9 @@ pub fn verify(atom: &Atom, output_dir: &Path, module_env: &ModuleEnv) -> MumeiRe
     if let Some(ref invariant_expr) = atom.invariant {
         verify_atom_invariant(atom, invariant_expr, module_env)?;
     }
+
+    // Phase 1e: Call Graph サイクル検知（間接再帰の検出）
+    verify_call_graph_cycles(atom, module_env)?;
 
     let mut cfg = Config::new();
     cfg.set_timeout_msec(10000);
@@ -1360,6 +1553,9 @@ pub fn verify(atom: &Atom, output_dir: &Path, module_env: &ModuleEnv) -> MumeiRe
     // 4. ボディの検証
     let body_ast = parse_expression(&atom.body_expr);
     let body_result = expr_to_z3(&vc, &body_ast, &mut env, Some(&solver))?;
+
+    // 4b. Taint Analysis: unverified 関数の呼び出しを検出し警告
+    check_taint_propagation(atom, &env, module_env);
 
     // 5. 事後条件 (ensures)
     if atom.ensures.trim() != "true" {
@@ -1632,6 +1828,14 @@ fn expr_to_z3<'a>(
                             // 複合 ensures（&& で結合された複数条件）内の等式も伝播
                             // ensures: result >= 0 && result == n + 1 のような場合
                             propagate_equality_from_ensures(vc, &ens_ast, &result_z3, &mut call_env, solver_opt)?;
+                        }
+
+                        // Taint Analysis: 呼び出し先が unverified の場合、
+                        // 戻り値を __tainted_ マーカーで汚染済みとしてマークする。
+                        if callee.trust_level == TrustLevel::Unverified {
+                            let taint_key = format!("__tainted_{}", result_name);
+                            let taint_marker = Bool::from_bool(ctx, true);
+                            env.insert(taint_key, taint_marker.into());
                         }
 
                         Ok(result_z3)

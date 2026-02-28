@@ -277,6 +277,20 @@ Z3 proof structure:
 
 This upgrades BMC's "no bugs in first N iterations" to "no bugs in **all** iterations".
 
+### Call Graph Cycle Detection
+
+Indirect recursion (A → B → A) is detected by DFS traversal of the call graph.
+When a cycle is found, the verifier checks:
+1. If `invariant:` is specified → inductive verification handles it (complete proof)
+2. If `max_unroll:` is specified → BMC handles it (bounded proof)
+3. Otherwise → warning emitted suggesting one of the above
+
+### Taint Analysis
+
+Values returned from `unverified` functions are marked with `__tainted_{call_id}`
+in the Z3 environment. After body verification, `check_taint_propagation` scans
+for tainted sources and warns if verification results depend on unverified code.
+
 ### Verification Steps (per atom)
 
 0. `TrustLevel` check: skip/warn for trusted/unverified atoms
@@ -284,9 +298,11 @@ This upgrades BMC's "no bugs in first N iterations" to "no bugs in **all** itera
 1b. `verify_bmc_resource_safety()`: BMC for loop-internal acquire patterns (respects `max_unroll:`)
 1c. `verify_async_recursion_depth()`: Recursive async call depth limit
 1d. `verify_atom_invariant()`: Inductive invariant proof (base + preservation)
+1e. `verify_call_graph_cycles()`: Indirect recursion detection via DFS
 2. `expr_to_z3(Acquire)`: Tracks `__resource_held_{name}` as Z3 Bool
 3. `expr_to_z3(Await)`: Resource-held-across-await + ownership consistency checks
-4. Standard `verify()` pipeline continues (requires/ensures/linearity)
+4. Body verification + **taint analysis** (`check_taint_propagation`)
+5. Standard `verify()` pipeline continues (requires/ensures/linearity)
 
 ### Pipeline Extension
 

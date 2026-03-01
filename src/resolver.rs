@@ -408,46 +408,7 @@ pub fn resolve_manifest_dependencies(
                 eprintln!("  ⚠️  Dependency '{}': no entry file found in '{}'", dep_name, abs_path.display());
             }
         }
-        // 名前依存（registry.json から解決）
-        else if dep.version().is_some() || matches!(dep, crate::manifest::Dependency::Version(_)) {
-            let version = dep.version();
-            if let Some(pkg_dir) = crate::registry::resolve(dep_name, version) {
-                let entry_candidates: Vec<PathBuf> = vec![
-                    pkg_dir.join("src/main.mm"),
-                    pkg_dir.join("main.mm"),
-                    pkg_dir.join(format!("{}.mm", dep_name)),
-                ];
-                if let Some(entry_path) = entry_candidates.iter().find(|p| p.exists()) {
-                    let source = fs::read_to_string(entry_path).map_err(|e| {
-                        MumeiError::VerificationError(format!(
-                            "Failed to read dependency '{}' at '{}': {}",
-                            dep_name, entry_path.display(), e
-                        ))
-                    })?;
-                    let items = parser::parse_module(&source);
-                    let dep_base_dir = entry_path.parent().unwrap_or(Path::new("."));
-                    let cache_path = dep_base_dir.join(".mumei_cache");
-                    let mut cache = load_cache(&cache_path);
-                    let mut ctx = ResolverContext::new();
-                    resolve_imports_recursive(&items, dep_base_dir, &mut ctx, &mut cache, module_env)?;
-                    save_cache(&cache_path, &cache);
-                    register_imported_items(&items, Some(dep_name), module_env);
-                    for item in &items {
-                        if let Item::Atom(atom) = item {
-                            module_env.mark_verified(&atom.name);
-                            let fqn = format!("{}::{}", dep_name, atom.name);
-                            module_env.mark_verified(&fqn);
-                        }
-                    }
-                    println!("  📦 Dependency '{}': loaded from registry ({})", dep_name, pkg_dir.display());
-                } else {
-                    eprintln!("  ⚠️  Dependency '{}': found in registry but no entry file in '{}'", dep_name, pkg_dir.display());
-                }
-            } else {
-                eprintln!("  ⚠️  Dependency '{}': not found in local registry. Run `mumei publish` in the dependency project first.", dep_name);
-            }
-        }
-        // Git 依存
+        // Git 依存（git フィールドがある場合は registry より優先）
         else if let Some((url, tag, rev, branch)) = dep.as_git() {
             let packages_dir = crate::manifest::mumei_home().join("packages");
             let _ = fs::create_dir_all(&packages_dir);
@@ -522,6 +483,45 @@ pub fn resolve_manifest_dependencies(
                 }
             } else {
                 eprintln!("  ⚠️  Dependency '{}': no entry file found in cloned repo", dep_name);
+            }
+        }
+        // 名前依存（registry.json から解決 — path でも git でもない場合）
+        else if dep.version().is_some() || matches!(dep, crate::manifest::Dependency::Version(_)) {
+            let version = dep.version();
+            if let Some(pkg_dir) = crate::registry::resolve(dep_name, version) {
+                let entry_candidates: Vec<PathBuf> = vec![
+                    pkg_dir.join("src/main.mm"),
+                    pkg_dir.join("main.mm"),
+                    pkg_dir.join(format!("{}.mm", dep_name)),
+                ];
+                if let Some(entry_path) = entry_candidates.iter().find(|p| p.exists()) {
+                    let source = fs::read_to_string(entry_path).map_err(|e| {
+                        MumeiError::VerificationError(format!(
+                            "Failed to read dependency '{}' at '{}': {}",
+                            dep_name, entry_path.display(), e
+                        ))
+                    })?;
+                    let items = parser::parse_module(&source);
+                    let dep_base_dir = entry_path.parent().unwrap_or(Path::new("."));
+                    let cache_path = dep_base_dir.join(".mumei_cache");
+                    let mut cache = load_cache(&cache_path);
+                    let mut ctx = ResolverContext::new();
+                    resolve_imports_recursive(&items, dep_base_dir, &mut ctx, &mut cache, module_env)?;
+                    save_cache(&cache_path, &cache);
+                    register_imported_items(&items, Some(dep_name), module_env);
+                    for item in &items {
+                        if let Item::Atom(atom) = item {
+                            module_env.mark_verified(&atom.name);
+                            let fqn = format!("{}::{}", dep_name, atom.name);
+                            module_env.mark_verified(&fqn);
+                        }
+                    }
+                    println!("  📦 Dependency '{}': loaded from registry ({})", dep_name, pkg_dir.display());
+                } else {
+                    eprintln!("  ⚠️  Dependency '{}': found in registry but no entry file in '{}'", dep_name, pkg_dir.display());
+                }
+            } else {
+                eprintln!("  ⚠️  Dependency '{}': not found in local registry. Run `mumei publish` in the dependency project first.", dep_name);
             }
         }
     }

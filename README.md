@@ -84,11 +84,11 @@ body: n;
 
 ### Option A: Download pre-built binary (recommended)
 
-Download from [GitHub Releases](https://github.com/akiratamai/mumei/releases) — no Rust toolchain required.
+Download from [GitHub Releases](https://github.com/mumei-lang/mumei/releases) — no Rust toolchain required.
 
 ```bash
 # Example: macOS aarch64
-curl -LO https://github.com/akiratamai/mumei/releases/latest/download/mumei-aarch64-apple-darwin.tar.gz
+curl -LO https://github.com/mumei-lang/mumei/releases/latest/download/mumei-aarch64-apple-darwin.tar.gz
 tar xzf mumei-aarch64-apple-darwin.tar.gz
 sudo mv mumei /usr/local/bin/
 sudo mv std /usr/local/share/mumei-std

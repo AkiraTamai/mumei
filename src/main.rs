@@ -389,17 +389,15 @@ name = "{}"
 version = "0.1.0"
 # authors = ["Your Name"]
 # description = "A formally verified Mumei project"
-
+# repository = "https://github.com/mumei-lang/your-project"
 [dependencies]
 # 依存パッケージをここに記述
 # example = {{ path = "./libs/example" }}
-# math = {{ git = "https://github.com/user/math-mm", tag = "v1.0.0" }}
-
+# math = {{ git = "https://github.com/mumei-lang/math-mm", tag = "v1.0.0" }}
 [build]
 targets = ["rust", "go", "typescript"]
 verify = true
 max_unroll = 3
-
 [proof]
 cache = true
 timeout_ms = 10000

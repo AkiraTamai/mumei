@@ -254,7 +254,7 @@ fn generate_env_script(mumei_home: &Path, z3_dir: &Path, llvm_dir: &Path) -> Res
     lines.push(format!("export LIBRARY_PATH=\"{}/lib:$LIBRARY_PATH\"", z3));
     lines.push(String::new());
     lines.push("# LLVM".to_string());
-    lines.push(format!("export LLVM_SYS_180_PREFIX=\"{}\"", llvm));
+    lines.push(format!("export LLVM_SYS_170_PREFIX=\"{}\"", llvm));
     lines.push(format!("export PATH=\"{}/bin:$PATH\"", llvm));
     lines.push(format!("export LDFLAGS=\"-L{}/lib -L{}/lib $LDFLAGS\"", llvm, z3));
     lines.push(format!("export CPPFLAGS=\"-I{}/include -I{}/include $CPPFLAGS\"", llvm, z3));

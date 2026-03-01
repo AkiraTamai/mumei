@@ -34,6 +34,8 @@ pub struct Package {
     pub authors: Vec<String>,
     #[serde(default)]
     pub description: Option<String>,
+    #[serde(default)]
+    pub repository: Option<String>,
 }
 /// 依存パッケージの指定方法
 /// - 文字列: バージョンのみ（例: "0.1.0"）

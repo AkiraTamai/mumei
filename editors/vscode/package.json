@@ -6,7 +6,7 @@
   "publisher": "mumei",
   "repository": {
     "type": "git",
-    "url": "https://github.com/akiratamai/mumei"
+    "url": "https://github.com/mumei-lang/mumei"
   },
   "engines": {
     "vscode": "^1.80.0"

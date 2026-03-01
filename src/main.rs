@@ -168,6 +168,13 @@ fn load_and_prepare(input: &str) -> (Vec<Item>, verification::ModuleEnv, Vec<Imp
         // prelude のロード失敗は致命的ではない（組み込みトレイトが代替）
     }
 
+    // mumei.toml の [dependencies] から依存パッケージを解決
+    if let Some((proj_dir, m)) = manifest::find_and_load() {
+        if let Err(e) = resolver::resolve_manifest_dependencies(&m, &proj_dir, &mut module_env) {
+            eprintln!("  ⚠️  Dependency resolution warning: {}", e);
+        }
+    }
+
     if let Err(e) = resolver::resolve_imports(&items, base_dir, &mut module_env) {
         eprintln!("  ❌ Import Resolution Failed: {}", e);
         std::process::exit(1);
@@ -593,6 +600,15 @@ fn cmd_doctor() {
 fn cmd_build(input: &str, output: &str) {
     println!("🗡️  Mumei: Forging the blade (Type System 2.0 + Generics enabled)...");
 
+    // mumei.toml の自動検出と設定適用
+    let manifest_config = manifest::find_and_load();
+    let (build_cfg, proof_cfg) = if let Some((ref _proj_dir, ref m)) = manifest_config {
+        println!("  📄 Using mumei.toml: {} v{}", m.package.name, m.package.version);
+        (m.build.clone(), m.proof.clone())
+    } else {
+        (manifest::BuildConfig::default(), manifest::ProofConfig::default())
+    };
+
     let (items, mut module_env, imports) = load_and_prepare(input);
 
     let output_path = Path::new(output);
@@ -601,16 +617,26 @@ fn cmd_build(input: &str, output: &str) {
     let input_path = Path::new(input);
     let build_base_dir = input_path.parent().unwrap_or(Path::new("."));
 
-    // Incremental Build: ビルドキャッシュをロード
-    let build_cache = resolver::load_build_cache(build_base_dir);
+    // Incremental Build: ビルドキャッシュをロード（proof.cache が false ならスキップ）
+    let build_cache = if proof_cfg.cache {
+        resolver::load_build_cache(build_base_dir)
+    } else {
+        std::collections::HashMap::new()
+    };
     let mut build_cache_new = std::collections::HashMap::new();
+
+    // [build] targets から有効なトランスパイル言語を決定
+    let enable_rust = build_cfg.targets.iter().any(|t| t == "rust");
+    let enable_go = build_cfg.targets.iter().any(|t| t == "go");
+    let enable_ts = build_cfg.targets.iter().any(|t| t == "typescript" || t == "ts");
+    let skip_verify = !build_cfg.verify;
 
     let mut atom_count = 0;
 
-    // Transpiler バンドル初期化
-    let mut rust_bundle = transpile_module_header(&imports, file_stem, TargetLanguage::Rust);
-    let mut go_bundle = transpile_module_header(&imports, file_stem, TargetLanguage::Go);
-    let mut ts_bundle = transpile_module_header(&imports, file_stem, TargetLanguage::TypeScript);
+    // Transpiler バンドル初期化（有効な言語のみ）
+    let mut rust_bundle = if enable_rust { transpile_module_header(&imports, file_stem, TargetLanguage::Rust) } else { String::new() };
+    let mut go_bundle = if enable_go { transpile_module_header(&imports, file_stem, TargetLanguage::Go) } else { String::new() };
+    let mut ts_bundle = if enable_ts { transpile_module_header(&imports, file_stem, TargetLanguage::TypeScript) } else { String::new() };
 
     for item in &items {
         match item {
@@ -629,26 +655,19 @@ fn cmd_build(input: &str, output: &str) {
             Item::StructDef(struct_def) => {
                 let field_names: Vec<&str> = struct_def.fields.iter().map(|f| f.name.as_str()).collect();
                 println!("  🏗️  Registered Struct: '{}' (fields: {})", struct_def.name, field_names.join(", "));
-                // 構造体定義をトランスパイル出力に含める
-                rust_bundle.push_str(&transpile_struct(struct_def, TargetLanguage::Rust));
-                rust_bundle.push_str("\n\n");
-                go_bundle.push_str(&transpile_struct(struct_def, TargetLanguage::Go));
-                go_bundle.push_str("\n\n");
-                ts_bundle.push_str(&transpile_struct(struct_def, TargetLanguage::TypeScript));
-                ts_bundle.push_str("\n\n");
+                // 構造体定義をトランスパイル出力に含める（有効な言語のみ）
+                if enable_rust { rust_bundle.push_str(&transpile_struct(struct_def, TargetLanguage::Rust)); rust_bundle.push_str("\n\n"); }
+                if enable_go { go_bundle.push_str(&transpile_struct(struct_def, TargetLanguage::Go)); go_bundle.push_str("\n\n"); }
+                if enable_ts { ts_bundle.push_str(&transpile_struct(struct_def, TargetLanguage::TypeScript)); ts_bundle.push_str("\n\n"); }
             }
 
             // --- Enum 定義の登録 + トランスパイル ---
             Item::EnumDef(enum_def) => {
                 let variant_names: Vec<&str> = enum_def.variants.iter().map(|v| v.name.as_str()).collect();
                 println!("  🔷 Registered Enum: '{}' (variants: {})", enum_def.name, variant_names.join(", "));
-                // Enum 定義をトランスパイル出力に含める
-                rust_bundle.push_str(&transpile_enum(enum_def, TargetLanguage::Rust));
-                rust_bundle.push_str("\n\n");
-                go_bundle.push_str(&transpile_enum(enum_def, TargetLanguage::Go));
-                go_bundle.push_str("\n\n");
-                ts_bundle.push_str(&transpile_enum(enum_def, TargetLanguage::TypeScript));
-                ts_bundle.push_str("\n\n");
+                if enable_rust { rust_bundle.push_str(&transpile_enum(enum_def, TargetLanguage::Rust)); rust_bundle.push_str("\n\n"); }
+                if enable_go { go_bundle.push_str(&transpile_enum(enum_def, TargetLanguage::Go)); go_bundle.push_str("\n\n"); }
+                if enable_ts { ts_bundle.push_str(&transpile_enum(enum_def, TargetLanguage::TypeScript)); ts_bundle.push_str("\n\n"); }
             }
 
             // --- トレイト定義 + トランスパイル ---
@@ -657,13 +676,9 @@ fn cmd_build(input: &str, output: &str) {
                 let law_names: Vec<&str> = trait_def.laws.iter().map(|(n, _)| n.as_str()).collect();
                 println!("  📜 Registered Trait: '{}' (methods: {}, laws: {})",
                     trait_def.name, method_names.join(", "), law_names.join(", "));
-                // トレイト定義をトランスパイル出力に含める
-                rust_bundle.push_str(&transpile_trait(trait_def, TargetLanguage::Rust));
-                rust_bundle.push_str("\n\n");
-                go_bundle.push_str(&transpile_trait(trait_def, TargetLanguage::Go));
-                go_bundle.push_str("\n\n");
-                ts_bundle.push_str(&transpile_trait(trait_def, TargetLanguage::TypeScript));
-                ts_bundle.push_str("\n\n");
+                if enable_rust { rust_bundle.push_str(&transpile_trait(trait_def, TargetLanguage::Rust)); rust_bundle.push_str("\n\n"); }
+                if enable_go { go_bundle.push_str(&transpile_trait(trait_def, TargetLanguage::Go)); go_bundle.push_str("\n\n"); }
+                if enable_ts { ts_bundle.push_str(&transpile_trait(trait_def, TargetLanguage::TypeScript)); ts_bundle.push_str("\n\n"); }
             }
 
             // --- トレイト実装の登録 + 法則検証 + トランスパイル ---
@@ -677,13 +692,10 @@ fn cmd_build(input: &str, output: &str) {
                         std::process::exit(1);
                     }
                 }
-                // impl 定義をトランスパイル出力に含める
-                rust_bundle.push_str(&transpile_impl(impl_def, TargetLanguage::Rust));
-                rust_bundle.push_str("\n\n");
-                go_bundle.push_str(&transpile_impl(impl_def, TargetLanguage::Go));
-                go_bundle.push_str("\n\n");
-                ts_bundle.push_str(&transpile_impl(impl_def, TargetLanguage::TypeScript));
-                ts_bundle.push_str("\n\n");
+                // impl 定義をトランスパイル出力に含める（有効な言語のみ）
+                if enable_rust { rust_bundle.push_str(&transpile_impl(impl_def, TargetLanguage::Rust)); rust_bundle.push_str("\n\n"); }
+                if enable_go { go_bundle.push_str(&transpile_impl(impl_def, TargetLanguage::Go)); go_bundle.push_str("\n\n"); }
+                if enable_ts { ts_bundle.push_str(&transpile_impl(impl_def, TargetLanguage::TypeScript)); ts_bundle.push_str("\n\n"); }
             }
 
             // --- リソース定義の登録 ---
@@ -706,8 +718,11 @@ fn cmd_build(input: &str, output: &str) {
                 println!("  ✨ [1/4] Polishing Syntax: Atom '{}'{}{} identified.", atom.name, async_marker, res_marker);
 
                 // --- 2. Verification (形式検証: Z3 + StdLib) ---
-                // インポートされた atom は検証済み（契約のみ信頼）なのでスキップ
-                if module_env.is_verified(&atom.name) {
+                if skip_verify {
+                    println!("  ⚖️  [2/4] Verification: Skipped (verify=false in mumei.toml).");
+                    module_env.mark_verified(&atom.name);
+                } else if module_env.is_verified(&atom.name) {
+                    // インポートされた atom は検証済み（契約のみ信頼）なのでスキップ
                     println!("  ⚖️  [2/4] Verification: Skipped (imported, contract-trusted).");
                 } else {
                     // Incremental Build: atom ハッシュでキャッシュ比較
@@ -721,7 +736,7 @@ fn cmd_build(input: &str, output: &str) {
                         println!("  ⚖️  [2/4] Verification: Skipped (unchanged, cached) ⏩");
                         module_env.mark_verified(&atom.name);
                     } else {
-                        match verification::verify(atom, output_dir, &module_env) {
+                        match verification::verify_with_config(atom, output_dir, &module_env, proof_cfg.timeout_ms, build_cfg.max_unroll) {
                             Ok(_) => {
                                 println!("  ⚖️  [2/4] Verification: Passed. Logic verified with Z3.");
                                 module_env.mark_verified(&atom.name);
@@ -747,38 +762,36 @@ fn cmd_build(input: &str, output: &str) {
                 }
 
                 // --- 4. Transpile (多言語エクスポート) ---
-                // バンドル用に各言語のコードを生成
-                rust_bundle.push_str(&transpile(atom, TargetLanguage::Rust));
-                rust_bundle.push_str("\n\n");
-
-                go_bundle.push_str(&transpile(atom, TargetLanguage::Go));
-                go_bundle.push_str("\n\n");
-
-                ts_bundle.push_str(&transpile(atom, TargetLanguage::TypeScript));
-                ts_bundle.push_str("\n\n");
+                // バンドル用に各言語のコードを生成（有効な言語のみ）
+                if enable_rust { rust_bundle.push_str(&transpile(atom, TargetLanguage::Rust)); rust_bundle.push_str("\n\n"); }
+                if enable_go { go_bundle.push_str(&transpile(atom, TargetLanguage::Go)); go_bundle.push_str("\n\n"); }
+                if enable_ts { ts_bundle.push_str(&transpile(atom, TargetLanguage::TypeScript)); ts_bundle.push_str("\n\n"); }
             }
         }
     }
 
-    // 各言語のファイルを一括書き出し
+    // 各言語のファイルを一括書き出し（有効な言語のみ）
     if atom_count > 0 {
         println!("  🌍 [4/4] Sharpening: Exporting verified sources...");
 
-        let files = [
-            (rust_bundle, "rs"),
-            (go_bundle, "go"),
-            (ts_bundle, "ts"),
+        let mut created_files = Vec::new();
+        let files: Vec<(&str, &str, bool)> = vec![
+            (&rust_bundle, "rs", enable_rust),
+            (&go_bundle, "go", enable_go),
+            (&ts_bundle, "ts", enable_ts),
         ];
 
-        for (code, ext) in files {
+        for (code, ext, enabled) in files {
+            if !enabled { continue; }
             let out_filename = format!("{}.{}", file_stem, ext);
             let out_full_path = output_dir.join(&out_filename);
             if let Err(e) = fs::write(&out_full_path, code) {
                 eprintln!("  ❌ Failed to write {}: {}", out_filename, e);
                 std::process::exit(1);
             }
+            created_files.push(out_filename);
         }
-        println!("  ✅ Done. Created '{0}.rs', '{0}.go', '{0}.ts'", file_stem);
+        println!("  ✅ Done. Created: {}", created_files.join(", "));
         println!("🎉 Blade forged successfully with {} atoms.", atom_count);
     } else {
         println!("⚠️  Warning: No atoms found in the source file.");

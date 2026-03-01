@@ -161,6 +161,23 @@ fn load_source(input: &str) -> String {
     })
 }
 
+/// Z3 が利用可能かチェックし、なければ親切なメッセージで終了する
+fn check_z3_available() {
+    use std::process::Command as Cmd;
+    if Cmd::new("z3").arg("--version").output().is_err() {
+        eprintln!("❌ Error: Z3 solver not found.");
+        eprintln!("");
+        eprintln!("   Mumei requires Z3 for formal verification.");
+        eprintln!("   Install it with one of:");
+        eprintln!("     macOS:  brew install z3");
+        eprintln!("     Ubuntu: sudo apt-get install libz3-dev");
+        eprintln!("     Auto:   mumei setup");
+        eprintln!("");
+        eprintln!("   After installing, run `mumei inspect` to verify.");
+        std::process::exit(1);
+    }
+}
+
 /// parse → resolve → monomorphize → ModuleEnv に全定義を登録
 fn load_and_prepare(input: &str) -> (Vec<Item>, verification::ModuleEnv, Vec<ImportDecl>) {
     let source = load_source(input);
@@ -267,6 +284,7 @@ fn cmd_check(input: &str) {
 // =============================================================================
 
 fn cmd_verify(input: &str) {
+    check_z3_available();
     println!("🗡️  Mumei verify: verifying '{}'...", input);
     let (items, mut module_env, _imports) = load_and_prepare(input);
 
@@ -720,6 +738,7 @@ fn cmd_inspect() {
 // =============================================================================
 
 fn cmd_build(input: &str, output: &str) {
+    check_z3_available();
     println!("🗡️  Mumei: Forging the blade (Type System 2.0 + Generics enabled)...");
 
     // mumei.toml の自動検出と設定適用

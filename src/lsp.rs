@@ -204,6 +204,7 @@ fn uri_to_path(uri: &str) -> Option<std::path::PathBuf> {
 }
 
 /// ソースコードを in-process でパース → Z3 検証し、最初のエラーを返す。
+/// mumei.toml を上方探索してプロジェクトルートを決定し、依存パッケージも解決する。
 fn verify_source_for_lsp(path: &std::path::Path, source: &str) -> Result<(), String> {
     use crate::verification;
 
@@ -215,8 +216,15 @@ fn verify_source_for_lsp(path: &std::path::Path, source: &str) -> Result<(), Str
     let mut module_env = verification::ModuleEnv::new();
     verification::register_builtin_traits(&mut module_env);
 
+    // mumei.toml を探してプロジェクトルートを決定
     let base_dir = path.parent().unwrap_or(std::path::Path::new("."));
     let _ = crate::resolver::resolve_prelude(base_dir, &mut module_env);
+
+    // mumei.toml があれば依存パッケージも解決（ジャンプ先の定義が利用可能になる）
+    if let Some((proj_dir, manifest)) = crate::manifest::find_and_load() {
+        let _ = crate::resolver::resolve_manifest_dependencies(&manifest, &proj_dir, &mut module_env);
+    }
+
     let _ = crate::resolver::resolve_imports(&items, base_dir, &mut module_env);
 
     for item in &items {

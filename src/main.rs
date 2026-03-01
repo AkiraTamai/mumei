@@ -8,6 +8,7 @@ mod resolver;
 mod manifest;
 mod setup;
 mod lsp;
+mod registry;
 
 use clap::{Parser, Subcommand};
 use std::fs;
@@ -86,6 +87,12 @@ enum Command {
         /// Dependency specifier: local path (./path/to/lib) or package name
         dep: String,
     },
+    /// Publish package to local registry (~/.mumei/packages/)
+    Publish {
+        /// Publish only the proof cache (no source code)
+        #[arg(long)]
+        proof_only: bool,
+    },
     /// Start Language Server Protocol server (stdio mode)
     Lsp,
 }
@@ -114,6 +121,9 @@ fn main() {
         }
         Some(Command::Add { dep }) => {
             cmd_add(&dep);
+        }
+        Some(Command::Publish { proof_only }) => {
+            cmd_publish(proof_only);
         }
         Some(Command::Lsp) => {
             lsp::run();
@@ -966,6 +976,145 @@ fn cmd_add(dep: &str) {
     });
 
     println!("✅ Added '{}' to mumei.toml", dep_entry.0);
+}
+
+// =============================================================================
+// mumei publish — publish to local registry
+// =============================================================================
+
+fn cmd_publish(proof_only: bool) {
+    println!("📦 Mumei publish: publishing to local registry...");
+
+    // 1. mumei.toml を読み込み
+    let manifest_path = Path::new("mumei.toml");
+    if !manifest_path.exists() {
+        eprintln!("❌ Error: mumei.toml not found. Run `mumei init` first.");
+        std::process::exit(1);
+    }
+    let m = match manifest::load(manifest_path) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("❌ Error: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    let pkg_name = &m.package.name;
+    let pkg_version = &m.package.version;
+    println!("  📄 Package: {} v{}", pkg_name, pkg_version);
+
+    // 2. エントリファイルを探す
+    let entry_candidates = ["src/main.mm", "main.mm"];
+    let entry_path = entry_candidates.iter().find(|p| Path::new(p).exists());
+    let entry = match entry_path {
+        Some(p) => *p,
+        None => {
+            eprintln!("❌ Error: No entry file found (src/main.mm or main.mm).");
+            std::process::exit(1);
+        }
+    };
+
+    // 3. 全 atom を Z3 で検証（未検証パッケージの公開を禁止）
+    println!("  🔍 Verifying all atoms before publish...");
+    let (items, mut module_env, _imports) = load_and_prepare(entry);
+
+    let output_dir = Path::new(".");
+    let mut atom_count = 0;
+    let mut failed = 0;
+
+    for item in &items {
+        if let Item::Atom(atom) = item {
+            if module_env.is_verified(&atom.name) {
+                atom_count += 1;
+                continue;
+            }
+            match verification::verify(atom, output_dir, &module_env) {
+                Ok(_) => {
+                    println!("  ⚖️  '{}': verified ✅", atom.name);
+                    module_env.mark_verified(&atom.name);
+                    atom_count += 1;
+                }
+                Err(e) => {
+                    eprintln!("  ❌ '{}': verification failed: {}", atom.name, e);
+                    failed += 1;
+                }
+            }
+        }
+    }
+
+    if failed > 0 {
+        eprintln!("❌ Publish aborted: {} atom(s) failed verification. Fix errors and retry.", failed);
+        std::process::exit(1);
+    }
+
+    println!("  ✅ All {} atom(s) verified.", atom_count);
+
+    // 4. ~/.mumei/packages/<name>/<version>/ にコピー
+    let packages_dir = manifest::mumei_home().join("packages");
+    let pkg_dir = packages_dir.join(pkg_name).join(pkg_version);
+
+    if pkg_dir.exists() {
+        println!("  ⚠️  Overwriting existing version {}", pkg_version);
+        let _ = fs::remove_dir_all(&pkg_dir);
+    }
+    fs::create_dir_all(&pkg_dir).unwrap_or_else(|e| {
+        eprintln!("❌ Error: Failed to create {}: {}", pkg_dir.display(), e);
+        std::process::exit(1);
+    });
+
+    // mumei.toml をコピー
+    let _ = fs::copy("mumei.toml", pkg_dir.join("mumei.toml"));
+
+    // ビルドキャッシュをコピー（proof artifact）
+    let base_dir = Path::new(entry).parent().unwrap_or(Path::new("."));
+    let cache_src = base_dir.join(".mumei_build_cache");
+    if cache_src.exists() {
+        let _ = fs::copy(&cache_src, pkg_dir.join(".mumei_build_cache"));
+    }
+
+    if !proof_only {
+        // src/ ディレクトリを再帰コピー
+        if Path::new("src").exists() {
+            copy_dir_recursive(Path::new("src"), &pkg_dir.join("src"));
+        }
+        // ルートの .mm ファイルもコピー
+        if let Ok(entries) = fs::read_dir(".") {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().map_or(false, |e| e == "mm") {
+                    let _ = fs::copy(&path, pkg_dir.join(path.file_name().unwrap()));
+                }
+            }
+        }
+        println!("  📁 Copied source + proof cache to {}", pkg_dir.display());
+    } else {
+        println!("  📁 Copied proof cache only to {}", pkg_dir.display());
+    }
+
+    // 5. registry.json に登録
+    if let Err(e) = registry::register(pkg_name, pkg_version, &pkg_dir, atom_count, true) {
+        eprintln!("  ⚠️  Registry update warning: {}", e);
+    }
+
+    println!("");
+    println!("🎉 Published {} v{} to local registry", pkg_name, pkg_version);
+    println!("   Other projects can now use: {} = \"{}\"", pkg_name, pkg_version);
+}
+
+/// ディレクトリを再帰的にコピーする
+fn copy_dir_recursive(src: &Path, dst: &Path) {
+    let _ = fs::create_dir_all(dst);
+    if let Ok(entries) = fs::read_dir(src) {
+        for entry in entries.flatten() {
+            let src_path = entry.path();
+            let dst_path = dst.join(entry.file_name());
+            if src_path.is_dir() {
+                copy_dir_recursive(&src_path, &dst_path);
+            } else {
+                let _ = fs::copy(&src_path, &dst_path);
+            }
+        }
+    }
 }
 
 // end of src/main.rs

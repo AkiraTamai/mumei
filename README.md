@@ -327,4 +327,3 @@ my_app/
 - [ ] Editor integration (LSP / VS Code Extension)
 
 > 📖 **Toolchain roadmap**: [`docs/TOOLCHAIN.md`](docs/TOOLCHAIN.md)
-

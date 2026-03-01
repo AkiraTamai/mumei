@@ -320,10 +320,16 @@ my_app/
 - [x] **Verified standard library (enhanced)**: Option/Result map/andThen/filter, List immutable ops + fold, sort algorithms, BoundedArray
 - [x] **`forall`/`exists` in ensures**: Quantifiers in postconditions via `expr_to_z3` Call handler
 - [x] **`mumei doctor`**: Environment check command (Z3, LLVM, Rust, Go, Node.js, std library)
+- [x] **`mumei.toml` parsing**: `manifest.rs` reads `[package]`, `[build]`, `[dependencies]`, `[proof]` — `cmd_build` auto-applies `targets`, `verify`, `max_unroll`, `timeout_ms`, `cache`
+- [x] **Dependency resolution**: `mumei add` writes path/git deps to `mumei.toml`; `resolver::resolve_manifest_dependencies()` auto-fetches path deps and `git clone`s git deps to `~/.mumei/packages/`
+- [x] **Toolchain setup (`mumei setup`)**: Downloads Z3 + LLVM pre-built binaries to `~/.mumei/toolchains/`, generates `~/.mumei/env` script
+- [x] **LSP server (`mumei lsp`)**: JSON-RPC stdio server with `textDocument/hover` (atom contract display), `publishDiagnostics` (parse errors + Z3 verification errors)
+- [x] **VS Code Extension**: `editors/vscode/` — LSP client package, language configuration for `.mm` files
+- [x] **GitHub Actions Release**: `.github/workflows/release.yml` — cross-platform binary builds (macOS x86_64/aarch64, Linux x86_64) with std library bundled
 - [ ] Higher-order functions: `atom_ref` → `call_with_contract` → lambda (Phase A/B/C)
-- [ ] `mumei.toml` parsing: Read `[package]`, `[build]`, `[dependencies]` sections
-- [ ] Toolchain bundler (`mmx setup`): Auto-install Z3/LLVM
-- [ ] Package registry: `mmx publish` / `mmx add` with proof caching
-- [ ] Editor integration (LSP / VS Code Extension)
+- [ ] `mumei publish`: Local registry (`~/.mumei/packages/`) publishing with proof caching — share verified packages without central registry
+- [ ] Remote package registry: Central registry for `mumei add <name>` without git URL
+- [ ] VS Code Marketplace publishing: Package and publish `editors/vscode/` as installable extension
+- [ ] LSP enhancements: `textDocument/completion` (keyword/atom name), `textDocument/definition` (jump to definition), counter-example highlighting
 
 > 📖 **Toolchain roadmap**: [`docs/TOOLCHAIN.md`](docs/TOOLCHAIN.md)

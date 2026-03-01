@@ -363,6 +363,7 @@ fn cmd_init(name: &str) {
         eprintln!("❌ Error: Failed to create directory: {}", e);
         std::process::exit(1);
     });
+    let _ = fs::create_dir_all(project_dir.join("dist"));
 
     // mumei.toml
     let toml_content = format!(r#"[package]
@@ -386,6 +387,26 @@ cache = true
 timeout_ms = 10000
 "#, name);
     fs::write(project_dir.join("mumei.toml"), toml_content).unwrap();
+
+    // .gitignore
+    let gitignore_content = r#"# Mumei build artifacts
+dist/
+*.ll
+
+# Verification cache (regenerated automatically)
+.mumei_build_cache
+.mumei_cache
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+.vscode/settings.json
+*.swp
+*~
+"#;
+    fs::write(project_dir.join(".gitignore"), gitignore_content).unwrap();
 
     // src/main.mm — 充実したテンプレート（検証成功例 + 標準ライブラリ使用例）
     let main_content = format!(r#"// =============================================================
@@ -465,6 +486,8 @@ body: {{
     println!("");
     println!("  {}/", name);
     println!("  ├── mumei.toml");
+    println!("  ├── .gitignore");
+    println!("  ├── dist/");
     println!("  └── src/");
     println!("      └── main.mm");
     println!("");

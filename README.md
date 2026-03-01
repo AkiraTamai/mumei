@@ -128,8 +128,8 @@ mumei publish --proof-only   # proof cache only, no source
 # Download & configure Z3 + LLVM toolchain
 mumei setup
 
-# Check development environment
-mumei doctor
+# Inspect development environment
+mumei inspect
 
 # Start LSP server (for editor integration)
 mumei lsp
@@ -350,7 +350,7 @@ my_app/
 - [x] **Pre-commit hooks**: `check-yaml` + `cargo fmt` + `cargo clippy` + `cargo test` via `.pre-commit-config.yaml`
 - [x] **Verified standard library (enhanced)**: Option/Result map/andThen/filter, List immutable ops + fold, sort algorithms, BoundedArray
 - [x] **`forall`/`exists` in ensures**: Quantifiers in postconditions via `expr_to_z3` Call handler
-- [x] **`mumei doctor`**: Environment check command (Z3, LLVM, Rust, Go, Node.js, std library)
+- [x] **`mumei inspect`**: Environment inspection command (Z3, LLVM, Rust, Go, Node.js, std library)
 - [x] **`mumei.toml` parsing**: `manifest.rs` reads `[package]`, `[build]`, `[dependencies]`, `[proof]` — `cmd_build` auto-applies `targets`, `verify`, `max_unroll`, `timeout_ms`, `cache`
 - [x] **Dependency resolution**: `mumei add` writes path/git deps to `mumei.toml`; `resolver::resolve_manifest_dependencies()` auto-fetches path deps and `git clone`s git deps to `~/.mumei/packages/`
 - [x] **Toolchain setup (`mumei setup`)**: Downloads Z3 + LLVM pre-built binaries to `~/.mumei/toolchains/`, generates `~/.mumei/env` script

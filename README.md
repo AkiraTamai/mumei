@@ -102,7 +102,7 @@ export MUMEI_STD_PATH=/usr/local/share/mumei-std
 ```bash
 # 1. Install system dependencies (macOS)
 xcode-select --install
-brew install llvm@18 z3
+brew install llvm@17 z3
 
 # 2. Build the mumei compiler (one-time)
 ./build_and_run.sh          # sets env vars + cargo build --release

@@ -15,7 +15,7 @@ if [ ! -d "$Z3_PATH" ]; then
 fi
 
 # --- 2. 環境変数の設定 ---
-export LLVM_SYS_180_PREFIX="$LLVM_PATH"
+export LLVM_SYS_170_PREFIX="$LLVM_PATH"
 export PATH="$LLVM_PATH/bin:$PATH"
 export Z3_SYS_Z3_HEADER="$Z3_PATH/include/z3.h"
 export Z3_SYS_Z3_LIB_DIR="$Z3_PATH/lib"
@@ -24,7 +24,7 @@ export LIBRARY_PATH="$Z3_PATH/lib:$LIBRARY_PATH"
 export LDFLAGS="-L$LLVM_PATH/lib -L$Z3_PATH/lib"
 export CPPFLAGS="-I$LLVM_PATH/include -I$Z3_PATH/include"
 
-echo "✅ Environment configured for LLVM 18 & Z3"
+echo "✅ Environment configured for LLVM 17 & Z3"
 
 # --- 3. ビルド工程 ---
 # 初回や環境変更時以外は cargo build だけで十分高速です

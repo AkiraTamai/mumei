@@ -554,12 +554,12 @@ fn cmd_inspect() {
     }
 
     // --- 3. LLVM ---
-    let llvm_found = ["llc-18", "llc"].iter().any(|cmd| {
+    let llvm_found = ["llc-17", "llc"].iter().any(|cmd| {
         Cmd::new(cmd).arg("--version").output().is_ok()
     });
     if llvm_found {
         // Try to get version
-        let version_output = Cmd::new("llc-18").arg("--version").output()
+        let version_output = Cmd::new("llc-17").arg("--version").output()
             .or_else(|_| Cmd::new("llc").arg("--version").output());
         if let Ok(output) = version_output {
             let version = String::from_utf8_lossy(&output.stdout);
@@ -571,7 +571,7 @@ fn cmd_inspect() {
         ok_count += 1;
     } else {
         println!("  ❌ LLVM: not found");
-        println!("     Install: brew install llvm@18");
+        println!("     Install: brew install llvm@17");
         fail_count += 1;
     }
 

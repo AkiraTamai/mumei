@@ -826,11 +826,15 @@ fn cmd_build(input: &str, output: &str) {
             Item::ImplDef(impl_def) => {
                 println!("  🔧 Registered Impl: {} for {}", impl_def.trait_name, impl_def.target_type);
                 // impl が trait の全 law を満たしているか Z3 で検証
-                match verification::verify_impl(impl_def, &module_env) {
-                    Ok(_) => println!("    ✅ Laws verified for impl {} for {}", impl_def.trait_name, impl_def.target_type),
-                    Err(e) => {
-                        eprintln!("    ❌ Law verification failed: {}", e);
-                        std::process::exit(1);
+                if skip_verify {
+                    println!("    ⚖️  Laws verification skipped (verify=false in mumei.toml)");
+                } else {
+                    match verification::verify_impl(impl_def, &module_env) {
+                        Ok(_) => println!("    ✅ Laws verified for impl {} for {}", impl_def.trait_name, impl_def.target_type),
+                        Err(e) => {
+                            eprintln!("    ❌ Law verification failed: {}", e);
+                            std::process::exit(1);
+                        }
                     }
                 }
                 // impl 定義をトランスパイル出力に含める（有効な言語のみ）

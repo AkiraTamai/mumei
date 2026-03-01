@@ -116,6 +116,24 @@ mumei check input.mm
 # Generate a new project template
 mumei init my_project
 
+# Add a dependency (local path, git URL, or registry name)
+mumei add ./libs/math
+mumei add https://github.com/user/math-mm
+mumei add math_utils
+
+# Publish to local registry (~/.mumei/packages/)
+mumei publish
+mumei publish --proof-only   # proof cache only, no source
+
+# Download & configure Z3 + LLVM toolchain
+mumei setup
+
+# Check development environment
+mumei doctor
+
+# Start LSP server (for editor integration)
+mumei lsp
+
 # Backward compatible (same as `mumei build`)
 mumei input.mm -o dist/katana
 ```
@@ -207,13 +225,17 @@ my_app/
 
 ```
 ├── src/
+│   ├── main.rs            # CLI orchestrator (build/verify/check/init/add/publish/setup/doctor/lsp)
 │   ├── parser.rs          # AST, tokenizer, parser
 │   ├── ast.rs             # TypeRef, Monomorphizer
-│   ├── resolver.rs        # Import resolution, circular detection
+│   ├── resolver.rs        # Import resolution, dependency resolution, circular detection
 │   ├── verification.rs    # Z3 verification, ModuleEnv, forall/exists
 │   ├── codegen.rs         # LLVM IR generation
 │   ├── transpiler/        # Rust + Go + TypeScript transpilers
-│   └── main.rs            # CLI orchestrator
+│   ├── manifest.rs        # mumei.toml parsing ([package]/[build]/[dependencies]/[proof])
+│   ├── registry.rs        # Local package registry (~/.mumei/registry.json)
+│   ├── setup.rs           # Toolchain installer (Z3 + LLVM download)
+│   └── lsp.rs             # Language Server Protocol (hover, diagnostics)
 ├── std/
 │   ├── prelude.mm         # Auto-imported: traits, ADTs, interfaces
 │   ├── alloc.mm           # Vector<T>, HashMap<K,V>, ownership
@@ -223,16 +245,25 @@ my_app/
 │   ├── list.mm            # List + immutable ops + sort + fold
 │   └── container/
 │       └── bounded_array.mm  # BoundedArray + sorted operations
+├── editors/
+│   └── vscode/            # VS Code extension (LSP client)
+│       ├── package.json
+│       ├── src/extension.ts
+│       └── language-configuration.json
+├── .github/
+│   └── workflows/
+│       └── release.yml    # Cross-platform binary release (macOS/Linux)
 ├── examples/              # call_test, match_atm, match_evaluator, import_test
 ├── tests/
 │   ├── test_std_import.mm
 │   ├── test_forall_ensures.mm
 │   └── negative/          # 9 negative test files
 ├── docs/
-│   ├── LANGUAGE.md        # Language reference (types, traits, modules, ownership)
+│   ├── LANGUAGE.md        # Language reference
 │   ├── STDLIB.md          # Standard library reference
 │   ├── EXAMPLES.md        # Examples & test suite reference
 │   ├── ARCHITECTURE.md    # Compiler internals
+│   ├── TOOLCHAIN.md       # Toolchain & package management
 │   └── CHANGELOG.md       # Change history
 ├── build_and_run.sh       # Build + test runner
 └── Cargo.toml
@@ -327,7 +358,8 @@ my_app/
 - [x] **VS Code Extension**: `editors/vscode/` — LSP client package, language configuration for `.mm` files
 - [x] **GitHub Actions Release**: `.github/workflows/release.yml` — cross-platform binary builds (macOS x86_64/aarch64, Linux x86_64) with std library bundled
 - [ ] Higher-order functions: `atom_ref` → `call_with_contract` → lambda (Phase A/B/C)
-- [ ] `mumei publish`: Local registry (`~/.mumei/packages/`) publishing with proof caching — share verified packages without central registry
+- [x] **`mumei publish`**: Local registry (`~/.mumei/packages/`) publishing with proof caching — `mumei publish` verifies all atoms, copies to `~/.mumei/packages/<name>/<version>/`, registers in `~/.mumei/registry.json`; `--proof-only` flag for cache-only publish
+- [x] **Registry-based dependency resolution**: `math = "0.1.0"` in `mumei.toml` resolves via `~/.mumei/registry.json` → `~/.mumei/packages/` (priority: path → registry → git)
 - [ ] Remote package registry: Central registry for `mumei add <name>` without git URL
 - [ ] VS Code Marketplace publishing: Package and publish `editors/vscode/` as installable extension
 - [ ] LSP enhancements: `textDocument/completion` (keyword/atom name), `textDocument/definition` (jump to definition), counter-example highlighting

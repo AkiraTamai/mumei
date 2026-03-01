@@ -412,7 +412,7 @@ pub fn resolve_manifest_dependencies(
         else if dep.version().is_some() || matches!(dep, crate::manifest::Dependency::Version(_)) {
             let version = dep.version();
             if let Some(pkg_dir) = crate::registry::resolve(dep_name, version) {
-                let entry_candidates = [
+                let entry_candidates: Vec<PathBuf> = vec![
                     pkg_dir.join("src/main.mm"),
                     pkg_dir.join("main.mm"),
                     pkg_dir.join(format!("{}.mm", dep_name)),

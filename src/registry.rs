@@ -1,4 +1,4 @@
-/! # Registry モジュール
+//! # Registry モジュール
 //!
 //! ローカルパッケージレジストリ (`~/.mumei/registry.json`) の管理。
 //! `mumei publish` で公開されたパッケージを名前＋バージョンで検索可能にする。

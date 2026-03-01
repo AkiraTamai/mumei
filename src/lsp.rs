@@ -52,7 +52,7 @@ pub fn run() {
                 let result = serde_json::json!({
                     "capabilities": {
                         "textDocumentSync": 1,
-                        "hoverProvider": false,
+                        "hoverProvider": true,
                         "completionProvider": null
                     },
                     "serverInfo": {
@@ -73,7 +73,7 @@ pub fn run() {
                         let uri = td.get("uri").and_then(|u| u.as_str()).unwrap_or("");
                         let text = td.get("text").and_then(|t| t.as_str()).unwrap_or("");
                         documents.insert(uri.to_string(), text.to_string());
-                        let diagnostics = diagnose(text);
+                        let diagnostics = diagnose(uri, text);
                         send_diagnostics(&mut writer, uri, &diagnostics);
                     }
                 }
@@ -87,7 +87,7 @@ pub fn run() {
                             if let Some(change) = changes.first() {
                                 if let Some(text) = change.get("text").and_then(|t| t.as_str()) {
                                     documents.insert(uri.to_string(), text.to_string());
-                                    let diagnostics = diagnose(text);
+                                    let diagnostics = diagnose(uri, text);
                                     send_diagnostics(&mut writer, uri, &diagnostics);
                                 }
                             }
@@ -103,6 +103,35 @@ pub fn run() {
                         // diagnostics をクリア
                         send_diagnostics(&mut writer, uri, &[]);
                     }
+                }
+            }
+            "textDocument/hover" => {
+                // 簡易 hover: カーソル行付近の `atom <name>(...)` を探索し、契約を表示
+                let hover_result = if let Some(params) = json.get("params") {
+                    let uri = params.get("textDocument").and_then(|td| td.get("uri")).and_then(|u| u.as_str()).unwrap_or("");
+                    let line = params.get("position").and_then(|p| p.get("line")).and_then(|l| l.as_u64()).unwrap_or(0) as usize;
+                    if let Some(text) = documents.get(uri) {
+                        build_hover(text, line)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                let result = if let Some(contents) = hover_result {
+                    serde_json::json!({
+                        "contents": {
+                            "kind": "markdown",
+                            "value": contents
+                        }
+                    })
+                } else {
+                    serde_json::Value::Null
+                };
+
+                if let Some(id) = id {
+                    send_response(&mut writer, id, result);
                 }
             }
             "shutdown" => {
@@ -128,11 +157,11 @@ pub fn run() {
 // 診断（パースエラー検出）
 // =============================================================================
 /// ソースコードをパースして diagnostics を生成
-fn diagnose(source: &str) -> Vec<serde_json::Value> {
-    // parse_module は現在パニックせず空の Vec を返す設計なので、
-    // パースが成功したかどうかを簡易的にチェックする
+fn diagnose(uri: &str, source: &str) -> Vec<serde_json::Value> {
+    // Phase 1: パースできるか
     let items = parser::parse_module(source);
     let mut diagnostics = Vec::new();
+
     // ソースが空でない場合にアイテムが0個 → パースエラーの可能性
     let trimmed = source.trim();
     if !trimmed.is_empty() && items.is_empty() && !trimmed.starts_with("//") {
@@ -145,14 +174,95 @@ fn diagnose(source: &str) -> Vec<serde_json::Value> {
             "source": "mumei",
             "message": "Parse error: no valid items found. Check syntax."
         }));
+        return diagnostics;
     }
-    // 基本的な構文チェック: atom の数をカウントしてログ
-    let atom_count = items.iter().filter(|i| matches!(i, parser::Item::Atom(_))).count();
-    if atom_count > 0 {
-        eprintln!("mumei-lsp: parsed {} atom(s) successfully", atom_count);
+
+    // Phase 2: Z3 で検証して diagnostics に反映（重いので最小限）
+    // - ローカルの LSP 
+
+
+    // ここではファイル I/O を避けるため、URI が file:// の場合のみパス化して実行する
+    if let Some(path) = uri_to_path(uri) {
+        // 一時ファイルとして検証（既存の verify パイプラインを活用）
+        // 失敗時のメッセージを 1 件の diagnostic として表示
+        if let Err(msg) = verify_source_for_lsp(&path, source) {
+            diagnostics.push(serde_json::json!({
+                "range": {
+                    "start": { "line": 0, "character": 0 },
+                    "end": { "line": 0, "character": 1 }
+                },
+                "severity": 1,
+                "source": "mumei-z3",
+                "message": msg
+            }));
+        }
     }
+
     diagnostics
 }
+
+fn uri_to_path(uri: &str) -> Option<std::path::PathBuf> {
+    // 超簡易: file:///... のみ対応
+    if let Some(rest) = uri.strip_prefix("file://") {
+        // Windows drive letter などは今は未対応
+        Some(std::path::PathBuf::from(rest))
+    } else {
+        None
+    }
+}
+
+fn verify_source_for_lsp(_path: &std::path::Path, source: &str) -> Result<(), String> {
+    // LSP 
+
+
+    // NOTE: 現状は「source 
+
+
+    // ここでは parser 
+
+
+    // 将来的には AST から位置情報を持つ diagnostic にする
+    let _items = crate::parser::parse_module(source);
+
+    // 今は最小実装: verify 相当はまだ重いのでスキップ
+    // TODO: 将来、manifest の timeout/max_unroll を反映して verify_with_config を呼ぶ
+    Ok(())
+}
+
+/// Hover 用: 指定行付近の atom を探し、requires/ensures を markdown で返す
+fn build_hover(source: &str, line: usize) -> Option<String> {
+    let items = crate::parser::parse_module(source);
+    let lines: Vec<&str> = source.lines().collect();
+    let target_line = lines.get(line).copied().unwrap_or("");
+
+    // 1) その行に atom 名が書かれているケース: `atom name(`
+    let atom_name = if let Some(idx) = target_line.find("atom ") {
+        let rest = &target_line[idx + 5..];
+        rest.split(|c: char| c == '(' || c.is_whitespace()).next().map(|s| s.trim().to_string())
+    } else {
+        None
+    };
+
+    // 2) パース済み items から契約を拾う
+    if let Some(name) = atom_name {
+        for it in &items {
+            if let crate::parser::Item::Atom(a) = it {
+                if a.name == name {
+                    let md = format!(
+                        "### atom {}\n\n**requires**:\n```\n{}\n```\n\n**ensures**:\n```\n{}\n```",
+                        a.name,
+                        a.requires.trim(),
+                        a.ensures.trim()
+                    );
+                    return Some(md);
+                }
+            }
+        }
+    }
+
+    None
+}
+
 // =============================================================================
 // LSP JSON-RPC I/O
 // =============================================================================

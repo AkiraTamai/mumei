@@ -17,7 +17,7 @@ use crate::transpiler::{TargetLanguage, transpile, transpile_enum, transpile_str
 use crate::parser::{Item, ImportDecl};
 
 // =============================================================================
-// CLI: mumei build / verify / check / init / setup / doctor
+// CLI: mumei build / verify / check / init / setup / inspect
 // =============================================================================
 //
 // Usage:
@@ -74,8 +74,8 @@ enum Command {
         /// Project directory name
         name: String,
     },
-    /// Check development environment (Z3, LLVM, std library)
-    Doctor,
+    /// Inspect development environment (Z3, LLVM, std library)
+    Inspect,
     /// Download and configure Z3 + LLVM toolchain into ~/.mumei/
     Setup {
         /// Force re-download even if already installed
@@ -113,8 +113,8 @@ fn main() {
         Some(Command::Init { name }) => {
             cmd_init(&name);
         }
-        Some(Command::Doctor) => {
-            cmd_doctor();
+        Some(Command::Inspect) => {
+            cmd_inspect();
         }
         Some(Command::Setup { force }) => {
             setup::run(force);
@@ -141,7 +141,7 @@ fn main() {
                 eprintln!("  setup   Download & configure Z3 + LLVM toolchain");
                 eprintln!("  add     Add a dependency to mumei.toml");
                 eprintln!("  lsp     Start Language Server Protocol server");
-                eprintln!("  doctor  Check development environment");
+                eprintln!("  inspect Inspect development environment");
                 eprintln!("Run `mumei --help` for full usage.");
                 std::process::exit(1);
             }
@@ -473,17 +473,17 @@ body: {{
     println!("  mumei build src/main.mm -o dist/output");
     println!("  mumei verify src/main.mm");
     println!("  mumei check src/main.mm");
-    println!("  mumei doctor                            # check environment");
+    println!("  mumei inspect                           # inspect environment");
 }
 
 // =============================================================================
-// mumei doctor — environment check
+// mumei inspect — environment check
 // =============================================================================
 
-fn cmd_doctor() {
+fn cmd_inspect() {
     use std::process::Command as Cmd;
 
-    println!("🩺 Mumei Doctor: checking development environment...");
+    println!("🔍 Mumei Inspect: checking development environment...");
     println!();
 
     let mut ok_count = 0;
@@ -682,13 +682,13 @@ fn cmd_doctor() {
     // --- Summary ---
     println!();
     if fail_count > 0 {
-        println!("❌ Doctor: {} ok, {} warnings, {} errors", ok_count, warn_count, fail_count);
+        println!("❌ Inspect: {} ok, {} warnings, {} errors", ok_count, warn_count, fail_count);
         println!("   Fix the errors above to use Mumei.");
         std::process::exit(1);
     } else if warn_count > 0 {
-        println!("✅ Doctor: {} ok, {} warnings — Mumei is ready (optional tools missing)", ok_count, warn_count);
+        println!("✅ Inspect: {} ok, {} warnings — Mumei is ready (optional tools missing)", ok_count, warn_count);
     } else {
-        println!("✅ Doctor: {} ok — all tools available", ok_count);
+        println!("✅ Inspect: {} ok — all tools available", ok_count);
     }
 }
 

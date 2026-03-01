@@ -11,7 +11,7 @@
 | `mumei add` | ✅ | Add dependency (local path / git URL / registry name) |
 | `mumei publish` | ✅ | Publish to local registry (`~/.mumei/packages/`) |
 | `mumei setup` | ✅ | Download & configure Z3 + LLVM into `~/.mumei/toolchains/` |
-| `mumei doctor` | ✅ | Environment check (Z3, LLVM, std library, toolchains) |
+| `mumei inspect` | ✅ | Inspect development environment (Z3, LLVM, std library, toolchains) |
 | `mumei lsp` | ✅ | Language Server Protocol (hover, diagnostics) |
 
 ### Installation
@@ -155,12 +155,12 @@ mumei setup --force    # re-download even if installed
 source ~/.mumei/env    # apply environment variables
 ```
 
-### `mumei doctor`
+### `mumei inspect`
 
-Checks all tools with multi-path std library search (cwd → exe dir → `MUMEI_STD_PATH`):
+Inspects all tools with multi-path std library search (cwd → exe dir → `MUMEI_STD_PATH`):
 
 ```
-🩺 Mumei Doctor: checking development environment...
+🔍 Mumei Inspect: checking development environment...
   Mumei compiler: v0.2.0
   ✅ Z3: Z3 version 4.13.4
   ✅ LLVM: LLVM version 18.1.8
@@ -168,7 +168,7 @@ Checks all tools with multi-path std library search (cwd → exe dir → `MUMEI_
   ✅ std library: 7/7 modules found (std)
   ✅ mumei.toml: my_project v0.1.0
   ✅ ~/.mumei/toolchains: llvm-18.1.8, z3-4.13.4
-✅ Doctor: 7 ok — all tools available
+✅ Inspect: 7 ok — all tools available
 ```
 
 ---
@@ -179,5 +179,5 @@ Checks all tools with multi-path std library search (cwd → exe dir → `MUMEI_
 - [ ] VS Code Marketplace publishing
 - [ ] LSP completion + definition jump
 - [ ] Counter-example highlighting in editors
-- [ ] `mumei doctor --ai` (structured JSON output for AI agents)
+- [ ] `mumei inspect --ai` (structured JSON output for AI agents)
 - [ ] Z3 proof certificates in published packages

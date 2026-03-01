@@ -8,6 +8,7 @@ mod resolver;
 mod manifest;
 mod setup;
 mod lsp;
+mod registry;
 
 use clap::{Parser, Subcommand};
 use std::fs;
@@ -16,7 +17,7 @@ use crate::transpiler::{TargetLanguage, transpile, transpile_enum, transpile_str
 use crate::parser::{Item, ImportDecl};
 
 // =============================================================================
-// CLI: mumei build / verify / check / init / setup / doctor
+// CLI: mumei build / verify / check / init / setup / inspect
 // =============================================================================
 //
 // Usage:
@@ -73,8 +74,8 @@ enum Command {
         /// Project directory name
         name: String,
     },
-    /// Check development environment (Z3, LLVM, std library)
-    Doctor,
+    /// Inspect development environment (Z3, LLVM, std library)
+    Inspect,
     /// Download and configure Z3 + LLVM toolchain into ~/.mumei/
     Setup {
         /// Force re-download even if already installed
@@ -85,6 +86,12 @@ enum Command {
     Add {
         /// Dependency specifier: local path (./path/to/lib) or package name
         dep: String,
+    },
+    /// Publish package to local registry (~/.mumei/packages/)
+    Publish {
+        /// Publish only the proof cache (no source code)
+        #[arg(long)]
+        proof_only: bool,
     },
     /// Start Language Server Protocol server (stdio mode)
     Lsp,
@@ -106,14 +113,17 @@ fn main() {
         Some(Command::Init { name }) => {
             cmd_init(&name);
         }
-        Some(Command::Doctor) => {
-            cmd_doctor();
+        Some(Command::Inspect) => {
+            cmd_inspect();
         }
         Some(Command::Setup { force }) => {
             setup::run(force);
         }
         Some(Command::Add { dep }) => {
             cmd_add(&dep);
+        }
+        Some(Command::Publish { proof_only }) => {
+            cmd_publish(proof_only);
         }
         Some(Command::Lsp) => {
             lsp::run();
@@ -131,7 +141,7 @@ fn main() {
                 eprintln!("  setup   Download & configure Z3 + LLVM toolchain");
                 eprintln!("  add     Add a dependency to mumei.toml");
                 eprintln!("  lsp     Start Language Server Protocol server");
-                eprintln!("  doctor  Check development environment");
+                eprintln!("  inspect Inspect development environment");
                 eprintln!("Run `mumei --help` for full usage.");
                 std::process::exit(1);
             }
@@ -151,6 +161,23 @@ fn load_source(input: &str) -> String {
     })
 }
 
+/// Z3 が利用可能かチェックし、なければ親切なメッセージで終了する
+fn check_z3_available() {
+    use std::process::Command as Cmd;
+    if Cmd::new("z3").arg("--version").output().is_err() {
+        eprintln!("❌ Error: Z3 solver not found.");
+        eprintln!("");
+        eprintln!("   Mumei requires Z3 for formal verification.");
+        eprintln!("   Install it with one of:");
+        eprintln!("     macOS:  brew install z3");
+        eprintln!("     Ubuntu: sudo apt-get install libz3-dev");
+        eprintln!("     Auto:   mumei setup");
+        eprintln!("");
+        eprintln!("   After installing, run `mumei inspect` to verify.");
+        std::process::exit(1);
+    }
+}
+
 /// parse → resolve → monomorphize → ModuleEnv に全定義を登録
 fn load_and_prepare(input: &str) -> (Vec<Item>, verification::ModuleEnv, Vec<ImportDecl>) {
     let source = load_source(input);
@@ -166,6 +193,13 @@ fn load_and_prepare(input: &str) -> (Vec<Item>, verification::ModuleEnv, Vec<Imp
     if let Err(e) = resolver::resolve_prelude(base_dir, &mut module_env) {
         eprintln!("  ⚠️  Prelude load warning: {}", e);
         // prelude のロード失敗は致命的ではない（組み込みトレイトが代替）
+    }
+
+    // mumei.toml の [dependencies] から依存パッケージを解決
+    if let Some((proj_dir, m)) = manifest::find_and_load() {
+        if let Err(e) = resolver::resolve_manifest_dependencies(&m, &proj_dir, &mut module_env) {
+            eprintln!("  ⚠️  Dependency resolution warning: {}", e);
+        }
     }
 
     if let Err(e) = resolver::resolve_imports(&items, base_dir, &mut module_env) {
@@ -250,6 +284,7 @@ fn cmd_check(input: &str) {
 // =============================================================================
 
 fn cmd_verify(input: &str) {
+    check_z3_available();
     println!("🗡️  Mumei verify: verifying '{}'...", input);
     let (items, mut module_env, _imports) = load_and_prepare(input);
 
@@ -346,6 +381,7 @@ fn cmd_init(name: &str) {
         eprintln!("❌ Error: Failed to create directory: {}", e);
         std::process::exit(1);
     });
+    let _ = fs::create_dir_all(project_dir.join("dist"));
 
     // mumei.toml
     let toml_content = format!(r#"[package]
@@ -370,22 +406,96 @@ timeout_ms = 10000
 "#, name);
     fs::write(project_dir.join("mumei.toml"), toml_content).unwrap();
 
-    // src/main.mm
+    // .gitignore
+    let gitignore_content = r#"# Mumei build artifacts
+dist/
+*.ll
+
+# Verification cache (regenerated automatically)
+.mumei_build_cache
+.mumei_cache
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+.vscode/settings.json
+*.swp
+*~
+"#;
+    fs::write(project_dir.join(".gitignore"), gitignore_content).unwrap();
+
+    // src/main.mm — 充実したテンプレート（検証成功例 + 標準ライブラリ使用例）
     let main_content = format!(r#"// =============================================================
 // {} — Mumei Project
 // =============================================================
+//
+// このファイルは mumei init で生成されたサンプルプロジェクトです。
+// 形式検証の基本的な使い方を示しています。
+//
+// 実行方法:
+//   mumei build src/main.mm -o dist/output
+//   mumei verify src/main.mm
+//   mumei check src/main.mm
 
 import "std/option" as option;
 
+// --- 精緻型（Refinement Type） ---
+// 型に述語制約を付与し、Z3 で自動検証します
 type Nat = i64 where v >= 0;
+type Pos = i64 where v > 0;
 
-atom hello(n: Nat)
+// --- 基本的な atom（関数） ---
+// requires（事前条件）と ensures（事後条件）を Z3 が数学的に証明します
+atom increment(n: Nat)
 requires:
     n >= 0;
 ensures:
-    result >= 0;
+    result >= 1;
 body: {{
     n + 1
+}};
+
+// --- 複数パラメータ + 算術検証 ---
+atom safe_add(a: Nat, b: Nat)
+requires:
+    a >= 0 && b >= 0;
+ensures:
+    result >= a && result >= b;
+body: {{
+    a + b
+}};
+
+// --- 条件分岐を含む検証 ---
+atom clamp(value: i64, min_val: Nat, max_val: Pos)
+requires:
+    min_val >= 0 && max_val > 0 && min_val < max_val;
+ensures:
+    result >= min_val && result <= max_val;
+body: {{
+    if value < min_val then min_val
+    else if value > max_val then max_val
+    else value
+}};
+
+// --- スタック操作（契約による安全性保証） ---
+atom stack_push(top: Nat, max_size: Pos)
+requires:
+    top >= 0 && max_size > 0 && top < max_size;
+ensures:
+    result >= 1 && result <= max_size;
+body: {{
+    top + 1
+}};
+
+atom stack_pop(top: Pos)
+requires:
+    top > 0;
+ensures:
+    result >= 0;
+body: {{
+    top - 1
 }};
 "#, name);
     fs::write(project_dir.join("src/main.mm"), main_content).unwrap();
@@ -394,6 +504,8 @@ body: {{
     println!("");
     println!("  {}/", name);
     println!("  ├── mumei.toml");
+    println!("  ├── .gitignore");
+    println!("  ├── dist/");
     println!("  └── src/");
     println!("      └── main.mm");
     println!("");
@@ -402,16 +514,17 @@ body: {{
     println!("  mumei build src/main.mm -o dist/output");
     println!("  mumei verify src/main.mm");
     println!("  mumei check src/main.mm");
+    println!("  mumei inspect                           # inspect environment");
 }
 
 // =============================================================================
-// mumei doctor — environment check
+// mumei inspect — environment check
 // =============================================================================
 
-fn cmd_doctor() {
+fn cmd_inspect() {
     use std::process::Command as Cmd;
 
-    println!("🩺 Mumei Doctor: checking development environment...");
+    println!("🔍 Mumei Inspect: checking development environment...");
     println!();
 
     let mut ok_count = 0;
@@ -504,23 +617,57 @@ fn cmd_doctor() {
     }
 
     // --- 7. std library ---
-    let std_paths = ["std/prelude.mm", "std/option.mm", "std/result.mm", "std/list.mm",
-                     "std/stack.mm", "std/alloc.mm", "std/container/bounded_array.mm"];
-    let mut std_found = 0;
-    let mut std_missing = Vec::new();
-    for path in &std_paths {
-        if Path::new(path).exists() {
-            std_found += 1;
-        } else {
-            std_missing.push(*path);
+    // resolver と同じ探索順序: cwd → exe隣 → MUMEI_STD_PATH
+    let std_modules = ["prelude.mm", "option.mm", "result.mm", "list.mm",
+                       "stack.mm", "alloc.mm", "container/bounded_array.mm"];
+    let mut std_base_dir: Option<std::path::PathBuf> = None;
+
+    if Path::new("std/prelude.mm").exists() {
+        std_base_dir = Some(std::path::PathBuf::from("std"));
+    }
+    if std_base_dir.is_none() {
+        if let Ok(exe_path) = std::env::current_exe() {
+            if let Some(exe_dir) = exe_path.parent() {
+                let candidate = exe_dir.join("std/prelude.mm");
+                if candidate.exists() {
+                    std_base_dir = Some(exe_dir.join("std"));
+                }
+            }
         }
     }
+    if std_base_dir.is_none() {
+        if let Ok(std_path) = std::env::var("MUMEI_STD_PATH") {
+            let candidate = Path::new(&std_path).join("prelude.mm");
+            if candidate.exists() {
+                std_base_dir = Some(std::path::PathBuf::from(&std_path));
+            }
+        }
+    }
+
+    let mut std_found = 0;
+    let mut std_missing = Vec::new();
+    if let Some(ref base) = std_base_dir {
+        for module in &std_modules {
+            if base.join(module).exists() {
+                std_found += 1;
+            } else {
+                std_missing.push(*module);
+            }
+        }
+    } else {
+        std_missing = std_modules.to_vec();
+    }
+
     if std_missing.is_empty() {
-        println!("  ✅ std library: {}/{} modules found", std_found, std_paths.len());
+        let location = std_base_dir.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "?".to_string());
+        println!("  ✅ std library: {}/{} modules found ({})", std_found, std_modules.len(), location);
         ok_count += 1;
     } else {
-        println!("  ⚠️  std library: {}/{} modules found (missing: {})",
-            std_found, std_paths.len(), std_missing.join(", "));
+        let hint = if std_base_dir.is_none() {
+            " (set MUMEI_STD_PATH or place std/ next to mumei binary)"
+        } else { "" };
+        println!("  ⚠️  std library: {}/{} modules found (missing: {}){}",
+            std_found, std_modules.len(), std_missing.join(", "), hint);
         warn_count += 1;
     }
 
@@ -576,13 +723,13 @@ fn cmd_doctor() {
     // --- Summary ---
     println!();
     if fail_count > 0 {
-        println!("❌ Doctor: {} ok, {} warnings, {} errors", ok_count, warn_count, fail_count);
+        println!("❌ Inspect: {} ok, {} warnings, {} errors", ok_count, warn_count, fail_count);
         println!("   Fix the errors above to use Mumei.");
         std::process::exit(1);
     } else if warn_count > 0 {
-        println!("✅ Doctor: {} ok, {} warnings — Mumei is ready (optional tools missing)", ok_count, warn_count);
+        println!("✅ Inspect: {} ok, {} warnings — Mumei is ready (optional tools missing)", ok_count, warn_count);
     } else {
-        println!("✅ Doctor: {} ok — all tools available", ok_count);
+        println!("✅ Inspect: {} ok — all tools available", ok_count);
     }
 }
 
@@ -591,7 +738,17 @@ fn cmd_doctor() {
 // =============================================================================
 
 fn cmd_build(input: &str, output: &str) {
+    check_z3_available();
     println!("🗡️  Mumei: Forging the blade (Type System 2.0 + Generics enabled)...");
+
+    // mumei.toml の自動検出と設定適用
+    let manifest_config = manifest::find_and_load();
+    let (build_cfg, proof_cfg) = if let Some((ref _proj_dir, ref m)) = manifest_config {
+        println!("  📄 Using mumei.toml: {} v{}", m.package.name, m.package.version);
+        (m.build.clone(), m.proof.clone())
+    } else {
+        (manifest::BuildConfig::default(), manifest::ProofConfig::default())
+    };
 
     let (items, mut module_env, imports) = load_and_prepare(input);
 
@@ -601,16 +758,26 @@ fn cmd_build(input: &str, output: &str) {
     let input_path = Path::new(input);
     let build_base_dir = input_path.parent().unwrap_or(Path::new("."));
 
-    // Incremental Build: ビルドキャッシュをロード
-    let build_cache = resolver::load_build_cache(build_base_dir);
+    // Incremental Build: ビルドキャッシュをロード（proof.cache が false ならスキップ）
+    let build_cache = if proof_cfg.cache {
+        resolver::load_build_cache(build_base_dir)
+    } else {
+        std::collections::HashMap::new()
+    };
     let mut build_cache_new = std::collections::HashMap::new();
+
+    // [build] targets から有効なトランスパイル言語を決定
+    let enable_rust = build_cfg.targets.iter().any(|t| t == "rust");
+    let enable_go = build_cfg.targets.iter().any(|t| t == "go");
+    let enable_ts = build_cfg.targets.iter().any(|t| t == "typescript" || t == "ts");
+    let skip_verify = !build_cfg.verify;
 
     let mut atom_count = 0;
 
-    // Transpiler バンドル初期化
-    let mut rust_bundle = transpile_module_header(&imports, file_stem, TargetLanguage::Rust);
-    let mut go_bundle = transpile_module_header(&imports, file_stem, TargetLanguage::Go);
-    let mut ts_bundle = transpile_module_header(&imports, file_stem, TargetLanguage::TypeScript);
+    // Transpiler バンドル初期化（有効な言語のみ）
+    let mut rust_bundle = if enable_rust { transpile_module_header(&imports, file_stem, TargetLanguage::Rust) } else { String::new() };
+    let mut go_bundle = if enable_go { transpile_module_header(&imports, file_stem, TargetLanguage::Go) } else { String::new() };
+    let mut ts_bundle = if enable_ts { transpile_module_header(&imports, file_stem, TargetLanguage::TypeScript) } else { String::new() };
 
     for item in &items {
         match item {
@@ -629,26 +796,19 @@ fn cmd_build(input: &str, output: &str) {
             Item::StructDef(struct_def) => {
                 let field_names: Vec<&str> = struct_def.fields.iter().map(|f| f.name.as_str()).collect();
                 println!("  🏗️  Registered Struct: '{}' (fields: {})", struct_def.name, field_names.join(", "));
-                // 構造体定義をトランスパイル出力に含める
-                rust_bundle.push_str(&transpile_struct(struct_def, TargetLanguage::Rust));
-                rust_bundle.push_str("\n\n");
-                go_bundle.push_str(&transpile_struct(struct_def, TargetLanguage::Go));
-                go_bundle.push_str("\n\n");
-                ts_bundle.push_str(&transpile_struct(struct_def, TargetLanguage::TypeScript));
-                ts_bundle.push_str("\n\n");
+                // 構造体定義をトランスパイル出力に含める（有効な言語のみ）
+                if enable_rust { rust_bundle.push_str(&transpile_struct(struct_def, TargetLanguage::Rust)); rust_bundle.push_str("\n\n"); }
+                if enable_go { go_bundle.push_str(&transpile_struct(struct_def, TargetLanguage::Go)); go_bundle.push_str("\n\n"); }
+                if enable_ts { ts_bundle.push_str(&transpile_struct(struct_def, TargetLanguage::TypeScript)); ts_bundle.push_str("\n\n"); }
             }
 
             // --- Enum 定義の登録 + トランスパイル ---
             Item::EnumDef(enum_def) => {
                 let variant_names: Vec<&str> = enum_def.variants.iter().map(|v| v.name.as_str()).collect();
                 println!("  🔷 Registered Enum: '{}' (variants: {})", enum_def.name, variant_names.join(", "));
-                // Enum 定義をトランスパイル出力に含める
-                rust_bundle.push_str(&transpile_enum(enum_def, TargetLanguage::Rust));
-                rust_bundle.push_str("\n\n");
-                go_bundle.push_str(&transpile_enum(enum_def, TargetLanguage::Go));
-                go_bundle.push_str("\n\n");
-                ts_bundle.push_str(&transpile_enum(enum_def, TargetLanguage::TypeScript));
-                ts_bundle.push_str("\n\n");
+                if enable_rust { rust_bundle.push_str(&transpile_enum(enum_def, TargetLanguage::Rust)); rust_bundle.push_str("\n\n"); }
+                if enable_go { go_bundle.push_str(&transpile_enum(enum_def, TargetLanguage::Go)); go_bundle.push_str("\n\n"); }
+                if enable_ts { ts_bundle.push_str(&transpile_enum(enum_def, TargetLanguage::TypeScript)); ts_bundle.push_str("\n\n"); }
             }
 
             // --- トレイト定義 + トランスパイル ---
@@ -657,13 +817,9 @@ fn cmd_build(input: &str, output: &str) {
                 let law_names: Vec<&str> = trait_def.laws.iter().map(|(n, _)| n.as_str()).collect();
                 println!("  📜 Registered Trait: '{}' (methods: {}, laws: {})",
                     trait_def.name, method_names.join(", "), law_names.join(", "));
-                // トレイト定義をトランスパイル出力に含める
-                rust_bundle.push_str(&transpile_trait(trait_def, TargetLanguage::Rust));
-                rust_bundle.push_str("\n\n");
-                go_bundle.push_str(&transpile_trait(trait_def, TargetLanguage::Go));
-                go_bundle.push_str("\n\n");
-                ts_bundle.push_str(&transpile_trait(trait_def, TargetLanguage::TypeScript));
-                ts_bundle.push_str("\n\n");
+                if enable_rust { rust_bundle.push_str(&transpile_trait(trait_def, TargetLanguage::Rust)); rust_bundle.push_str("\n\n"); }
+                if enable_go { go_bundle.push_str(&transpile_trait(trait_def, TargetLanguage::Go)); go_bundle.push_str("\n\n"); }
+                if enable_ts { ts_bundle.push_str(&transpile_trait(trait_def, TargetLanguage::TypeScript)); ts_bundle.push_str("\n\n"); }
             }
 
             // --- トレイト実装の登録 + 法則検証 + トランスパイル ---
@@ -677,13 +833,10 @@ fn cmd_build(input: &str, output: &str) {
                         std::process::exit(1);
                     }
                 }
-                // impl 定義をトランスパイル出力に含める
-                rust_bundle.push_str(&transpile_impl(impl_def, TargetLanguage::Rust));
-                rust_bundle.push_str("\n\n");
-                go_bundle.push_str(&transpile_impl(impl_def, TargetLanguage::Go));
-                go_bundle.push_str("\n\n");
-                ts_bundle.push_str(&transpile_impl(impl_def, TargetLanguage::TypeScript));
-                ts_bundle.push_str("\n\n");
+                // impl 定義をトランスパイル出力に含める（有効な言語のみ）
+                if enable_rust { rust_bundle.push_str(&transpile_impl(impl_def, TargetLanguage::Rust)); rust_bundle.push_str("\n\n"); }
+                if enable_go { go_bundle.push_str(&transpile_impl(impl_def, TargetLanguage::Go)); go_bundle.push_str("\n\n"); }
+                if enable_ts { ts_bundle.push_str(&transpile_impl(impl_def, TargetLanguage::TypeScript)); ts_bundle.push_str("\n\n"); }
             }
 
             // --- リソース定義の登録 ---
@@ -706,8 +859,11 @@ fn cmd_build(input: &str, output: &str) {
                 println!("  ✨ [1/4] Polishing Syntax: Atom '{}'{}{} identified.", atom.name, async_marker, res_marker);
 
                 // --- 2. Verification (形式検証: Z3 + StdLib) ---
-                // インポートされた atom は検証済み（契約のみ信頼）なのでスキップ
-                if module_env.is_verified(&atom.name) {
+                if skip_verify {
+                    println!("  ⚖️  [2/4] Verification: Skipped (verify=false in mumei.toml).");
+                    module_env.mark_verified(&atom.name);
+                } else if module_env.is_verified(&atom.name) {
+                    // インポートされた atom は検証済み（契約のみ信頼）なのでスキップ
                     println!("  ⚖️  [2/4] Verification: Skipped (imported, contract-trusted).");
                 } else {
                     // Incremental Build: atom ハッシュでキャッシュ比較
@@ -721,7 +877,7 @@ fn cmd_build(input: &str, output: &str) {
                         println!("  ⚖️  [2/4] Verification: Skipped (unchanged, cached) ⏩");
                         module_env.mark_verified(&atom.name);
                     } else {
-                        match verification::verify(atom, output_dir, &module_env) {
+                        match verification::verify_with_config(atom, output_dir, &module_env, proof_cfg.timeout_ms, build_cfg.max_unroll) {
                             Ok(_) => {
                                 println!("  ⚖️  [2/4] Verification: Passed. Logic verified with Z3.");
                                 module_env.mark_verified(&atom.name);
@@ -747,38 +903,36 @@ fn cmd_build(input: &str, output: &str) {
                 }
 
                 // --- 4. Transpile (多言語エクスポート) ---
-                // バンドル用に各言語のコードを生成
-                rust_bundle.push_str(&transpile(atom, TargetLanguage::Rust));
-                rust_bundle.push_str("\n\n");
-
-                go_bundle.push_str(&transpile(atom, TargetLanguage::Go));
-                go_bundle.push_str("\n\n");
-
-                ts_bundle.push_str(&transpile(atom, TargetLanguage::TypeScript));
-                ts_bundle.push_str("\n\n");
+                // バンドル用に各言語のコードを生成（有効な言語のみ）
+                if enable_rust { rust_bundle.push_str(&transpile(atom, TargetLanguage::Rust)); rust_bundle.push_str("\n\n"); }
+                if enable_go { go_bundle.push_str(&transpile(atom, TargetLanguage::Go)); go_bundle.push_str("\n\n"); }
+                if enable_ts { ts_bundle.push_str(&transpile(atom, TargetLanguage::TypeScript)); ts_bundle.push_str("\n\n"); }
             }
         }
     }
 
-    // 各言語のファイルを一括書き出し
+    // 各言語のファイルを一括書き出し（有効な言語のみ）
     if atom_count > 0 {
         println!("  🌍 [4/4] Sharpening: Exporting verified sources...");
 
-        let files = [
-            (rust_bundle, "rs"),
-            (go_bundle, "go"),
-            (ts_bundle, "ts"),
+        let mut created_files = Vec::new();
+        let files: Vec<(&str, &str, bool)> = vec![
+            (&rust_bundle, "rs", enable_rust),
+            (&go_bundle, "go", enable_go),
+            (&ts_bundle, "ts", enable_ts),
         ];
 
-        for (code, ext) in files {
+        for (code, ext, enabled) in files {
+            if !enabled { continue; }
             let out_filename = format!("{}.{}", file_stem, ext);
             let out_full_path = output_dir.join(&out_filename);
             if let Err(e) = fs::write(&out_full_path, code) {
                 eprintln!("  ❌ Failed to write {}: {}", out_filename, e);
                 std::process::exit(1);
             }
+            created_files.push(out_filename);
         }
-        println!("  ✅ Done. Created '{0}.rs', '{0}.go', '{0}.ts'", file_stem);
+        println!("  ✅ Done. Created: {}", created_files.join(", "));
         println!("🎉 Blade forged successfully with {} atoms.", atom_count);
     } else {
         println!("⚠️  Warning: No atoms found in the source file.");
@@ -864,6 +1018,145 @@ fn cmd_add(dep: &str) {
     });
 
     println!("✅ Added '{}' to mumei.toml", dep_entry.0);
+}
+
+// =============================================================================
+// mumei publish — publish to local registry
+// =============================================================================
+
+fn cmd_publish(proof_only: bool) {
+    println!("📦 Mumei publish: publishing to local registry...");
+
+    // 1. mumei.toml を読み込み
+    let manifest_path = Path::new("mumei.toml");
+    if !manifest_path.exists() {
+        eprintln!("❌ Error: mumei.toml not found. Run `mumei init` first.");
+        std::process::exit(1);
+    }
+    let m = match manifest::load(manifest_path) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("❌ Error: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    let pkg_name = &m.package.name;
+    let pkg_version = &m.package.version;
+    println!("  📄 Package: {} v{}", pkg_name, pkg_version);
+
+    // 2. エントリファイルを探す
+    let entry_candidates = ["src/main.mm", "main.mm"];
+    let entry_path = entry_candidates.iter().find(|p| Path::new(p).exists());
+    let entry = match entry_path {
+        Some(p) => *p,
+        None => {
+            eprintln!("❌ Error: No entry file found (src/main.mm or main.mm).");
+            std::process::exit(1);
+        }
+    };
+
+    // 3. 全 atom を Z3 で検証（未検証パッケージの公開を禁止）
+    println!("  🔍 Verifying all atoms before publish...");
+    let (items, mut module_env, _imports) = load_and_prepare(entry);
+
+    let output_dir = Path::new(".");
+    let mut atom_count = 0;
+    let mut failed = 0;
+
+    for item in &items {
+        if let Item::Atom(atom) = item {
+            if module_env.is_verified(&atom.name) {
+                atom_count += 1;
+                continue;
+            }
+            match verification::verify(atom, output_dir, &module_env) {
+                Ok(_) => {
+                    println!("  ⚖️  '{}': verified ✅", atom.name);
+                    module_env.mark_verified(&atom.name);
+                    atom_count += 1;
+                }
+                Err(e) => {
+                    eprintln!("  ❌ '{}': verification failed: {}", atom.name, e);
+                    failed += 1;
+                }
+            }
+        }
+    }
+
+    if failed > 0 {
+        eprintln!("❌ Publish aborted: {} atom(s) failed verification. Fix errors and retry.", failed);
+        std::process::exit(1);
+    }
+
+    println!("  ✅ All {} atom(s) verified.", atom_count);
+
+    // 4. ~/.mumei/packages/<name>/<version>/ にコピー
+    let packages_dir = manifest::mumei_home().join("packages");
+    let pkg_dir = packages_dir.join(pkg_name).join(pkg_version);
+
+    if pkg_dir.exists() {
+        println!("  ⚠️  Overwriting existing version {}", pkg_version);
+        let _ = fs::remove_dir_all(&pkg_dir);
+    }
+    fs::create_dir_all(&pkg_dir).unwrap_or_else(|e| {
+        eprintln!("❌ Error: Failed to create {}: {}", pkg_dir.display(), e);
+        std::process::exit(1);
+    });
+
+    // mumei.toml をコピー
+    let _ = fs::copy("mumei.toml", pkg_dir.join("mumei.toml"));
+
+    // ビルドキャッシュをコピー（proof artifact）
+    let base_dir = Path::new(entry).parent().unwrap_or(Path::new("."));
+    let cache_src = base_dir.join(".mumei_build_cache");
+    if cache_src.exists() {
+        let _ = fs::copy(&cache_src, pkg_dir.join(".mumei_build_cache"));
+    }
+
+    if !proof_only {
+        // src/ ディレクトリを再帰コピー
+        if Path::new("src").exists() {
+            copy_dir_recursive(Path::new("src"), &pkg_dir.join("src"));
+        }
+        // ルートの .mm ファイルもコピー
+        if let Ok(entries) = fs::read_dir(".") {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().map_or(false, |e| e == "mm") {
+                    let _ = fs::copy(&path, pkg_dir.join(path.file_name().unwrap()));
+                }
+            }
+        }
+        println!("  📁 Copied source + proof cache to {}", pkg_dir.display());
+    } else {
+        println!("  📁 Copied proof cache only to {}", pkg_dir.display());
+    }
+
+    // 5. registry.json に登録
+    if let Err(e) = registry::register(pkg_name, pkg_version, &pkg_dir, atom_count, true) {
+        eprintln!("  ⚠️  Registry update warning: {}", e);
+    }
+
+    println!("");
+    println!("🎉 Published {} v{} to local registry", pkg_name, pkg_version);
+    println!("   Other projects can now use: {} = \"{}\"", pkg_name, pkg_version);
+}
+
+/// ディレクトリを再帰的にコピーする
+fn copy_dir_recursive(src: &Path, dst: &Path) {
+    let _ = fs::create_dir_all(dst);
+    if let Ok(entries) = fs::read_dir(src) {
+        for entry in entries.flatten() {
+            let src_path = entry.path();
+            let dst_path = dst.join(entry.file_name());
+            if src_path.is_dir() {
+                copy_dir_recursive(&src_path, &dst_path);
+            } else {
+                let _ = fs::copy(&src_path, &dst_path);
+            }
+        }
+    }
 }
 
 // end of src/main.rs

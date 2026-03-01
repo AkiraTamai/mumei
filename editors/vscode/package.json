@@ -1,0 +1,51 @@
+{
+  "name": "mumei",
+  "displayName": "Mumei Language",
+  "description": "Language support for Mumei (.mm) — formally verified programming language with Z3",
+  "version": "0.1.0",
+  "publisher": "mumei",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/akiratamai/mumei"
+  },
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": ["Programming Languages"],
+  "activationEvents": [
+    "onLanguage:mumei"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "mumei",
+        "aliases": ["Mumei", "mumei"],
+        "extensions": [".mm"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "configuration": {
+      "title": "Mumei",
+      "properties": {
+        "mumei.serverPath": {
+          "type": "string",
+          "default": "mumei",
+          "description": "Path to the mumei binary (used for LSP)"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.80.0",
+    "typescript": "^5.0.0",
+    "vscode-languageclient": "^9.0.1"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  }
+}

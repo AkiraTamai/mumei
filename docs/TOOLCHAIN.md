@@ -17,7 +17,7 @@
 ### Installation
 
 ```bash
-# From source (requires Rust toolchain + Z3 + LLVM 18)
+# From source (requires Rust toolchain + Z3 + LLVM 17)
 cargo install --path .
 
 # Or use the setup command to install Z3/LLVM automatically
@@ -92,7 +92,7 @@ Published package structure:
 ├── registry.json                     ← package index
 └── toolchains/
     ├── z3-4.13.4/
-    └── llvm-18.1.8/
+    └── llvm-17.1.8/
 ```
 
 ### Adding Dependencies
@@ -147,7 +147,7 @@ GitHub Actions workflow (`.github/workflows/release.yml`) triggers on `v*` tags:
 
 ### `mumei setup`
 
-Downloads pre-built Z3 and LLVM 18 binaries to `~/.mumei/toolchains/`:
+Downloads pre-built Z3 and LLVM 17 binaries to `~/.mumei/toolchains/`:
 
 ```bash
 mumei setup            # auto-detect OS/arch
@@ -167,7 +167,7 @@ Inspects all tools with multi-path std library search (cwd → exe dir → `MUME
   ✅ Rust: rustc 1.82.0
   ✅ std library: 7/7 modules found (std)
   ✅ mumei.toml: my_project v0.1.0
-  ✅ ~/.mumei/toolchains: llvm-18.1.8, z3-4.13.4
+  ✅ ~/.mumei/toolchains: llvm-17.1.8, z3-4.13.4
 ✅ Inspect: 7 ok — all tools available
 ```
 

@@ -84,11 +84,11 @@ body: n;
 
 ### Option A: Download pre-built binary (recommended)
 
-Download from [GitHub Releases](https://github.com/akiratamai/mumei/releases) — no Rust toolchain required.
+Download from [GitHub Releases](https://github.com/mumei-lang/mumei/releases) — no Rust toolchain required.
 
 ```bash
 # Example: macOS aarch64
-curl -LO https://github.com/akiratamai/mumei/releases/latest/download/mumei-aarch64-apple-darwin.tar.gz
+curl -LO https://github.com/mumei-lang/mumei/releases/latest/download/mumei-aarch64-apple-darwin.tar.gz
 tar xzf mumei-aarch64-apple-darwin.tar.gz
 sudo mv mumei /usr/local/bin/
 sudo mv std /usr/local/share/mumei-std
@@ -102,7 +102,7 @@ export MUMEI_STD_PATH=/usr/local/share/mumei-std
 ```bash
 # 1. Install system dependencies (macOS)
 xcode-select --install
-brew install llvm@18 z3
+brew install llvm@17 z3
 
 # 2. Build the mumei compiler (one-time)
 ./build_and_run.sh          # sets env vars + cargo build --release
@@ -338,3 +338,4 @@ my_app/
 - [ ] LSP enhancements: `textDocument/completion` (keyword/atom name), `textDocument/definition` (jump to definition), counter-example highlighting
 
 > 📖 **Toolchain roadmap**: [`docs/TOOLCHAIN.md`](docs/TOOLCHAIN.md)
+

@@ -566,23 +566,57 @@ fn cmd_doctor() {
     }
 
     // --- 7. std library ---
-    let std_paths = ["std/prelude.mm", "std/option.mm", "std/result.mm", "std/list.mm",
-                     "std/stack.mm", "std/alloc.mm", "std/container/bounded_array.mm"];
-    let mut std_found = 0;
-    let mut std_missing = Vec::new();
-    for path in &std_paths {
-        if Path::new(path).exists() {
-            std_found += 1;
-        } else {
-            std_missing.push(*path);
+    // resolver と同じ探索順序: cwd → exe隣 → MUMEI_STD_PATH
+    let std_modules = ["prelude.mm", "option.mm", "result.mm", "list.mm",
+                       "stack.mm", "alloc.mm", "container/bounded_array.mm"];
+    let mut std_base_dir: Option<std::path::PathBuf> = None;
+
+    if Path::new("std/prelude.mm").exists() {
+        std_base_dir = Some(std::path::PathBuf::from("std"));
+    }
+    if std_base_dir.is_none() {
+        if let Ok(exe_path) = std::env::current_exe() {
+            if let Some(exe_dir) = exe_path.parent() {
+                let candidate = exe_dir.join("std/prelude.mm");
+                if candidate.exists() {
+                    std_base_dir = Some(exe_dir.join("std"));
+                }
+            }
         }
     }
+    if std_base_dir.is_none() {
+        if let Ok(std_path) = std::env::var("MUMEI_STD_PATH") {
+            let candidate = Path::new(&std_path).join("prelude.mm");
+            if candidate.exists() {
+                std_base_dir = Some(std::path::PathBuf::from(&std_path));
+            }
+        }
+    }
+
+    let mut std_found = 0;
+    let mut std_missing = Vec::new();
+    if let Some(ref base) = std_base_dir {
+        for module in &std_modules {
+            if base.join(module).exists() {
+                std_found += 1;
+            } else {
+                std_missing.push(*module);
+            }
+        }
+    } else {
+        std_missing = std_modules.to_vec();
+    }
+
     if std_missing.is_empty() {
-        println!("  ✅ std library: {}/{} modules found", std_found, std_paths.len());
+        let location = std_base_dir.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "?".to_string());
+        println!("  ✅ std library: {}/{} modules found ({})", std_found, std_modules.len(), location);
         ok_count += 1;
     } else {
-        println!("  ⚠️  std library: {}/{} modules found (missing: {})",
-            std_found, std_paths.len(), std_missing.join(", "));
+        let hint = if std_base_dir.is_none() {
+            " (set MUMEI_STD_PATH or place std/ next to mumei binary)"
+        } else { "" };
+        println!("  ⚠️  std library: {}/{} modules found (missing: {}){}",
+            std_found, std_modules.len(), std_missing.join(", "), hint);
         warn_count += 1;
     }
 

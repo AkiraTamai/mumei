@@ -80,143 +80,116 @@ body: n;
 
 ---
 
-## 🚀 Quickstart (macOS)
+## 🚀 Quickstart
 
-### 1) Install dependencies
+### Option A: Download pre-built binary (recommended)
+
+Download from [GitHub Releases](https://github.com/akiratamai/mumei/releases) — no Rust toolchain required.
 
 ```bash
+# Example: macOS aarch64
+curl -LO https://github.com/akiratamai/mumei/releases/latest/download/mumei-aarch64-apple-darwin.tar.gz
+tar xzf mumei-aarch64-apple-darwin.tar.gz
+sudo mv mumei /usr/local/bin/
+sudo mv std /usr/local/share/mumei-std
+export MUMEI_STD_PATH=/usr/local/share/mumei-std
+```
+
+### Option B: Build from source
+
+> **Note**: `cargo build --release` compiles the Mumei compiler itself (written in Rust) into a native binary at `target/release/mumei`. This is a one-time step — after building, you use the `mumei` command to work with `.mm` source files.
+
+```bash
+# 1. Install system dependencies (macOS)
 xcode-select --install
 brew install llvm@18 z3
+
+# 2. Build the mumei compiler (one-time)
+./build_and_run.sh          # sets env vars + cargo build --release
+# Or manually:
+cargo build --release       # → target/release/mumei
+
+# 3. Install globally (optional)
+cargo install --path .      # → ~/.cargo/bin/mumei
+
+# Alternative: auto-install Z3/LLVM without brew
+mumei setup                 # downloads to ~/.mumei/toolchains/
+source ~/.mumei/env         # apply env vars
 ```
 
-### 2) Build & Install
+### 3 steps to start
 
 ```bash
-./build_and_run.sh
-
-# Clean build if needed
-./build_and_run.sh --clean
-
-# Or install globally via cargo
-cargo install --path .
+mumei init my_app           # create project (mumei.toml + .gitignore + src/main.mm)
+cd my_app
+mumei build src/main.mm -o dist/output   # verify + codegen + transpile
 ```
 
-### 3) CLI Commands
+### CLI Commands
 
 ```bash
-# Full pipeline: verify + codegen (LLVM IR) + transpile (Rust/Go/TypeScript)
-mumei build input.mm -o dist/katana
+mumei build input.mm -o dist/katana   # Full pipeline: verify → codegen → transpile
+mumei verify input.mm                 # Z3 verification only (no codegen)
+mumei check input.mm                  # Parse + resolve only (fast, no Z3)
+mumei init my_project                 # Generate project template
+mumei add ./libs/math                 # Add path dependency
+mumei add https://github.com/user/mm  # Add git dependency
+mumei add math_utils                  # Add registry dependency
+mumei publish                         # Publish to local registry
+mumei publish --proof-only            # Publish proof cache only
+mumei setup                           # Download Z3 + LLVM toolchain
+mumei inspect                         # Inspect development environment
+mumei lsp                             # Start LSP server
+```
 
-# Z3 formal verification only (no codegen, no transpile)
-mumei verify input.mm
+### Verify your setup
 
-# Fast syntax check: parse + resolve + monomorphize (no Z3)
-mumei check input.mm
-
-# Generate a new project template
-mumei init my_project
-
-# Add a dependency (local path, git URL, or registry name)
-mumei add ./libs/math
-mumei add https://github.com/user/math-mm
-mumei add math_utils
-
-# Publish to local registry (~/.mumei/packages/)
-mumei publish
-mumei publish --proof-only   # proof cache only, no source
-
-# Download & configure Z3 + LLVM toolchain
-mumei setup
-
-# Inspect development environment
+```bash
+# Check environment
 mumei inspect
 
-# Start LSP server (for editor integration)
-mumei lsp
+# Run the main test suite
+mumei build sword_test.mm -o dist/katana
 
-# Backward compatible (same as `mumei build`)
-mumei input.mm -o dist/katana
+# Run examples
+mumei build examples/call_test.mm -o dist/call_test
+mumei build examples/match_atm.mm -o dist/match_atm
+mumei build examples/match_evaluator.mm -o dist/match_evaluator
+mumei build examples/import_test/main.mm -o dist/import_test
+
+# Standard library tests
+mumei build tests/test_std_import.mm -o dist/test_std
+mumei verify tests/test_forall_ensures.mm
+
+# Negative test (should fail — failure is correct)
+mumei verify tests/negative/forall_ensures_fail.mm || echo "OK (expected)"
+
+# Rust unit tests
+cargo test
 ```
 
-### 4) Development Setup (pre-commit hooks)
+### Development Setup (pre-commit hooks)
 
 ```bash
-# Install pre-commit (Python)
-pip install pre-commit
-
-# Install Git hooks (run once after clone)
-pre-commit install
-
-# Verify hooks work
+pip install pre-commit && pre-commit install
 pre-commit run --all-files
 ```
 
-This enables automatic checks on every `git commit`:
-- **check-yaml**: Validates all YAML files (including `.pre-commit-config.yaml` itself)
-- **end-of-file-fixer**: Ensures files end with a newline
-- **trailing-whitespace**: Removes trailing whitespace
-- **cargo fmt**: Rust code formatting
-- **cargo clippy**: Rust linting (warnings as errors)
-- **cargo test**: Runs all unit tests (parser, verification, etc.)
+Hooks: `check-yaml` · `end-of-file-fixer` · `trailing-whitespace` · `cargo fmt` · `cargo clippy` · `cargo test`
 
-### 5) Run Example Tests
-
-```bash
-# Inter-atom call test (compositional verification)
-mumei build examples/call_test.mm -o dist/call_test
-
-# Multi-file import test
-mumei build examples/import_test/main.mm -o dist/import_test
-
-# Pattern matching: ATM state machine (enum + match + guards)
-mumei build examples/match_atm.mm -o dist/match_atm
-
-# Pattern matching: Safe expression evaluator (zero-division detection)
-mumei build examples/match_evaluator.mm -o dist/match_evaluator
-
-# Standard library import test
-mumei build tests/test_std_import.mm -o dist/test_std
-
-# Verify only (no output files)
-mumei verify sword_test.mm
-
-# Quick syntax check
-mumei check sword_test.mm
-```
-
-### 6) Create a New Project
+### Generated project structure
 
 ```bash
 mumei init my_app
-cd my_app
-mumei build src/main.mm -o dist/output
 ```
 
-Generated structure:
 ```
 my_app/
-├── mumei.toml        # Package manifest
+├── mumei.toml        # Package manifest ([package]/[build]/[proof]/[dependencies])
+├── .gitignore        # Ignores dist/, *.ll, .mumei_build_cache, etc.
+├── dist/             # Build output directory
 └── src/
-    └── main.mm       # Entry point with std import example
-```
-
-### Expected Output
-
-```
-🗡️  Mumei: Forging the blade (Type System 2.0 + Generics enabled)...
-  ✨ Registered Refined Type: 'Nat' (i64)
-  ✨ Registered Refined Type: 'Pos' (f64)
-  🏗️  Registered Struct: 'Point' (fields: x, y)
-  🏗️  Registered Struct: 'Pair' (fields: first, second)
-  🔷 Registered Enum: 'Option' (variants: Some, None)
-  📜 Registered Trait: 'Comparable' (methods: leq, laws: reflexive)
-  🔧 Registered Impl: Comparable for i64
-    ✅ Laws verified for impl Comparable for i64
-  ✨ [1/4] Polishing Syntax: Atom 'sword_sum' identified.
-  ⚖️  [2/4] Verification: Passed. Logic verified with Z3.
-  ⚙️  [3/4] Tempering: Done. Compiled 'sword_sum' to LLVM IR.
-  ...
-🎉 Blade forged successfully with N atoms.
+    └── main.mm       # Entry point with verification examples
 ```
 
 ---
@@ -225,7 +198,7 @@ my_app/
 
 ```
 ├── src/
-│   ├── main.rs            # CLI orchestrator (build/verify/check/init/add/publish/setup/doctor/lsp)
+│   ├── main.rs            # CLI orchestrator (build/verify/check/init/add/publish/setup/inspect/lsp)
 │   ├── parser.rs          # AST, tokenizer, parser
 │   ├── ast.rs             # TypeRef, Monomorphizer
 │   ├── resolver.rs        # Import resolution, dependency resolution, circular detection

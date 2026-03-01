@@ -177,14 +177,8 @@ fn diagnose(uri: &str, source: &str) -> Vec<serde_json::Value> {
         return diagnostics;
     }
 
-    // Phase 2: Z3 で検証して diagnostics に反映（重いので最小限）
-    // - ローカルの LSP 
-
-
-    // ここではファイル I/O を避けるため、URI が file:// の場合のみパス化して実行する
+    // Phase 2: Z3 検証 diagnostics（file:// URI の場合のみ実行）
     if let Some(path) = uri_to_path(uri) {
-        // 一時ファイルとして検証（既存の verify パイプラインを活用）
-        // 失敗時のメッセージを 1 件の diagnostic として表示
         if let Err(msg) = verify_source_for_lsp(&path, source) {
             diagnostics.push(serde_json::json!({
                 "range": {
@@ -202,30 +196,55 @@ fn diagnose(uri: &str, source: &str) -> Vec<serde_json::Value> {
 }
 
 fn uri_to_path(uri: &str) -> Option<std::path::PathBuf> {
-    // 超簡易: file:///... のみ対応
     if let Some(rest) = uri.strip_prefix("file://") {
-        // Windows drive letter などは今は未対応
         Some(std::path::PathBuf::from(rest))
     } else {
         None
     }
 }
 
-fn verify_source_for_lsp(_path: &std::path::Path, source: &str) -> Result<(), String> {
-    // LSP 
+/// ソースコードを in-process でパース → Z3 検証し、最初のエラーを返す。
+fn verify_source_for_lsp(path: &std::path::Path, source: &str) -> Result<(), String> {
+    use crate::verification;
 
+    let items = crate::parser::parse_module(source);
+    if items.is_empty() {
+        return Ok(());
+    }
 
-    // NOTE: 現状は「source 
+    let mut module_env = verification::ModuleEnv::new();
+    verification::register_builtin_traits(&mut module_env);
 
+    let base_dir = path.parent().unwrap_or(std::path::Path::new("."));
+    let _ = crate::resolver::resolve_prelude(base_dir, &mut module_env);
+    let _ = crate::resolver::resolve_imports(&items, base_dir, &mut module_env);
 
-    // ここでは parser 
+    for item in &items {
+        match item {
+            crate::parser::Item::TypeDef(t) => module_env.register_type(t),
+            crate::parser::Item::StructDef(s) => module_env.register_struct(s),
+            crate::parser::Item::EnumDef(e) => module_env.register_enum(e),
+            crate::parser::Item::Atom(a) => module_env.register_atom(a),
+            crate::parser::Item::TraitDef(t) => module_env.register_trait(t),
+            crate::parser::Item::ImplDef(i) => module_env.register_impl(i),
+            crate::parser::Item::ResourceDef(r) => module_env.register_resource(r),
+            crate::parser::Item::Import(_) => {}
+        }
+    }
 
+    let output_dir = std::path::Path::new(".");
+    for item in &items {
+        if let crate::parser::Item::Atom(atom) = item {
+            if module_env.is_verified(&atom.name) {
+                continue;
+            }
+            if let Err(e) = verification::verify_with_config(atom, output_dir, &module_env, 5000, 3) {
+                return Err(format!("atom '{}': {}", atom.name, e));
+            }
+            module_env.mark_verified(&atom.name);
+        }
+    }
 
-    // 将来的には AST から位置情報を持つ diagnostic にする
-    let _items = crate::parser::parse_module(source);
-
-    // 今は最小実装: verify 相当はまだ重いのでスキップ
-    // TODO: 将来、manifest の timeout/max_unroll を反映して verify_with_config を呼ぶ
     Ok(())
 }
 

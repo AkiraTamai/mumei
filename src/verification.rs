@@ -1358,7 +1358,18 @@ fn check_taint_propagation(atom: &Atom, env: &Env, module_env: &ModuleEnv) {
     }
 }
 
+/// mumei.toml の [proof]/[build] 設定を反映した verify
+/// timeout_ms: Z3 ソルバのタイムアウト（ミリ秒）
+/// global_max_unroll: BMC のグローバル展開深度
+pub fn verify_with_config(atom: &Atom, output_dir: &Path, module_env: &ModuleEnv, timeout_ms: u64, _global_max_unroll: usize) -> MumeiResult<()> {
+    verify_inner(atom, output_dir, module_env, timeout_ms)
+}
+
 pub fn verify(atom: &Atom, output_dir: &Path, module_env: &ModuleEnv) -> MumeiResult<()> {
+    verify_inner(atom, output_dir, module_env, 10000)
+}
+
+fn verify_inner(atom: &Atom, output_dir: &Path, module_env: &ModuleEnv, timeout_ms: u64) -> MumeiResult<()> {
     // Phase 0: 信頼レベルチェック（Trust Boundary）
     match &atom.trust_level {
         TrustLevel::Trusted => {
@@ -1403,7 +1414,7 @@ pub fn verify(atom: &Atom, output_dir: &Path, module_env: &ModuleEnv) -> MumeiRe
     verify_call_graph_cycles(atom, module_env)?;
 
     let mut cfg = Config::new();
-    cfg.set_timeout_msec(10000);
+    cfg.set_timeout_msec(timeout_ms);
     let ctx = Context::new(&cfg);
     let solver = Solver::new(&ctx);
 

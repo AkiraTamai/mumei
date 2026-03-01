@@ -80,125 +80,116 @@ body: n;
 
 ---
 
-## 🚀 Quickstart (macOS)
+## 🚀 Quickstart
 
-### 1) Install dependencies
+### Option A: Download pre-built binary (recommended)
+
+Download from [GitHub Releases](https://github.com/akiratamai/mumei/releases) — no Rust toolchain required.
 
 ```bash
+# Example: macOS aarch64
+curl -LO https://github.com/akiratamai/mumei/releases/latest/download/mumei-aarch64-apple-darwin.tar.gz
+tar xzf mumei-aarch64-apple-darwin.tar.gz
+sudo mv mumei /usr/local/bin/
+sudo mv std /usr/local/share/mumei-std
+export MUMEI_STD_PATH=/usr/local/share/mumei-std
+```
+
+### Option B: Build from source
+
+> **Note**: `cargo build --release` compiles the Mumei compiler itself (written in Rust) into a native binary at `target/release/mumei`. This is a one-time step — after building, you use the `mumei` command to work with `.mm` source files.
+
+```bash
+# 1. Install system dependencies (macOS)
 xcode-select --install
 brew install llvm@18 z3
+
+# 2. Build the mumei compiler (one-time)
+./build_and_run.sh          # sets env vars + cargo build --release
+# Or manually:
+cargo build --release       # → target/release/mumei
+
+# 3. Install globally (optional)
+cargo install --path .      # → ~/.cargo/bin/mumei
+
+# Alternative: auto-install Z3/LLVM without brew
+mumei setup                 # downloads to ~/.mumei/toolchains/
+source ~/.mumei/env         # apply env vars
 ```
 
-### 2) Build & Install
+### 3 steps to start
 
 ```bash
-./build_and_run.sh
-
-# Clean build if needed
-./build_and_run.sh --clean
-
-# Or install globally via cargo
-cargo install --path .
+mumei init my_app           # create project (mumei.toml + .gitignore + src/main.mm)
+cd my_app
+mumei build src/main.mm -o dist/output   # verify + codegen + transpile
 ```
 
-### 3) CLI Commands
+### CLI Commands
 
 ```bash
-# Full pipeline: verify + codegen (LLVM IR) + transpile (Rust/Go/TypeScript)
-mumei build input.mm -o dist/katana
-
-# Z3 formal verification only (no codegen, no transpile)
-mumei verify input.mm
-
-# Fast syntax check: parse + resolve + monomorphize (no Z3)
-mumei check input.mm
-
-# Generate a new project template
-mumei init my_project
-
-# Backward compatible (same as `mumei build`)
-mumei input.mm -o dist/katana
+mumei build input.mm -o dist/katana   # Full pipeline: verify → codegen → transpile
+mumei verify input.mm                 # Z3 verification only (no codegen)
+mumei check input.mm                  # Parse + resolve only (fast, no Z3)
+mumei init my_project                 # Generate project template
+mumei add ./libs/math                 # Add path dependency
+mumei add https://github.com/user/mm  # Add git dependency
+mumei add math_utils                  # Add registry dependency
+mumei publish                         # Publish to local registry
+mumei publish --proof-only            # Publish proof cache only
+mumei setup                           # Download Z3 + LLVM toolchain
+mumei inspect                         # Inspect development environment
+mumei lsp                             # Start LSP server
 ```
 
-### 4) Development Setup (pre-commit hooks)
+### Verify your setup
 
 ```bash
-# Install pre-commit (Python)
-pip install pre-commit
+# Check environment
+mumei inspect
 
-# Install Git hooks (run once after clone)
-pre-commit install
+# Run the main test suite
+mumei build sword_test.mm -o dist/katana
 
-# Verify hooks work
+# Run examples
+mumei build examples/call_test.mm -o dist/call_test
+mumei build examples/match_atm.mm -o dist/match_atm
+mumei build examples/match_evaluator.mm -o dist/match_evaluator
+mumei build examples/import_test/main.mm -o dist/import_test
+
+# Standard library tests
+mumei build tests/test_std_import.mm -o dist/test_std
+mumei verify tests/test_forall_ensures.mm
+
+# Negative test (should fail — failure is correct)
+mumei verify tests/negative/forall_ensures_fail.mm || echo "OK (expected)"
+
+# Rust unit tests
+cargo test
+```
+
+### Development Setup (pre-commit hooks)
+
+```bash
+pip install pre-commit && pre-commit install
 pre-commit run --all-files
 ```
 
-This enables automatic checks on every `git commit`:
-- **check-yaml**: Validates all YAML files (including `.pre-commit-config.yaml` itself)
-- **end-of-file-fixer**: Ensures files end with a newline
-- **trailing-whitespace**: Removes trailing whitespace
-- **cargo fmt**: Rust code formatting
-- **cargo clippy**: Rust linting (warnings as errors)
-- **cargo test**: Runs all unit tests (parser, verification, etc.)
+Hooks: `check-yaml` · `end-of-file-fixer` · `trailing-whitespace` · `cargo fmt` · `cargo clippy` · `cargo test`
 
-### 5) Run Example Tests
-
-```bash
-# Inter-atom call test (compositional verification)
-mumei build examples/call_test.mm -o dist/call_test
-
-# Multi-file import test
-mumei build examples/import_test/main.mm -o dist/import_test
-
-# Pattern matching: ATM state machine (enum + match + guards)
-mumei build examples/match_atm.mm -o dist/match_atm
-
-# Pattern matching: Safe expression evaluator (zero-division detection)
-mumei build examples/match_evaluator.mm -o dist/match_evaluator
-
-# Standard library import test
-mumei build tests/test_std_import.mm -o dist/test_std
-
-# Verify only (no output files)
-mumei verify sword_test.mm
-
-# Quick syntax check
-mumei check sword_test.mm
-```
-
-### 6) Create a New Project
+### Generated project structure
 
 ```bash
 mumei init my_app
-cd my_app
-mumei build src/main.mm -o dist/output
 ```
 
-Generated structure:
 ```
 my_app/
-├── mumei.toml        # Package manifest
+├── mumei.toml        # Package manifest ([package]/[build]/[proof]/[dependencies])
+├── .gitignore        # Ignores dist/, *.ll, .mumei_build_cache, etc.
+├── dist/             # Build output directory
 └── src/
-    └── main.mm       # Entry point with std import example
-```
-
-### Expected Output
-
-```
-🗡️  Mumei: Forging the blade (Type System 2.0 + Generics enabled)...
-  ✨ Registered Refined Type: 'Nat' (i64)
-  ✨ Registered Refined Type: 'Pos' (f64)
-  🏗️  Registered Struct: 'Point' (fields: x, y)
-  🏗️  Registered Struct: 'Pair' (fields: first, second)
-  🔷 Registered Enum: 'Option' (variants: Some, None)
-  📜 Registered Trait: 'Comparable' (methods: leq, laws: reflexive)
-  🔧 Registered Impl: Comparable for i64
-    ✅ Laws verified for impl Comparable for i64
-  ✨ [1/4] Polishing Syntax: Atom 'sword_sum' identified.
-  ⚖️  [2/4] Verification: Passed. Logic verified with Z3.
-  ⚙️  [3/4] Tempering: Done. Compiled 'sword_sum' to LLVM IR.
-  ...
-🎉 Blade forged successfully with N atoms.
+    └── main.mm       # Entry point with verification examples
 ```
 
 ---
@@ -207,13 +198,17 @@ my_app/
 
 ```
 ├── src/
+│   ├── main.rs            # CLI orchestrator (build/verify/check/init/add/publish/setup/inspect/lsp)
 │   ├── parser.rs          # AST, tokenizer, parser
 │   ├── ast.rs             # TypeRef, Monomorphizer
-│   ├── resolver.rs        # Import resolution, circular detection
+│   ├── resolver.rs        # Import resolution, dependency resolution, circular detection
 │   ├── verification.rs    # Z3 verification, ModuleEnv, forall/exists
 │   ├── codegen.rs         # LLVM IR generation
 │   ├── transpiler/        # Rust + Go + TypeScript transpilers
-│   └── main.rs            # CLI orchestrator
+│   ├── manifest.rs        # mumei.toml parsing ([package]/[build]/[dependencies]/[proof])
+│   ├── registry.rs        # Local package registry (~/.mumei/registry.json)
+│   ├── setup.rs           # Toolchain installer (Z3 + LLVM download)
+│   └── lsp.rs             # Language Server Protocol (hover, diagnostics)
 ├── std/
 │   ├── prelude.mm         # Auto-imported: traits, ADTs, interfaces
 │   ├── alloc.mm           # Vector<T>, HashMap<K,V>, ownership
@@ -223,16 +218,25 @@ my_app/
 │   ├── list.mm            # List + immutable ops + sort + fold
 │   └── container/
 │       └── bounded_array.mm  # BoundedArray + sorted operations
+├── editors/
+│   └── vscode/            # VS Code extension (LSP client)
+│       ├── package.json
+│       ├── src/extension.ts
+│       └── language-configuration.json
+├── .github/
+│   └── workflows/
+│       └── release.yml    # Cross-platform binary release (macOS/Linux)
 ├── examples/              # call_test, match_atm, match_evaluator, import_test
 ├── tests/
 │   ├── test_std_import.mm
 │   ├── test_forall_ensures.mm
 │   └── negative/          # 9 negative test files
 ├── docs/
-│   ├── LANGUAGE.md        # Language reference (types, traits, modules, ownership)
+│   ├── LANGUAGE.md        # Language reference
 │   ├── STDLIB.md          # Standard library reference
 │   ├── EXAMPLES.md        # Examples & test suite reference
 │   ├── ARCHITECTURE.md    # Compiler internals
+│   ├── TOOLCHAIN.md       # Toolchain & package management
 │   └── CHANGELOG.md       # Change history
 ├── build_and_run.sh       # Build + test runner
 └── Cargo.toml
@@ -319,12 +323,18 @@ my_app/
 - [x] **Pre-commit hooks**: `check-yaml` + `cargo fmt` + `cargo clippy` + `cargo test` via `.pre-commit-config.yaml`
 - [x] **Verified standard library (enhanced)**: Option/Result map/andThen/filter, List immutable ops + fold, sort algorithms, BoundedArray
 - [x] **`forall`/`exists` in ensures**: Quantifiers in postconditions via `expr_to_z3` Call handler
-- [x] **`mumei doctor`**: Environment check command (Z3, LLVM, Rust, Go, Node.js, std library)
+- [x] **`mumei inspect`**: Environment inspection command (Z3, LLVM, Rust, Go, Node.js, std library)
+- [x] **`mumei.toml` parsing**: `manifest.rs` reads `[package]`, `[build]`, `[dependencies]`, `[proof]` — `cmd_build` auto-applies `targets`, `verify`, `max_unroll`, `timeout_ms`, `cache`
+- [x] **Dependency resolution**: `mumei add` writes path/git deps to `mumei.toml`; `resolver::resolve_manifest_dependencies()` auto-fetches path deps and `git clone`s git deps to `~/.mumei/packages/`
+- [x] **Toolchain setup (`mumei setup`)**: Downloads Z3 + LLVM pre-built binaries to `~/.mumei/toolchains/`, generates `~/.mumei/env` script
+- [x] **LSP server (`mumei lsp`)**: JSON-RPC stdio server with `textDocument/hover` (atom contract display), `publishDiagnostics` (parse errors + Z3 verification errors)
+- [x] **VS Code Extension**: `editors/vscode/` — LSP client package, language configuration for `.mm` files
+- [x] **GitHub Actions Release**: `.github/workflows/release.yml` — cross-platform binary builds (macOS x86_64/aarch64, Linux x86_64) with std library bundled
 - [ ] Higher-order functions: `atom_ref` → `call_with_contract` → lambda (Phase A/B/C)
-- [ ] `mumei.toml` parsing: Read `[package]`, `[build]`, `[dependencies]` sections
-- [ ] Toolchain bundler (`mmx setup`): Auto-install Z3/LLVM
-- [ ] Package registry: `mmx publish` / `mmx add` with proof caching
-- [ ] Editor integration (LSP / VS Code Extension)
+- [x] **`mumei publish`**: Local registry (`~/.mumei/packages/`) publishing with proof caching — `mumei publish` verifies all atoms, copies to `~/.mumei/packages/<name>/<version>/`, registers in `~/.mumei/registry.json`; `--proof-only` flag for cache-only publish
+- [x] **Registry-based dependency resolution**: `math = "0.1.0"` in `mumei.toml` resolves via `~/.mumei/registry.json` → `~/.mumei/packages/` (priority: path → registry → git)
+- [ ] Remote package registry: Central registry for `mumei add <name>` without git URL
+- [ ] VS Code Marketplace publishing: Package and publish `editors/vscode/` as installable extension
+- [ ] LSP enhancements: `textDocument/completion` (keyword/atom name), `textDocument/definition` (jump to definition), counter-example highlighting
 
 > 📖 **Toolchain roadmap**: [`docs/TOOLCHAIN.md`](docs/TOOLCHAIN.md)
-
